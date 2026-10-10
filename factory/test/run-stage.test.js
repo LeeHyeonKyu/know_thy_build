@@ -6572,3 +6572,317 @@ test("test_200_scope_check_fails_open_visibly_on_git_read_error", async () => {
     expect(r.ok, name).toBe(false);
   }
 });
+
+// ── #207 — 워크플로의 fail-closed 반환(디스패처 전달 고장)은 산출물 결함이 아니라 판정 불가다 ─────────────────────────────
+// 2026-10-03 #195 rework 라운드 2(run 37140542370): 디스패처가 6,604바이트 args를 JSON 문자열로 넘기다 잘랐고, 워크플로는
+// `{"issue":0,"error":"context payload missing",…}`을 돌려줬으며, 스테이지는 그것을 needs-human("stage artifact missing or invalid")으로
+// 세웠다. 픽스처는 실제 생산자다: fail-closed 반환은 진짜 워크플로 템플릿을 runWorkflow로 돌려 얻고, 검증은 진짜 verifyStage,
+// 전이는 진짜 transition(), 에스컬레이션은 진짜 sweep(), 기록은 진짜 appendRunRecord와 lifetimeCostOf다.
+import { runWorkflow as runWorkflow207 } from "./helpers/run-workflow.js";
+import { dispatcherPayloadErrorOf, makeBuildContextDep } from "../bin/run-stage.js";
+import { sweep as sweep207, engineCausedNeedsHuman as engineCausedNeedsHuman207, BLOCKED_ESCALATION_REASON as ESCALATION207 } from "../lib/sweeper.js";
+import { blockedOrigin as blockedOrigin207 } from "../lib/retro/issue-comments.js";
+import { lifetimeCostOf as lifetimeCostOf207 } from "../lib/budget.js";
+import { buildContext as buildContext207 } from "../lib/context.js";
+
+const WF207 = (name) => new URL(`../../templates/factory/claude/workflows/factory-${name}.js`, import.meta.url).pathname;
+/** run 37140542370의 모양: args 전체가 JSON 문자열로 오다 잘렸다(닫는 괄호 누락) → issue 0, context payload missing. */
+async function truncatedArgsReturn207(name = "implement") {
+  const args = JSON.stringify({ raw: "207", loaded: { issue: 207, must_fix: [{ id: "cf1", claim: "x".repeat(4000) }] } });
+  return (await runWorkflow207(WF207(name), { agent: async () => null, args: args.slice(0, Math.floor(args.length * 0.9)) })).result;
+}
+/** 디스패처가 다른 이슈의 payload를 넘겼다 → context issue mismatch. */
+async function mismatchReturn207(name = "review") {
+  return (await runWorkflow207(WF207(name), { agent: async () => null, args: { issue: 42, loaded: { issue: 7 } } })).result;
+}
+const fenced207 = (o) => "Workflow finished.\n```json\n" + JSON.stringify(o, null, 2) + "\n```";
+const RED207 = { schema: "factory.gates.v1", level: "full", status: "RED", failing: ["unit"], passed: 3, failed: 1, skipped: [], misconfigured: [], gates: { unit: { status: "RED", failing_ids: ["t::x"] } }, tests: { failing: [{ id: "t::x" }], excluded: [] }, head_sha: "a".repeat(40) };
+const ctx207 = { roster: [], orchestration: "workflow", limits: { K: 3 }, tier: "standard", loaded_json: { path: ".factory/out/loaded.json", bytes: 6604, limit: 4096, truncated_to: 100, over: true } };
+
+test("test_207_workflow_payload_error_is_undecidable_not_needs_human", async () => {
+  const missing = await truncatedArgsReturn207("implement");
+  expect(missing).toEqual({ issue: 0, error: "context payload missing", orchestration: "workflow", guarantee: "structural" });   // 사건의 반환 그대로
+  const mismatch = await mismatchReturn207("review");
+  expect(mismatch.error).toMatch(/^context issue mismatch/);
+
+  // implement + 게이트 RED: selfGateRetry도 planned 재시도도 없이 blocked/undecidable, 사유에 에러와 loaded.json 바이트 수.
+  const lines = [];
+  const selfGateRetry = vi.fn(async () => ({ attempt: 1, total: 0 }));
+  const d = implDeps({ buildContext: async () => ctx207, claudeP: async () => ({ is_error: false, result: fenced207(missing) }), gates: async () => RED207, selfGateRetry, runRecord: (l) => lines.push(...l) });
+  expect(await runStage({ stage: "implement", issue: 207, deps: d, runnerId: "r" })).toBe(2);
+  expect(selfGateRetry).not.toHaveBeenCalled();
+  const last = d.transition.mock.calls.at(-1)[0];
+  expect(last.to).toBe("factory:blocked");
+  expect(last.cause).toBe("undecidable");
+  expect(last.reason.startsWith("dispatcher payload: context payload missing")).toBe(true);
+  expect(last.reason).toContain("loaded.json 6604 bytes");
+  expect(last.reason).not.toMatch(/args len/);                                            // 엔진이 보지 못하는 수를 말하지 않는다
+  expect(lines.some((l) => /^engine-crash:/.test(l))).toBe(false);                        // 두 번째 engine-crash 생산자가 아니다
+  expect(d.transition).not.toHaveBeenCalledWith(expect.objectContaining({ to: "factory:needs-human" }));
+  expect(d.transition).not.toHaveBeenCalledWith(expect.objectContaining({ to: "factory:planned" }));
+
+  // 게이트가 어떤 상태든 같은 자리다: 빌더가 돌지 않은 브랜치 head를 잰 게이트는 BLOCKED이거나, 실패 테스트 없는 RED(`reason`)이거나,
+  // merge-base를 못 구해 던질 수 있다 — 그 어느 쪽도 이 런의 원인이 아니다. 원인 없는 blocked·`gates-unhandled`로 라벨되지 않는다.
+  const gateStates = [
+    ["GREEN", async () => ({ ...RED207, status: "GREEN", failing: [], failed: 0, gates: { unit: { status: "GREEN" } }, tests: { failing: [], excluded: [] } })],
+    ["BLOCKED", async () => ({ schema: "factory.gates.v1", status: "BLOCKED", blocked_reason: "test env did not come up", head_sha: "a".repeat(40) })],
+    ["RED with reason", async () => ({ ...RED207, gates: { unit: { status: "RED", reason: "RED with no failing test: worker stderr EPIPE" } } })],
+    ["merge-base throws", async () => { throw new MergeBaseError("origin/main: exit 128"); }],
+  ];
+  for (const [name, gates] of gateStates) {
+    const gl = [];
+    const gd = implDeps({ buildContext: async () => ctx207, claudeP: async () => ({ is_error: false, result: fenced207(missing) }), gates, selfGateRetry, runRecord: (l) => gl.push(...l) });
+    expect(await runStage({ stage: "implement", issue: 207, deps: gd, runnerId: "r" }), name).toBe(2);
+    expect(gd.transition.mock.calls.map(([t]) => t.to), name).not.toContain("factory:needs-human");
+    const t = gd.transition.mock.calls.at(-1)[0];
+    expect([t.to, t.cause], name).toEqual(["factory:blocked", "undecidable"]);
+    expect(t.reason, name).toBe("dispatcher payload: context payload missing (loaded.json 6604 bytes)");
+    expect(gl.some((l) => /not an agent artifact defect/.test(l)), name).toBe(true);
+  }
+  expect(selfGateRetry).not.toHaveBeenCalled();
+
+  // review + context issue mismatch: 같은 자리.
+  const rv = baseDeps({ buildContext: async () => ctx207, claudeP: async () => ({ is_error: false, result: fenced207(mismatch) }), verifyStage: ({ stage, out, gates }) => verifyStage({ stage, out, roster: [], orchestration: "workflow", gates }), transition: vi.fn(async ({ to }) => ({ ok: true, to })), gates: async () => null });
+  expect(await runStage({ stage: "review", issue: 42, deps: rv })).toBe(2);
+  expect(rv.transition).toHaveBeenCalledWith(expect.objectContaining({ to: "factory:blocked", cause: "undecidable", reason: expect.stringMatching(/^dispatcher payload: context issue mismatch: .*\(loaded\.json 6604 bytes\)$/) }));
+  expect(rv.transition).not.toHaveBeenCalledWith(expect.objectContaining({ to: "factory:needs-human" }));
+
+  // plan: 리페어 턴을 띄우지 않는다(claudeP 한 번).
+  const plan = await truncatedArgsReturn207("plan");
+  const claudeP = vi.fn(async () => ({ is_error: false, result: fenced207(plan) }));
+  const pd = baseDeps({ buildContext: async () => ctx207, claudeP, verifyStage: ({ stage, out }) => verifyStage({ stage, out, roster: [], orchestration: "workflow" }), transition: vi.fn(async ({ to }) => ({ ok: true, to })) });
+  expect(await runStage({ stage: "plan", issue: 207, deps: pd })).toBe(2);
+  expect(claudeP).toHaveBeenCalledTimes(1);
+  expect(pd.transition).toHaveBeenCalledWith(expect.objectContaining({ to: "factory:blocked", cause: "undecidable" }));
+
+  // 워크플로 반환이 도착하는 실제 자리(트랜스크립트의 task-notification)에서도 읽는다 — 디스패처의 마지막 말이 산문이어도.
+  const note = JSON.stringify({ type: "user", message: { content: [{ type: "text", text: `<task-notification><status>completed</status><result>${JSON.stringify(missing)}</result></task-notification>` }] } });
+  expect(dispatcherPayloadErrorOf({ out: { is_error: false, result: "The workflow returned an error." }, transcriptText: note })).toBe("context payload missing");
+  expect(dispatcherPayloadErrorOf({ out: { is_error: false, result: "The workflow returned an error." }, transcriptText: "" })).toBeNull();
+
+  // rework cf1/spec2 — 실제 디스패처는 **먼저 loaded.json을 Read한다**(factory-*.md step 1). 그 내용은 진짜 생산자(buildContext)가
+  // 디스크에 쓴 그대로다: `issue` 키와 `orchestration: "workflow"`를 가졌지만 워크플로 반환이 아니다 — 그것이 fail-closed 반환을 가려선 안 된다.
+  const lr = mkdtempSync(join(tmpdir(), "rs207-"));
+  mkdirSync(join(lr, ".factory"), { recursive: true }); mkdirSync(join(lr, "docs/factory"), { recursive: true });
+  writeFileSync(join(lr, ".factory/harness.toml"), `schema = 1\n[harness]\nmaturity = "M0"\n[factory]\norchestration = "workflow"\n[commands]\nunit = "npm test"\n[gates]\nrequired = ["unit"]\nfast = ["unit"]\nfull = ["unit"]\ndeep = ["unit"]\n`);
+  writeFileSync(join(lr, "docs/factory/CHARTER.md"), `---\nschema: factory.charter.v1\nstatus: ready\ntier_default: standard\nroster:\n  docs: [correctness]\n  standard: [correctness, qa, spec-conformance]\nplan_roles:\n  docs: [architect, skeptic]\n  default: [architect, skeptic, operator]\nplan_rounds: { docs: 2, default: 3 }\n---\n`);
+  writeFileSync(join(lr, ".factory/roles.toml"), `[triage]\nagent = "t.md"\nmodel = "sonnet"\n[implement.builder]\nagent = "b.md"\nmodel = "opus"\n[implement.verifier]\nagent = "v.md"\nmodel = "opus"\ncold_read = true\n`);
+  await buildContext207({ root: lr, gh: { issue: async () => ({ number: 207, title: "T", body: "", labels: ["factory:in-progress"] }), comments: async () => [] }, issue: 207, stage: "implement" });
+  const loadedText = readFileSync(join(lr, ".factory/out/loaded.json"), "utf8");
+  expect(JSON.parse(loadedText)).toMatchObject({ issue: 207, orchestration: "workflow" });    // 가리는 쪽의 모양이 정말 그렇다
+  const numbered = loadedText.split("\n").map((l, i) => `${String(i + 1).padStart(6)}\t${l}`).join("\n");
+  const readLoaded = [
+    JSON.stringify({ type: "assistant", message: { content: [{ type: "tool_use", name: "Read", id: "r1", input: { file_path: `${lr}/.factory/out/loaded.json` } }] } }),
+    JSON.stringify({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: "r1", content: numbered }] } }),
+  ];
+  const wfReturn = [
+    JSON.stringify({ type: "assistant", message: { content: [{ type: "tool_use", name: "Workflow", id: "w1", input: {} }] } }),
+    JSON.stringify({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: "w1", content: JSON.stringify(missing) }] } }),
+  ];
+  const prose = { is_error: false, result: "The workflow returned an error." };
+  // (a) 전경 Workflow tool_result — 마지막 말은 산문.
+  expect(dispatcherPayloadErrorOf({ out: prose, transcriptText: [...readLoaded, ...wfReturn].join("\n") })).toBe("context payload missing");
+  // (b) 디스패처의 마지막 말(완료 알림 없음).
+  expect(dispatcherPayloadErrorOf({ out: { is_error: false, result: fenced207(missing) }, transcriptText: readLoaded.join("\n") })).toBe("context payload missing");
+  // (c) 완료 알림 — 예전에도 되던 자리, 계속 된다.
+  expect(dispatcherPayloadErrorOf({ out: prose, transcriptText: [...readLoaded, note].join("\n") })).toBe("context payload missing");
+  // 그리고 loaded.json Read만 있으면(워크플로 반환이 없으면) 여전히 답이 없다.
+  expect(dispatcherPayloadErrorOf({ out: prose, transcriptText: readLoaded.join("\n") })).toBeNull();
+  // runStage 끝까지: 진짜 트랜스크립트 모양(Read → 전경 Workflow 반환)에서 needs-human이 아니라 blocked/undecidable.
+  const fg = implDeps({ buildContext: async () => ctx207, claudeP: async () => prose, gates: async () => RED207, selfGateRetry, dispatcherPayloadError: (out) => dispatcherPayloadErrorOf({ out, transcriptText: [...readLoaded, ...wfReturn].join("\n") }) });
+  expect(await runStage({ stage: "implement", issue: 207, deps: fg, runnerId: "r" })).toBe(2);
+  expect(fg.transition).not.toHaveBeenCalledWith(expect.objectContaining({ to: "factory:needs-human" }));
+  expect(fg.transition.mock.calls.at(-1)[0]).toMatchObject({ to: "factory:blocked", cause: "undecidable", reason: "dispatcher payload: context payload missing (loaded.json 6604 bytes)" });
+  // 사유의 바이트 수는 **측정값**이다: 진짜 buildContext(makeBuildContextDep 배선)가 이 런에 쓴 loaded.json의 디스크 위 크기와 같다.
+  const measured = implDeps({
+    buildContext: makeBuildContextDep({ root: lr, gh: { issue: async () => ({ number: 207, title: "T", body: "", labels: ["factory:in-progress"] }), comments: async () => [] }, issue: 207, stage: "implement", run: null, mergeBase: async () => null, recordLine: () => {} }),
+    claudeP: async () => ({ is_error: false, result: fenced207(missing) }), gates: async () => RED207, selfGateRetry,
+  });
+  expect(await runStage({ stage: "implement", issue: 207, deps: measured, runnerId: "r" })).toBe(2);
+  expect(measured.transition.mock.calls.at(-1)[0]).toMatchObject({ to: "factory:blocked", cause: "undecidable", reason: `dispatcher payload: context payload missing (loaded.json ${statSync(join(lr, ".factory/out/loaded.json")).size} bytes)` });
+
+  // 에스컬레이션 뒤에도 엔진 원인이다: 진짜 transition()으로 in-progress → blocked, 진짜 sweep()이 한 번 재시도하고 같은 자리에서
+  // 또 멈추면 사람에게 올린다 — 그 needs-human을 engineCausedNeedsHuman이 엔진 원인으로 읽는다.
+  const gh = realTransitionGh();
+  const ctxCache = { roster: [], orchestration: "workflow", limits: { K: 3 }, handoffs: { plan: planHandoff } };
+  const real = implDeps({ buildContext: async () => ctx207, claudeP: async () => ({ is_error: false, result: fenced207(missing) }), gates: async () => RED207, selfGateRetry, transition: realTransitionDep(gh, ctxCache) });
+  await runStage({ stage: "implement", issue: 42, deps: real, runnerId: "r" });
+  expect(gh.label).toBe("factory:blocked");
+  expect(blockedOrigin207(await gh.comments())).toMatchObject({ from: "factory:in-progress", stage: "implement", cause: "undecidable" });
+  const dispatchStage = vi.fn(async () => {});
+  const sweepOnce = () => sweep207({
+    gh: { ...gh, searchIssues: async (label) => (gh.label === label ? [{ number: 42 }] : []), issueList: async () => [], patchComment: async () => {} },
+    charter: { limits: { K: 3, M: 3, R: 2 }, back_pressure: { awaiting_review_max: 2 } }, thresholds: { quarantine_max: 5, quarantine_ttl_days: 28, quarantine_return_after: 30 },
+    now: new Date().toISOString(), staleMinutes: 30, release: vi.fn(), quarantine: { quarantined: [] }, saveQuarantine: () => {},
+    transition: (args) => transition({ gh, env: {}, skipRehearsal: true, ...args }), dispatchStage,
+    factoryLogins: async () => ({ ok: true, logins: [] }), installedVersion: async () => "1.4.60",
+  });
+  await sweepOnce();                                                                       // 한 번 다시 민다
+  expect(gh.label).toBe("factory:blocked");                                                // 재시도는 라벨이 아니라 dispatch다
+  expect(dispatchStage).toHaveBeenCalledTimes(1);
+  // 그 재시도된 런도 진짜 runStage가 돈다(같은 디스패처 고장): blocked에서 origin을 확인하고 되돌아간 뒤 다시 멈춘다 —
+  // 두 번째 blocked 마커와 사유는 테스트가 손으로 쓴 것이 아니라 이 브랜치가 쓴 것이다.
+  const before = (await gh.comments()).length;
+  const again = implDeps({
+    issueLabels: async () => [gh.label], blockedOrigin: async () => blockedOrigin207(await gh.comments()),
+    buildContext: async () => ctx207, claudeP: async () => ({ is_error: false, result: fenced207(missing) }), gates: async () => RED207, selfGateRetry, transition: realTransitionDep(gh, ctxCache),
+  });
+  expect(await runStage({ stage: "implement", issue: 42, deps: again, runnerId: "r" })).toBe(2);
+  expect(gh.label).toBe("factory:blocked");
+  const second = (await gh.comments()).slice(before);
+  expect(blockedOrigin207(second)).toMatchObject({ from: "factory:in-progress", stage: "implement", cause: "undecidable" });
+  expect(second.map((c) => c.body).join("\n")).toContain("dispatcher payload: context payload missing (loaded.json 6604 bytes)");
+  await sweepOnce();                                                                       // 같은 자리 → 사람에게
+  expect(gh.label).toBe("factory:needs-human");
+  const comments = await gh.comments();
+  expect(comments.filter((c) => /to=factory:needs-human/.test(c.body)).at(-1).body).toContain(ESCALATION207.undecidable);
+  expect(engineCausedNeedsHuman207(comments)).not.toBeNull();
+});
+
+test("test_207_ordinary_artifact_defect_stays_needs_human", async () => {
+  const missing = await truncatedArgsReturn207("implement");
+  const viaRealVerify = (result, over = {}) => baseDeps({
+    buildContext: async () => ctx207, claudeP: async () => ({ is_error: false, result }),
+    verifyStage: ({ stage, out, gates }) => verifyStage({ stage, out, roster: [], orchestration: "workflow", gates }),
+    transition: vi.fn(async ({ to }) => ({ ok: true, to })), ...over,
+  });
+  const needsHuman = async (result, over) => {
+    const d = viaRealVerify(result, over);
+    expect(await runStage({ stage: "review", issue: 42, deps: d })).toBe(2);
+    expect(d.transition).toHaveBeenCalledWith(expect.objectContaining({ to: "factory:needs-human", reason: expect.stringMatching(/^stage artifact missing or invalid: /) }));
+    expect(d.transition).not.toHaveBeenCalledWith(expect.objectContaining({ reason: expect.stringContaining("dispatcher payload") }));
+  };
+  await needsHuman(fenced207({ issue: 0, orchestration: "workflow", guarantee: "structural" }));                                  // issue: 0, 에러 문구 없음
+  await needsHuman(fenced207({ issue: 0, error: "reviewer crashed", orchestration: "workflow", guarantee: "structural" }));      // fail-closed 문구가 아닌 에러
+  await needsHuman(fenced207({ error: "context payload missing" }));                                                             // error 키 하나뿐(워크플로의 모양이 아니다)
+  await needsHuman(fenced207({ schema: "factory.review.v1", issue: 42, verdicts: "nope" }));                                     // 보통의 스키마 불일치
+  // fail-closed 문구가 **최상위 `error`가 아닌 자리**에만 있다 — 중첩된 객체, 리뷰 산출물의 자유 텍스트, 디스패처의 산문. 모두 산출물 결함이다.
+  const nestedOrProse = [
+    ["nested error", { issue: 0, orchestration: "workflow", guarantee: "structural", result: { error: "context payload missing" } }],
+    ["nested fail-closed object", { schema: "factory.review.v1", issue: 42, orchestration: "workflow", guarantee: "structural", verdicts: "nope", prior: { issue: 0, error: "context payload missing", orchestration: "workflow", guarantee: "structural" } }],
+    ["free-text field", { schema: "factory.review.v1", issue: 42, orchestration: "workflow", guarantee: "structural", summary: "context payload missing", verdicts: [{ role: "correctness", verdict: "reject", must_fix: [{ id: "cf1", claim: "context payload missing", evidence: "context issue mismatch: 1 vs 2" }] }] }],
+  ];
+  for (const [name, o] of nestedOrProse) {
+    expect(dispatcherPayloadErrorOf({ out: { result: fenced207(o) } }), name).toBeNull();
+    await needsHuman(fenced207(o));
+  }
+  await needsHuman("The workflow said: context payload missing. I could not continue.");                                       // 산문뿐, 산출물 없음
+  expect(dispatcherPayloadErrorOf({ out: { result: fenced207({ error: "context payload missing" }) } })).toBeNull();
+  expect(dispatcherPayloadErrorOf({ out: { result: fenced207({ issue: 0 }) } })).toBeNull();
+  // 네 템플릿의 모양에서 한 군데만 어긋나도 fail-closed가 아니다 — 에러 문구를 흉내 낸 산출물이 needs-human을 빠져나가지 못한다.
+  const near = [
+    ["no guarantee", { issue: 0, error: "context payload missing", orchestration: "workflow" }],
+    ["guarantee verified", { issue: 0, error: "context payload missing", orchestration: "workflow", guarantee: "verified" }],
+    ["string issue", { issue: "207", error: "context payload missing", orchestration: "workflow", guarantee: "structural" }],
+    ["no issue key", { error: "context payload missing", orchestration: "workflow", guarantee: "structural" }],
+    ["no orchestration", { issue: 0, error: "context payload missing", guarantee: "structural" }],
+    ["orchestration subagents", { issue: 0, error: "context payload missing", orchestration: "subagents", guarantee: "structural" }],
+    ["error not exact", { issue: 0, error: "context payload missing!", orchestration: "workflow", guarantee: "structural" }],
+    ["mismatch not a prefix", { issue: 0, error: "the context issue mismatch", orchestration: "workflow", guarantee: "structural" }],
+  ];
+  for (const [name, o] of near) {
+    expect(dispatcherPayloadErrorOf({ out: { result: fenced207(o) } }), name).toBeNull();
+    await needsHuman(fenced207(o));
+  }
+  // 그 대조: 정확한 모양이면 issue가 null(triage/plan/review의 Number(undefined))이어도, mismatch 접두여도 잡힌다.
+  expect(dispatcherPayloadErrorOf({ out: { result: fenced207({ issue: null, error: "context payload missing", orchestration: "workflow", guarantee: "structural" }) } })).toBe("context payload missing");
+  expect(dispatcherPayloadErrorOf({ out: { result: fenced207({ issue: 42, error: "context issue mismatch: args 42 vs loaded 7", orchestration: "workflow", guarantee: "structural" }) } })).toBe("context issue mismatch: args 42 vs loaded 7");
+  // 게이트가 BLOCKED이거나 실패 테스트 없는 RED여도, 보통의 산출물이면 예전 자리 그대로다(원인 없는 blocked / gates-unhandled).
+  const gb = viaRealVerify(fenced207({ issue: 0, orchestration: "workflow", guarantee: "structural" }), { gates: async () => ({ schema: "factory.gates.v1", status: "BLOCKED", blocked_reason: "env down" }) });
+  expect(await runStage({ stage: "review", issue: 42, deps: gb })).toBe(2);
+  expect(gb.transition.mock.calls.at(-1)[0]).toEqual({ to: "factory:blocked", reason: "env down" });
+  const gu = viaRealVerify(fenced207({ issue: 0, orchestration: "workflow", guarantee: "structural" }), { gates: async () => ({ ...RED207, gates: { unit: { status: "RED", reason: "EPIPE" } } }) });
+  expect(await runStage({ stage: "review", issue: 42, deps: gu })).toBe(2);
+  expect(gu.transition.mock.calls.at(-1)[0]).toEqual({ to: "factory:blocked", reason: "EPIPE", cause: "gates-unhandled" });
+  // 턴 한도·API 오류는 게이트가 막힌 자리에서도 먼저다: fail-closed 반환이 트랜스크립트에 있어도 디스패처 사유로 바꿔 달지 않는다.
+  for (const [name, cut] of [
+    ["max turns", { is_error: true, subtype: "error_max_turns", terminal_reason: "max_turns", num_turns: 80, result: fenced207(missing) }],
+    ["api error", { is_error: true, terminal_reason: "api_error", api_error_status: 529, result: `Overloaded\n${fenced207(missing)}` }],
+  ]) {
+    for (const [g, want] of [
+      [{ schema: "factory.gates.v1", status: "BLOCKED", blocked_reason: "env down" }, { to: "factory:blocked", reason: "env down" }],
+      [{ ...RED207, gates: { unit: { status: "RED", reason: "EPIPE" } } }, { to: "factory:blocked", reason: "EPIPE", cause: "gates-unhandled" }],
+    ]) {
+      const dd = viaRealVerify(fenced207(missing), { claudeP: async () => cut, gates: async () => g });
+      expect(await runStage({ stage: "review", issue: 42, deps: dd }), name).toBe(2);
+      expect(dd.transition.mock.calls.at(-1)[0], `${name} / ${g.status}`).toEqual(want);
+    }
+  }
+  // 디스패처가 fail-closed 뒤에 워크플로를 다시 돌려 스키마가 틀린 산출물을 냈다 — 가장 최근 반환이 이긴다: 산출물 결함(needs-human).
+  const notify = (o) => JSON.stringify({ type: "user", message: { content: [{ type: "text", text: `<task-notification><status>completed</status><result>${JSON.stringify(o)}</result></task-notification>` }] } });
+  const retried = [notify(missing), notify({ schema: "factory.implement.v1", issue: 207, orchestration: "workflow", guarantee: "structural", head_sha: "nope" })].join("\n");
+  expect(dispatcherPayloadErrorOf({ out: { result: "done" }, transcriptText: retried })).toBeNull();
+  expect(dispatcherPayloadErrorOf({ out: { result: "done" }, transcriptText: [notify({ schema: "factory.implement.v1", issue: 207, orchestration: "workflow", head_sha: "nope" }), notify(missing)].join("\n") })).toBe("context payload missing");
+
+  // 기존 실패 등급은 제자리: 턴 한도 → blocked "stage did not finish", 비일시적 API 오류 → needs-human, qa 증거 경로 → blocked/undecidable "qa evidence path".
+  const mt = viaRealVerify(fenced207(missing), { claudeP: async () => ({ is_error: true, subtype: "error_max_turns", terminal_reason: "max_turns", num_turns: 80, result: fenced207(missing) }) });
+  expect(await runStage({ stage: "review", issue: 42, deps: mt })).toBe(2);
+  expect(mt.transition).toHaveBeenCalledWith(expect.objectContaining({ to: "factory:blocked", reason: expect.stringMatching(/^stage did not finish: /) }));
+  const api = viaRealVerify("", { claudeP: async () => ({ is_error: true, terminal_reason: "api_error", api_error_status: 401, result: `Invalid API key\n${fenced207(missing)}` }) });
+  expect(await runStage({ stage: "review", issue: 42, deps: api })).toBe(2);
+  expect(api.transition).toHaveBeenCalledWith(expect.objectContaining({ to: "factory:needs-human", reason: expect.stringMatching(/^api error needs human/) }));
+  const qa = viaRealVerify(fenced207(missing), { verifyStage: () => ({ ok: false, reasons: ["qa evidence manifest unusable: missing"], data: null }) });
+  expect(await runStage({ stage: "review", issue: 42, deps: qa })).toBe(2);
+  expect(qa.transition).toHaveBeenCalledWith(expect.objectContaining({ to: "factory:blocked", cause: "undecidable", reason: expect.stringMatching(/^qa evidence path: /) }));
+});
+
+test("test_207_dispatcher_payload_block_adds_no_marker_field_and_no_budget_exclusion", async () => {
+  const missing = await truncatedArgsReturn207("implement");
+  const usage = { input_tokens: 10, output_tokens: 5 };
+  const runOnce = async ({ out }) => {
+    const root = mkdtempSync(join(tmpdir(), "rs207-"));
+    const gh = realTransitionGh();
+    const ctxCache = { roster: [], orchestration: "workflow", limits: { K: 3 }, handoffs: { plan: planHandoff } };
+    const spy = vi.fn(realTransitionDep(gh, ctxCache));
+    const d = implDeps({
+      buildContext: async () => ctx207, claudeP: async () => out, gates: async () => RED207, transition: spy,
+      selfGateRetry: async () => ({ attempt: 1, total: 0 }),
+      runRecord: (lines) => appendRunRecord({ root, issue: 42, stage: "implement", runnerId: "gha-207", lines }),
+    });
+    expect(await runStage({ stage: "implement", issue: 42, deps: d, runnerId: "gha-207", runId: "207" })).toBe(2);
+    return { gh, spy, rec: readFileSync(join(root, "docs/factory/runs/42.md"), "utf8") };
+  };
+  const payload = await runOnce({ out: { is_error: false, result: fenced207(missing), usage, total_cost_usd: 0.12, num_turns: 3, terminal_reason: "end_turn" } });
+  expect(payload.gh.label).toBe("factory:blocked");
+  expect(payload.spy).toHaveBeenCalledWith(expect.objectContaining({ to: "factory:blocked", cause: "undecidable" }));
+  expect(payload.spy).not.toHaveBeenCalledWith(expect.objectContaining({ cause: "engine-crash" }));
+  expect(payload.rec).not.toMatch(/^engine-crash:/m);
+  const bodies = (await payload.gh.comments()).map((c) => c.body).join("\n");
+  expect(bodies).toContain("dispatcher payload: context payload missing");
+  expect(bodies).not.toMatch(/engine=|retry-kind=/);
+  expect(bodies).toMatch(/<!-- factory-blocked-origin from=factory:in-progress stage=implement cause=undecidable -->/);
+
+  // 대조군: 같은 비용의 보통 blocked 런(턴 한도). 예산 합계가 같다 — 이 런은 다른 런처럼 센다.
+  const ordinary = await runOnce({ out: { is_error: true, subtype: "error_max_turns", terminal_reason: "max_turns", result: "", usage, total_cost_usd: 0.12, num_turns: 80 } });
+  expect(ordinary.gh.label).toBe("factory:blocked");
+  expect(lifetimeCostOf207(payload.rec)).toEqual(lifetimeCostOf207(ordinary.rec));
+  const cost = lifetimeCostOf207(payload.rec);
+  expect(cost).toMatchObject({ usd: 0.12, priced: 1 });                                   // 이 런의 돈이 합계에 들어간다
+  expect(cost).not.toHaveProperty("engineUsd");                                           // engine-crash 면제로 빠지지 않는다
+  expect(cost).not.toHaveProperty("crashCountedUsd");
+});
+
+// skeptic (#207) — KTB-51 plan 리페어 턴의 두 번째 buildContext가 loaded.json을 **다시 쓴다**(`plan_repair`가 붙어 커진다). 디스패처가
+// 옮겨 쓴 것은 그 파일이므로 기록에 그 크기 줄이 하나 더 서고, 리페어 턴이 fail-closed로 끝나면 사유의 바이트 수도 그 파일의 것이다.
+test("test_207_plan_repair_fail_closed_reports_the_repaired_loaded_json_size", async () => {
+  const plan = await truncatedArgsReturn207("plan");
+  const first = { ...ctx207, loaded_json: { path: ".factory/out/loaded.json", bytes: 3000, limit: 4096, truncated_to: null, over: false } };
+  const repaired = { ...ctx207, plan_repair: R1_REASONS, loaded_json: { path: ".factory/out/loaded.json", bytes: 5123, limit: 4096, truncated_to: null, over: true } };
+  const lines = [];
+  // 실제 배선: makeBuildContextDep가 매 buildContext 뒤에 그 런의 loaded.json 크기를 기록한다(produce만 주입).
+  const produce = vi.fn(async ({ planRepair = null } = {}) => (planRepair ? repaired : first));
+  const buildContext = makeBuildContextDep({ root: "/nonexistent", gh: null, issue: 207, stage: "plan", run: null, mergeBase: async () => null, recordLine: (l) => lines.push(l), produce });
+  const claudeP = vi.fn()
+    .mockResolvedValueOnce({ is_error: false, result: "{}" })
+    .mockResolvedValueOnce({ is_error: false, result: fenced207(plan) });
+  const vs = vi.fn()
+    .mockReturnValueOnce({ ok: false, reasons: [...R1_REASONS], planRepair: [...R1_REASONS], data: { rounds: 2 } })
+    .mockImplementation(({ stage, out }) => verifyStage({ stage, out, roster: [], orchestration: "workflow" }));
+  const transition = vi.fn(async ({ to }) => ({ ok: true, to }));
+  const deps = planRepairDeps({ buildContext, claudeP, verifyStage: vs, transition, runRecord: (l) => lines.push(...l) });
+  expect(await runStage({ stage: "plan", issue: 207, deps, runnerId: "r" })).toBe(2);
+  expect(claudeP).toHaveBeenCalledTimes(2);
+  expect(transition).not.toHaveBeenCalledWith(expect.objectContaining({ to: "factory:needs-human" }));
+  expect(transition.mock.calls.at(-1)[0]).toMatchObject({ to: "factory:blocked", cause: "undecidable", reason: "dispatcher payload: context payload missing (loaded.json 5123 bytes)" });
+  expect(lines.filter((l) => /^loaded\.json: \d+ bytes/.test(l))).toEqual(["loaded.json: 3000 bytes", "loaded.json: 5123 bytes — over the 4096-byte limit"]);
+});
