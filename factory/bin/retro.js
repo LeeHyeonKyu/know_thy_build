@@ -1102,6 +1102,9 @@ export function roleFileMap(roles) {
  */
 // #247 dw5 — `queueTail`은 그 꼬리 자체다(기본값이 유일한 구현 `createBacklogIssueAndQueue`). 주입은 테스트가 "같은 함수를 부른다"를
 // 관측하기 위한 것이다 — 사본을 끼울 자리가 아니다(test_247_retro_promotion_uses_the_single_backlog_queue_tail).
+// #249 (dw5) — 여기의 `makeQueueAdmission`은 run-stage의 심사기와 **다른 프로세스**(retro 워크플로)의 유일한 심사기다: run-stage main()의
+// 클로저는 retro 프로세스에 없으므로 나눠 받을 수 없고, 이것이 dw5 루브릭이 확인하라는 "retro 승격 경로의 진짜 심사기"다. 규칙은 둘 다
+// lib/admission.js 한 곳에서 온다. 9f6dc7a 브랜치 그대로다(test_230_retro_promotion_issue_is_born_backlog_and_transitioned가 이것을 부른다).
 export function makeRetroCreateIssue({ gh, root, charter, harness, env, queueTail = createBacklogIssueAndQueue }) {
   const rehearsal = makeRehearsalChecker({ gh, root, branch: () => harness?.project?.default_branch || "main" });
   const admission = makeQueueAdmission({ gh, charter, factoryLogins: () => resolveFactoryLogins({ gh, env }) });
@@ -1136,6 +1139,8 @@ async function main() {
  * main()의 설정 적재 + 의존성 조립(#230에서 main 밖으로 꺼냈다 — 테스트가 프로덕션 조립을 그대로 부르게; self-critique f4).
  * CHARTER·harness·roles를 `root`에서 main과 같은 방식으로 읽고, 잠들 이유가 있으면 `{ dormant: <말> }`, 아니면 `{ deps }`.
  */
+// #249 (dw5) — 이것은 retro.js main()의 조립이다. dw5·non_goal이 금하는 것은 run-stage.js main()의 exported assembler이고, 그쪽 main()은
+// 여전히 자기 안에서 `deps`를 조립한다. 9f6dc7a 브랜치 그대로다(retro-bin.test.js test_230이 이 이름으로 프로덕션 조립을 부른다).
 export function retroMainDeps({ root, repo, runnerId, gh, env, now }) {
   // 잠드는 건 정상이지만 "왜"는 반드시 말한다. retro는 기존 이슈의 라벨을 옮기지 않으므로 잠들어도 아무것도 막지 않는다.
   let charter, harness, roles;

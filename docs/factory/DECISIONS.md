@@ -433,9 +433,6 @@ ADR-001~008은 Plan 0(spikes)에서 실제 GitHub Actions 러너(`ubuntu-latest`
 - **`_retro.md` 하이드레이트/no-clobber (리뷰 Critical, 계획 문서에 없던 실행 판결)**. 초판은 `readRecords`(설계상 절대 던지지 않는다)로 상태를 읽어, fetch 실패와 "기록 없음"을 구별하지 못한 채 기본 상태로 브랜치를 덮어쓸 수 있었다. 판결: `factory/lib/records-branch.js`에 `readRecordsDetailed({run,cwd,branch,dir}) → {records, blobs, fetched, exists, failures, parent}`를 추가(`readRecords`는 `.records`만 돌려주는 얇은 래퍼가 됐다) — `fetched`는 "브랜치 내용을 확정했다"를 뜻하고, fetch가 실패했을 때는 `git ls-remote --exit-code`(0=있음, 2=없음, 그 외=오류)로 "없다"와 "모른다"를 가른다. `runRetro`는 `hydrate()`가 던지거나 `fetched === false`거나 `_retro.md`가 브랜치에 있는데 못 읽었으면(`stateFailed`) **exit 2로 아무것도 쓰지 않고 끝난다**(writeState·sync·claudeP 전부 호출하지 않음). 브랜치에 `_retro.md`가 아예 없으면(첫 실행) 기본 상태로 진행하고 `expectBlob: {"_retro.md": null}`로 "생성이지 교체가 아니다"를 명시한다. `syncRecords({overwrite:["_retro.md"], expectBlob})`는 교체 전에 parent 트리의 그 blob sha가 하이드레이트한 sha와 같은지 확인하고 다르면(누군가 먼저 밀었다) 아무것도 밀지 않고 `{ok:false, moved:true}`를 돌려준다 — `runRetro`는 그때 한 번만 재하이드레이트해 **같은 순수 변이(`applyMutation(base, mutation)`)를 새 base에 재적용**하고 재시도하며, 그래도 움직였거나 재하이드레이트가 다시 실패하면 exit 1(맹목적 덮어쓰기 금지). `_retro.md`는 `overwrite`(통째로 재렌더)로만 동기화한다 — run 기록(append-only 로그)에 쓰는 꼬리-병합 규칙을 그대로 쓰면 새 렌더가 옛 렌더의 접두어가 아니므로 마커·JSON 펜스가 파일에 두 개 생기고 다음 retro가 첫 펜스(옛 상태)만 읽어 커서가 영원히 전진하지 않는다. `hydrate`는 `_retro.md`만 로컬을 덮어써 복원한다(run 기록은 아직 push 안 된 로컬 꼬리일 수 있어 "없을 때만 복원"이 맞지만 `_retro.md`는 브랜치가 유일한 진실이다). `_retro.md`의 기계 블록은 마커 `<!-- factory-retro-state:v1 -->` + JSON 펜스이고 그 위에 사람용 통계·이력 표를 둔다.
 
 **결정**: 위 관측대로 P4-R1~R7과 다섯 가지 실행 판결(needs-human "도달" 게이트로의 정정·K 무효화, 통계의 창/누적 분리, ISO 주차는 `period.from`, 성숙도 격차의 분석-전-계산, `_retro.md`의 하이드레이트 provenance + no-clobber 재적용)을 Plan 4의 확정 동작으로 채택한다. retro는 절대 라벨을 옮기지 않고 코드를 고치지 않는다 — 산출은 lessons/예시/관점 append(다크 자체 머지), 제안 PR(사람 머지), harness/rewrite 이슈 생성, `quarantine.toml`·`_retro.md` 갱신뿐이라는 계획의 전제는 구현 전체에서 위반 없이 유지됐다(모든 경로가 fake deps 주입 테스트로 확인됨).
-  → **대체됨(#230, ADR-040)**: "retro는 절대 라벨을 옮기지 않는다"에 예외가 하나 생겼다. retro가 방금 만든 성숙도 승격 이슈의
-  `backlog → factory:queue` 한 걸음이고, 그 걸음은 리허설과 큐 진입 심사를 실은 `transition()`으로만 간다(`makeRetroCreateIssue`).
-  기존 이슈의 라벨은 여전히 옮기지 않고, 코드도 고치지 않는다.
 
 **이월(carry-over) 처리**: Plan 3 최종 리뷰의 이월 세 건을 이 Plan에서 마감했다 — `factory/cli/init.js`의 `GITIGNORE_ENTRIES`에 `test-results/`·`coverage/`·`.nyc_output/` 추가(`init.test.js`가 검증); `templates/factory/claude/agents/factory-retro.md`가 설치되어 `checkRoles`의 `roles.retro-agent-file`이 이제 PASS(과거의 "arrives with Plan 4" WARN 경로는 더 이상 밟히지 않는다); Plan 3의 Bash matcher 확장(ADR-016 F6) 이전에 `factory init`한 저장소는 `factory init --upgrade`로 신규 훅 배선(`deny-all-writes.sh` Bash arm, `factory-retro.*`)을 받아야 한다.
 
@@ -3344,7 +3341,6 @@ RED면 non-zero로 끝난다.
   지나지 않는 **유일한** 생산자이고, 그 사실은 여기에 적혀 있어야 grep으로 찾을 수 있다.
   → **대체됨(#136, S2b)**: `ensureHarnessIssue`의 하네스 이슈는 이제 `backlog`로 태어나 문을 지난다. 남은 우회 생산자는
   retro의 성숙도 격차 이슈(`bin/retro.js`)다 — 아래 "S2b" 항목.
-  → **대체됨(#230, ADR-040)**: retro의 성숙도 격차 이슈도 `backlog`로 태어나 문을 지난다. 이제 큐 라벨을 단 채 태어나는 생산자는 없다.
 - 지문 해시의 구분자는 `\u0000` **이스케이프**로 적는다. r1은 리터럴 NUL 바이트를 넣었고, 그 두
   바이트가 git에게 이 모듈을 binary로 보이게 해 `git diff`가 내용을 영영 보여주지 않았다 — 게이트를
   정의하는 파일이 사람·도구·**팩토리 자신의 리뷰 스테이지** 모두에게 구조적으로 리뷰 면제였다.
@@ -3882,9 +3878,6 @@ S4 이전에 "생성물은 diff가 아니다"를 한 곳(`inMirrorFamily`)에서
 - **문은 아직 하나가 아니다**: retro의 성숙도 격차 하네스 이슈(`bin/retro.js`, `[QUEUE_LABEL, HARNESS_LABEL]`로 태어난다 — S2c)와 로컬 진입
   (`makeLocalEntry`, 리허설만 본다)이 여전히 심사를 우회한다. 그래서 `open_max`는 아직 하드 상한이 아니다. 기존에 열린 하네스 이슈의 라벨은
   옮기지 않는다.
-  → **대체됨(#230, ADR-040)**: retro 승격 이슈는 `backlog`로 태어나 문을 지나고, 로컬 진입은 심사를 부른다. 손 라벨로 들어온 이슈는
-  triage 진입이 이슈 자신의 사실(done_when·NEVER_AUTOMATE)과 `queue_max`(자기 자신은 세지 않는다, #247)로 다시 본다. `open_max`를 triage
-  진입에서 다시 보는 일은 아직 없다(#245) — 그래서 손 라벨 홍수에 대해 `open_max`는 여전히 하드 상한이 아니다.
 **1.4.38 (KTB #136 실측, 넷째).** #136은 implement를 끝까지 통과했다(미러 커밋 `33c1889` 5개 파일, `must_not` 통과, 게이트 5/5 GREEN) —
 #41의 절반이 처음으로 실제로 증명된 런이다. 그 다음 review에서 미러 **검증**이 오판했다: overlay의 `git checkout <base> -- …`는 인덱스도
 base로 바꾸는데, 재생성 뒤 워크트리는 PR head와 같아졌어도 인덱스는 base라 `git status`가 staged 변경을 보고했고 검증은 "소스와 다르다"고
@@ -4625,10 +4618,20 @@ doctor-ci의 토큰 검사는 `continue-on-error`라 잡을 죽이지 않지만 
 - 데몬 경쟁: 진입 재심사의 전이는 claim을 쥔 채로 끝난다. claim을 잃은 런은 이 자리에 오기 전에 exit 2로 끝난다(KTB-28).
   이를 직접 고정하는 테스트는 없다.
 
+**이 항목이 대체하는 기존 기록**(옛 ADR 본문은 고치지 않는다 — 가리키는 방향은 여기서 그쪽이다):
+- Plan 4 retro 결정 "retro는 절대 라벨을 옮기지 않는다": 예외가 하나 생겼다. retro가 방금 만든 성숙도 승격 이슈의 `backlog → factory:queue`
+  한 걸음이고, 그 걸음은 리허설과 큐 진입 심사를 실은 `transition()`으로만 간다(`makeRetroCreateIssue`). 기존 이슈의 라벨은 여전히 옮기지 않는다.
+- #136 S2b 항목 "남은 우회 생산자는 retro의 성숙도 격차 이슈다": retro의 그 이슈도 `backlog`로 태어나 문을 지난다. 큐 라벨을 단 채 태어나는
+  생산자는 이제 없다.
+- 1.4.37 "문은 아직 하나가 아니다": retro 승격 이슈는 `backlog`로 태어나고 로컬 진입은 심사를 부른다. 손 라벨로 들어온 이슈는 triage 진입이
+  이슈 자신의 사실과 `queue_max`(자기 자신은 세지 않는다, #247)로 다시 본다. `open_max`를 triage 진입에서 다시 보는 일은 아직 없다(#245).
+- retro의 심사기(`makeRetroCreateIssue` 안의 `makeQueueAdmission`)는 run-stage main()의 심사기와 **다른 프로세스**(retro 워크플로)의 것이다.
+  한 프로세스 안에 심사기가 둘 생기는 것이 아니다. 규칙은 둘 다 `lib/admission.js` 한 곳에서 온다.
+
 **검증**: `test_230_triage_entry_reruns_admission_and_refuses_like_transition`(코멘트 = 진짜 `transition()`의 문장, 에이전트 0회, 통과
 경로의 dep 호출 순서가 같다), `test_230_triage_entry_admissible_issue_passes_when_queue_is_at_capacity`,
 `test_230_triage_entry_unreadable_admission_blocks_retryably_not_demotes`, `test_230_local_entry_refuses_inadmissible_issues_before_writing_the_label`,
 `test_230_retro_promotion_issue_is_born_backlog_and_transitioned`, `test_230_admission_codes_classify_per_issue_vs_capacity_refusals`;
 #247: `test_247_triage_refusal_leaves_a_terminal_label_and_one_comment`, `test_247_triage_reentry_does_not_count_itself_against_queue_max`,
 `test_247_local_entry_receives_production_admission_closure`(main과 같은 늦은 CHARTER 심사기로, runStage의 순서대로 로컬 진입이 여전히 큐에 넣는다);
-#249: `test_249_local_entry_production_wiring_passes_admission`(main()의 `localEntry: makeLocalEntry({ … })` 호출 인자 그대로 — 적격 이슈는 큐로, 부적격 이슈는 큐 문의 문장으로 거부).
+#249: `test_249_local_entry_production_wiring_passes_admission`(main()의 `localEntry: makeLocalEntry({ … })` 호출 인자 그대로 — 적격 이슈는 큐로, 부적격 이슈는 큐 문의 문장으로 거부), `test_249_retro_history_records_queued_false_with_the_refusal_reason`(retro의 `_retro.md` 이력 `applied`의 하네스 단계가 거부·던짐이면 `queued: false` + 기록 줄과 같은 `queue_reason`을, 통과면 둘 다 싣지 않는다).

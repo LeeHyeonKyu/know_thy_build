@@ -1464,3 +1464,37 @@ test("test_247_retro_promotion_uses_the_single_backlog_queue_tail", async () => 
     expect(mine, name).toEqual([notQueuedComment({ issue: r.issue, reason: r.queue_reason, threw, parkedFeature: false })]);
   }
 });
+
+// ── #249 (dw4, self-critique) — the refusal trace in retro's run state: `queued: false` + `queue_reason` on the harness step ──────
+// test_230 above pins the record line and the comment; this pins the third place dw4 names — the `applied` entry retro writes into
+// `_retro.md`'s history — through main()'s own assembly and the real door. A retro that dropped the field, or wrote it on an
+// admitted issue, fails here.
+test("test_249_retro_history_records_queued_false_with_the_refusal_reason", async () => {
+  const { root, hash } = checkout230();
+  const runWith = async (gh) => {
+    const assembled = retroMainDeps({ root, repo: "o/r", runnerId: "test/249", gh, env: {}, now: NOW });
+    const { deps, recorded, last } = makeDeps({ state: freshState(), overrides: { createIssue: assembled.deps.createIssue } });
+    expect(await runRetro({ deps, now: NOW })).toBe(0);
+    const promo = [...gh.store.values()].find((i) => i.title === PROMO_230);
+    const step = last().history.at(-1).applied.filter((a) => a.step === "harness");
+    return { promo, recorded, step };
+  };
+
+  // refused by the door (queue 3 ≥ queue_max 3): the history entry carries queued:false and the same reason as the record line
+  const refused = await runWith(ghFor230({ variable: hash, queued: 3 }));
+  expect(refused.promo.labels).toEqual(["backlog", "factory:harness"]);
+  expect(refused.step).toHaveLength(1);
+  expect(refused.step[0]).toMatchObject({ step: "harness", title: PROMO_230, issue: refused.promo.number, queued: false });
+  expect(refused.step[0].queue_reason).toMatch(/^queue admission refused — queue 3 ≥ 3 \(back_pressure\.queue_max\)/);
+  expect(refused.recorded).toContain(`retro: harness issue #${refused.promo.number} stays in backlog — not queued: ${refused.step[0].queue_reason}`);
+
+  // the door throws: still a refusal trace, with the thrown error as the reason
+  const thrown = await runWith(ghFor230({ variable: hash, swapThrows: true }));
+  expect(thrown.step[0]).toMatchObject({ issue: thrown.promo.number, queued: false });
+  expect(thrown.step[0].queue_reason).toMatch(/HTTP 403 label write/);
+
+  // admitted: no refusal trace in the history entry
+  const ok = await runWith(ghFor230({ variable: hash }));
+  expect(ok.promo.labels).toEqual(["factory:harness", "factory:queue"]);
+  expect(ok.step).toEqual([{ step: "harness", title: PROMO_230, issue: ok.promo.number }]);
+});

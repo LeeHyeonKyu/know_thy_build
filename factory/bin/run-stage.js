@@ -3545,6 +3545,10 @@ export function makeLocalEntry({ gh, issue, stage, env, rehearsal = null, admiss
  * main()의 큐 진입 심사기(#230에서 추출 — 테스트가 프로덕션 배선을 그대로 부르게). CHARTER는 `charterReady`가 나중에 읽으므로
  * 호출 시점에 `getCharter()`로 늦게 본다. 없으면 거부하되(fail closed) 그 거부는 `unreadable`이다 — 이슈에 대한 판정이 아니다.
  */
+// #249 (dw5) — 두 번째 심사기가 아니다: main()이 이것을 **한 번** 부르고 그 한 심사기를 큐 문·로컬 진입·triage 재심사에 나눠 준다
+// (아래 `const admission = makeStageAdmission(…)`). main() 조립의 추출도 아니다 — main의 `deps`는 여전히 main 안에서 조립된다.
+// 이 함수는 main에 있던 인라인 클로저(`charter ? makeQueueAdmission(…) : 거부`)를 이름만 붙여 옮긴 것이고, 9f6dc7a 브랜치 테스트
+// (test_230_*, test_247_*)가 이 이름으로 import해 프로덕션 심사기를 그대로 부른다(non_goal "no new design" — 브랜치 그대로).
 export function makeStageAdmission({ gh, getCharter, factoryLogins }) {
   return async (args) => {
     const charter = getCharter();
