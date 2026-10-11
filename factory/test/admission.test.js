@@ -408,7 +408,6 @@ test("test_231_self_generated_needs_marker_and_factory_author", async () => {
   expect(bare.ok).toBe(false);
   expect(bare.reasons).toContain("not an explicit job: the body has no `done_when` section (and no factory marker)");
   // 알려진 한계(공유 계정, ADR-038 PAT 폴백): 소유자 로그인이 곧 공장 로그인이면 소유자가 붙인 마커는 여전히 면제된다
-  // (기원 #8은 읽히지 않는다 — 소유자가 쓴 #9를 기원으로 두면 그 공유 로그인 때문에 #9가 공장 세대로 세져 세대 상한이 따로 걸린다)
   const shared = await admit(async () => ({ ok: true, logins: ["LeeHyeonKyu"] }))({ issue: mk("Detected while implementing #8. evidence: {}", humanAuthor("LeeHyeonKyu")) });
   expect(shared).toEqual({ ok: true, reasons: [], self_generated: true });
   // 순수 심사도 같다: 작성자 미상 + 마커는 거부
@@ -476,4 +475,24 @@ test("test_231_factory_flaky_issue_under_pat_author_still_admitted", async () =>
   const specAdmit = makeQueueAdmission({ gh: ghOver(spec), charter: charter(), factoryLogins: FACTORY });
   expect(await specAdmit({ issue: 70 })).toEqual({ ok: true, reasons: [], self_generated: true });
   expect((await specAdmit({ issue: 71 })).reasons.join(" ")).toMatch(/generation 2 > 1/);
+
+  // rework cf1 — 상한은 **러너가 쓴 마커·라벨**로만 걸린다. 공유 계정(PAT 폴백)에서 소유자가 쓴 보통 피처(done_when 있음, 마커·라벨
+  // 없음)는 작성자가 공장 로그인이어도 open_max에 막히지 않고, 그 피처에서 수확한 flaky의 세대도 1이다(예전 배선과 같다:
+  // gh.issue()가 작성자를 싣기 전에는 이 둘이 들어갔다).
+  const SHARED = async () => ({ ok: true, logins: ["LeeHyeonKyu"] });
+  const full = {
+    ...busy,
+    80: { number: 80, body: person.body, labels: ["backlog"], author: humanAuthor("LeeHyeonKyu") },
+    81: flakyFrom(81, 7, humanAuthor("LeeHyeonKyu")),
+  };
+  const fiveOpen = [41, 51, 52, 53, 54, 55];
+  for (const k of [53, 54, 55]) full[k] = { ...flakyFrom(k, 7, humanAuthor("LeeHyeonKyu")), labels: ["factory:queue", "factory:flaky"] };
+  full[41] = { ...full[41], labels: ["factory:in-progress", "factory:flaky"] };
+  const sharedAdmit = makeQueueAdmission({ gh: ghOver(full, { lists: { "factory:flaky": fiveOpen.map((number) => ({ number })) } }), charter: { ...charter(), self_generated: { open_max: 5, depth_max: 1 } }, factoryLogins: SHARED });
+  expect(await sharedAdmit({ issue: 80 })).toEqual({ ok: true, reasons: [], self_generated: false });
+  // 같은 배선에서 공장의 flaky는 여전히 open_max에 걸린다(상한은 풀리지 않았다)
+  expect((await sharedAdmit({ issue: 81 })).reasons.join(" ")).toMatch(/self-generated open 6 ≥ 5/);
+  // 소유자가 쓴 #7에서 수확한 flaky는 한 세대다 — 공유 로그인이 #7을 공장 세대로 만들지 않는다
+  const quiet = makeQueueAdmission({ gh: ghOver({ 7: issues[7], 81: full[81] }), charter: charter(), factoryLogins: SHARED });
+  expect(await quiet({ issue: 81 })).toEqual({ ok: true, reasons: [], self_generated: true });
 });
