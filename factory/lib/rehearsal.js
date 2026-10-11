@@ -254,7 +254,11 @@ export async function runRehearsal({
   }
 
   // ── gh 권한: 스테이지가 실제로 쓰는 세 가지 ──────────────────────────────────────
-  steps.push(await timed("gh-auth", "gh api user"));
+  // ADR-038 (2026-10-11 실측) — `gh api user`는 GitHub App 설치 토큰에서 **403**이다("Resource not accessible by integration"):
+  // #241 머지 뒤 push 리허설 두 번이 이 한 줄로 RED가 됐고, RED 리허설은 기록되지 않으므로 큐 진입 전부가 "harness changed since the
+  // last rehearsal"로 막혔다. 묻는 것은 "이 토큰으로 gh가 이 저장소에 닿는가"이지 "누구인가"가 아니다 — 저장소 메타데이터 읽기는 PAT·
+  // 설치 토큰·GITHUB_TOKEN 어느 것으로도 된다. 로그인 이름은 어차피 `FACTORY_BOT_LOGIN`이 준다(`resolveFactoryLogins` ①).
+  steps.push(await timed("gh-auth", "gh api repos/{owner}/{repo} --jq .full_name"));
   steps.push(await timed("gh-labels", "gh label list --limit 200"));
   steps.push(await timed("gh-push", [
     "set -e",
