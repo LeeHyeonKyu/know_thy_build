@@ -502,6 +502,9 @@ const ISSUE_232_IDS = [
 ];
 const dw232 = (ref, extra = {}) => ({ id: ref, text: `plan item for ${ref}`, check: { kind: "test", ref }, rubric: "observable", level: "unit", ...extra });
 const NOT_COVERED = "issue done_when not covered by the plan:";
+// cf2 — the reason names its remedy: the repair turn reads only this sentence, and the plan prompt does not know covers_issue
+const FIX_TEST = (id) => ` (cover it: a plan item with check.ref "${id}" or covers_issue: ["${id}"])`;
+const FIX_POS = (id) => ` (cover it: add covers_issue: ["${id}"] to the plan item that checks it)`;
 const NO_ITEMS_LINE = "done_when: issue has no items — the plan's contract stands alone";
 
 test("test_232_plan_must_cover_every_issue_done_when_item", async () => {
@@ -510,9 +513,9 @@ test("test_232_plan_must_cover_every_issue_done_when_item", async () => {
 
   // one of three items left uncovered → rejected by its id and (the first 80 characters of) its text
   expect(validatePlanHandoff(planFix({ done_when: [dw232(a), dw232(b)] }), { issueBody: ISSUE_232_BODY }))
-    .toEqual([`${NOT_COVERED} ${c} — "항목 0개면 통과 + 기록 한 줄 (level: fast)"`]);
+    .toEqual([`${NOT_COVERED} ${c} — "항목 0개면 통과 + 기록 한 줄 (level: fast)"${FIX_TEST(c)}`]);
   expect(validatePlanHandoff(planFix({ done_when: [dw232(a), dw232(c)] }), { issueBody: ISSUE_232_BODY }))
-    .toEqual([`${NOT_COVERED} ${b} — "이슈 항목 셋 중 하나를 plan이 덮지 않으면 \`validatePlanHandoff\`가 그 id와 text로 거부; \`check.ref\` 일치"`]);
+    .toEqual([`${NOT_COVERED} ${b} — "이슈 항목 셋 중 하나를 plan이 덮지 않으면 \`validatePlanHandoff\`가 그 id와 text로 거부; \`check.ref\` 일치"${FIX_TEST(b)}`]);
   // two uncovered → each named
   const two = validatePlanHandoff(planFix({ done_when: [dw232(b)] }), { issueBody: ISSUE_232_BODY });
   expect(two.filter((r) => r.startsWith(NOT_COVERED)).map((r) => r.split(" — ")[0])).toEqual([`${NOT_COVERED} ${a}`, `${NOT_COVERED} ${c}`]);
@@ -524,7 +527,7 @@ test("test_232_plan_must_cover_every_issue_done_when_item", async () => {
   const renamed = dw232("test_232_coverage_renamed", { covers_issue: [` ${c.toUpperCase()} `] });
   expect(validatePlanHandoff(planFix({ done_when: [dw232(a), dw232(b), renamed] }), { issueBody: ISSUE_232_BODY })).toEqual([]);
   expect(validatePlanHandoff(planFix({ done_when: [dw232(a), dw232(b), dw232("test_232_coverage_renamed")] }), { issueBody: ISSUE_232_BODY }))
-    .toEqual([`${NOT_COVERED} ${c} — "항목 0개면 통과 + 기록 한 줄 (level: fast)"`]);
+    .toEqual([`${NOT_COVERED} ${c} — "항목 0개면 통과 + 기록 한 줄 (level: fast)"${FIX_TEST(c)}`]);
   // the old `verify` spelling is not coverage (non-goal) — only check.ref and covers_issue count
   const viaVerify = { id: "dw3", text: "t", verify: c, rubric: "observable", level: "unit" };
   expect(validatePlanHandoff(planFix({ done_when: [dw232(a), dw232(b), viaVerify] }), { issueBody: ISSUE_232_BODY }).some((r) => r.startsWith(`${NOT_COVERED} ${c}`))).toBe(true);
@@ -532,15 +535,38 @@ test("test_232_plan_must_cover_every_issue_done_when_item", async () => {
   // items without a test id are covered by their position name through covers_issue
   const noIds = "## done_when\n- [ ] the export button downloads a CSV\n- [ ] the CSV has a header row\n";
   expect(validatePlanHandoff(planFix({ done_when: [dw232("test_9_csv", { covers_issue: ["issue-dw2"] })] }), { issueBody: noIds }))
-    .toEqual([`${NOT_COVERED} issue-dw1 — "the export button downloads a CSV"`]);
+    .toEqual([`${NOT_COVERED} issue-dw1 — "the export button downloads a CSV"${FIX_POS("issue-dw1")}`]);
   expect(validatePlanHandoff(planFix({ done_when: [dw232("test_9_csv", { covers_issue: ["issue-dw1", "ISSUE-DW2"] })] }), { issueBody: noIds })).toEqual([]);
 
   // through verifyStage the reason is a plan-contract defect: it fails the stage and rides planRepair (one repair turn)
   const v = verifyPlan(planFix({ done_when: [dw232(a), dw232(b)] }), { issueBody: ISSUE_232_BODY });
   expect(v.ok).toBe(false);
-  expect(v.planRepair).toEqual([`${NOT_COVERED} ${c} — "항목 0개면 통과 + 기록 한 줄 (level: fast)"`]);
+  expect(v.planRepair).toEqual([`${NOT_COVERED} ${c} — "항목 0개면 통과 + 기록 한 줄 (level: fast)"${FIX_TEST(c)}`]);
   expect(v.reasons.length).toBe(v.planRepair.length);
   expect(verifyPlan(planFix({ done_when: [dw232(a), dw232(b), dw232(c)] }), { issueBody: ISSUE_232_BODY }).ok).toBe(true);
+
+  // cf2 — a docs-only issue written exactly as templates/know-thy-build/issue.md prescribes has no test ids, so its items are
+  // positional and only covers_issue covers them: the reason must say so, or the one-shot repair turn has nothing to act on
+  const docsOnly = [
+    "## Impact paths",
+    "- `README.md` (Quickstart 절)",
+    "",
+    "## done_when (draft)",
+    "- [ ] `README.md`의 Quickstart가 X를 설명한다",
+    "- [ ] 문서 외 파일은 diff에 없다",
+    "",
+    "<!-- docs-only: 회귀 가드 없음 — Impact paths가 전부 문서라 tier는 docs다(CHARTER: diff가 docs/**, *.md만) -->",
+    "",
+  ].join("\n");
+  const docsPlan = (extra) => planFix({ done_when: [{ id: "dw1", text: "Quickstart explains X", check: { kind: "rubric", ref: "README.md" }, rubric: "a reader can follow it", level: "unit", ...extra }] });
+  const docsV = verifyPlan(docsPlan({}), { issueBody: docsOnly });
+  expect(docsV.ok).toBe(false);
+  expect(docsV.planRepair).toEqual([
+    `${NOT_COVERED} issue-dw1 — "\`README.md\`의 Quickstart가 X를 설명한다"${FIX_POS("issue-dw1")}`,
+    `${NOT_COVERED} issue-dw2 — "문서 외 파일은 diff에 없다"${FIX_POS("issue-dw2")}`,
+  ]);
+  // … and doing what the reason says is enough for the repaired plan to pass
+  expect(verifyPlan(docsPlan({ covers_issue: ["issue-dw1", "issue-dw2"] }), { issueBody: docsOnly }).ok).toBe(true);
 });
 
 test("test_232_issue_without_done_when_items_passes_with_a_record_line", async () => {
@@ -583,7 +609,7 @@ test("test_232_every_admitted_done_when_spelling_yields_its_items", async () => 
     expect(issueDoneWhenItems(body).map((i) => i.id)).toEqual(["test_9_header", "test_9_rows"]);
     const notes = [];
     const reasons = validatePlanHandoff(planFix({ done_when: [dw232("test_9_header")] }), { issueBody: body, notes });
-    expect(reasons).toEqual([`${NOT_COVERED} test_9_rows — "one row per note"`]);
+    expect(reasons).toEqual([`${NOT_COVERED} test_9_rows — "one row per note"${FIX_TEST("test_9_rows")}`]);
     expect(notes).toEqual([]);
   }
 });
@@ -597,9 +623,9 @@ test("test_232_check_ref_covers_only_test_ids_and_ignores_spelling", async () =>
   // a positional id (`issue-dw<n>`) is not a test name: only covers_issue can cover it, never check.ref
   const noIds = "## done_when\n- [ ] the export button downloads a CSV\n";
   expect(validatePlanHandoff(planFix({ done_when: [dw232("issue-dw1")] }), { issueBody: noIds }).filter((x) => x.startsWith(NOT_COVERED)))
-    .toEqual([`${NOT_COVERED} issue-dw1 — "the export button downloads a CSV"`]);
+    .toEqual([`${NOT_COVERED} issue-dw1 — "the export button downloads a CSV"${FIX_POS("issue-dw1")}`]);
   // the reason quotes at most the first 80 characters of the item text
   const long = "x".repeat(79) + "가나다";
   const r = validatePlanHandoff(planFix({ done_when: [dw232("test_9_other")] }), { issueBody: `## done_when\n- [ ] \`test_9_long\` — ${long}\n` });
-  expect(r.filter((x) => x.startsWith(NOT_COVERED))).toEqual([`${NOT_COVERED} test_9_long — "${"x".repeat(79)}가"`]);
+  expect(r.filter((x) => x.startsWith(NOT_COVERED))).toEqual([`${NOT_COVERED} test_9_long — "${"x".repeat(79)}가"${FIX_TEST("test_9_long")}`]);
 });
