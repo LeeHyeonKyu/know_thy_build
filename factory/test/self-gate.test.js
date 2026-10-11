@@ -937,3 +937,48 @@ test("test_212_runner_mirror_copy_in_the_merge_is_not_outside_it", async () => {
   expect(conflictScopeGreen212(closed)).toBe(false);
   expect(conflictFindings212(closed).map((f) => f.detail)).toEqual([expect.stringMatching(/^conflict scope could not be measured — .*injected show failure/)]);
 });
+
+test("test_212_conflict_scope_deleting_or_rewriting_a_content_conflict_is_outside_the_merge", async () => {
+  // Only a modify/delete conflict — one side's TREE lacks the path (ours or theirs, not git's auto-merge or the merge commit) — may be
+  // resolved whole. Deleting a file that BOTH sides changed throws away every line outside its conflict region: RED, named.
+  const commitMerge = async (r) => { await r.ok("add", "-A"); await r.ok("commit", "-q", "--no-edit"); };
+  const d = await conflictRepo212();
+  await d.ok("rm", "-q", "-f", C212); await commitMerge(d);
+  const deleted = await dep212(d, conflictCtx212(d.approved))({ gates: GREEN212, mergedBase: d.base });
+  expect(conflictFindings212(deleted).map((f) => f.detail)).toEqual([`conflict round changed ${C212} outside the merge`]);
+  expect(conflictScopeGreen212(deleted)).toBe(false);
+  expect(deleted.ok).toBe(true);
+
+  // A binary content conflict: git writes no markers, so there is no region to hold the resolution to. Taking one side whole is the
+  // resolution (GREEN); writing any other bytes is outside the merge (RED) — the marker-less file is not a free-for-all.
+  const binary = async (resolve) => {
+    const root = mkdtempSync212(join212(tmpdir212(), "fq212bin-"));
+    const git = (...args) => realRun212("git", ["-c", "user.email=t@example.invalid", "-c", "user.name=t", "-c", "commit.gpgsign=false", ...args], { cwd: root });
+    const ok = async (...args) => { const x = await git(...args); expect(x.code, `git ${args.join(" ")}: ${x.stderr}`).toBe(0); return x.stdout.trim(); };
+    const B = "factory/assets/blob.bin";
+    const put = (bytes) => { mkdirSync212(join212(root, "factory/assets"), { recursive: true }); writeFileSync212(join212(root, B), Buffer.from(bytes)); };
+    put([0, 1, 2, 3, 0, 9]);
+    await ok("init", "-q", "-b", "main"); await ok("add", "-A"); await ok("commit", "-q", "-m", "base");
+    await ok("checkout", "-q", "-b", "claude/fq-212");
+    put([0, 1, 2, 3, 0, 7, 7]); await ok("add", "-A"); await ok("commit", "-q", "-m", "approved");
+    const approved = await ok("rev-parse", "HEAD");
+    await ok("checkout", "-q", "main");
+    put([0, 1, 2, 3, 0, 8, 8, 8]); await ok("add", "-A"); await ok("commit", "-q", "-m", "main moves on");
+    const base = await ok("rev-parse", "HEAD");
+    await ok("checkout", "-q", "claude/fq-212");
+    expect((await git("merge", "--no-edit", base)).code).not.toBe(0);
+    await resolve({ ok, put, base });
+    await ok("add", "-A"); await ok("commit", "-q", "--no-edit");
+    const ctx = { issue: { number: 212 }, loaded: { conflict_only: true, approved_head: approved, merge_conflicts: [B] } };
+    return { sg: await dep212({ root, ok }, ctx)({ gates: GREEN212, mergedBase: base }), B };
+  };
+  const theirs = await binary(async ({ ok, base }) => { await ok("checkout", base, "--", "factory/assets/blob.bin"); });
+  expect(conflictFindings212(theirs.sg)).toEqual([]);
+  expect(conflictScopeGreen212(theirs.sg)).toBe(true);
+  const ours = await binary(async ({ ok }) => { await ok("checkout", "--ours", "--", "factory/assets/blob.bin"); });
+  expect(conflictScopeGreen212(ours.sg)).toBe(true);
+  const other = await binary(async ({ put }) => { put([0, 1, 2, 3, 0, 6, 6, 6, 6]); });
+  expect(conflictFindings212(other.sg).map((f) => f.detail)).toEqual([`conflict round changed ${other.B} outside the merge`]);
+  expect(conflictScopeGreen212(other.sg)).toBe(false);
+  expect(other.sg.ok).toBe(true);
+});
