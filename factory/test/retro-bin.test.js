@@ -1362,6 +1362,18 @@ test("test_237_retro_runs_the_analyst_directly_and_keeps_its_failure_contract", 
   expect(after237(args, "--model")).toBe("opus");
   expect(after237(args, "--disallowedTools").split(",")).toEqual(expect.arrayContaining(["Edit", "Write", "MultiEdit", "NotebookEdit", "Bash"]));
   expect(after237(args, "--allowedTools").split(",")).toEqual(["Read", "Grep", "Glob"]);
+  // read-only like the role: the available tool set IS the role's whitelist, and spawning a child session is denied
+  expect(after237(args, "--tools")).toBe("Read,Grep,Glob");
+  expect(after237(args, "--disallowedTools").split(",")).toEqual(expect.arrayContaining(["Agent", "Task", "Workflow"]));
+  // roles.toml `[retro.analyst]` names the role file and the model — the same source the workflow path reads,
+  // so an operator's change there reaches the direct analyst too (not the md frontmatter's `opus`)
+  writeFileSync(join(root, ".claude/agents/alt-retro.md"), "---\nname: alt-retro\ntools: Read, Glob\nmodel: opus\n---\n\n## Purpose\nAlternate retro analyst.\n");
+  const altRun = retroRun237(okEnvelope);
+  const alt = makeRetroAnalyst({ root, harness: agentHarness, charter: {}, run: altRun, roles: { retro: { analyst: { agent: ".claude/agents/alt-retro.md", model: "sonnet" } } } });
+  await alt.claudeP({ period: { from: CURSOR, to: NOW }, candidates: emptyCandidates(), stats: {}, history: [], maturity_gaps: [] });
+  expect(after237(altRun.calls[0].args, "--system-prompt")).toBe("## Purpose\nAlternate retro analyst.");
+  expect(after237(altRun.calls[0].args, "--model")).toBe("sonnet");
+  expect(after237(altRun.calls[0].args, "--tools")).toBe("Read,Glob");
   expect(after237(args, "--permission-mode")).toBe("dontAsk");
   expect(after237(args, "--max-turns")).toBe("12");
   expect(after237(args, "--output-format")).toBe("json");

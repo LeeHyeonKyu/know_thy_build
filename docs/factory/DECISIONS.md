@@ -4529,12 +4529,15 @@ doctor-ci의 토큰 검사는 `continue-on-error`라 잡을 죽이지 않지만 
    `claude -p`로 띄운다"**이다. 토론 스테이지(plan·implement·review)는 그 값에서도 `/factory-<stage>` 워크플로를 그대로 탄다.
    실효값은 스테이지마다 `lib/config.js`의 `orchestrationFor`가 한 번 정하고, `lib/context.js`가 그것을 `context.json`·`loaded.json`에
    싣는다 — run-stage와 `bin/verify-stage.js`가 같은 값을 읽는다(`test_237_agent_mode_leaves_debate_stages_passing`).
-2. 직접 세션의 모양: 시스템 프롬프트 = 역할 md의 본문(`.claude/agents/factory-triage.md`·`factory-retro.md`), 모델 = 역할의 모델,
-   쓰기 도구(`Edit`·`Write`·`MultiEdit`·`NotebookEdit`·`Bash`)는 argv의 `--disallowedTools`로 거부, 나머지 가드(`dontAsk`·`--settings`·
+2. 직접 세션의 모양: 시스템 프롬프트 = 역할 md의 본문, 역할 md 경로와 모델 = roles.toml의 `[triage]`·`[retro.analyst]`(워크플로의
+   `agent()`와 같은 출처, 없으면 `.claude/agents/factory-triage.md`·`factory-retro.md`와 그 frontmatter), 쓸 수 있는 도구는 `--tools`로
+   역할의 `tools:` 목록에 한정(워크플로 경로에서 그 목록은 화이트리스트이고, `--allowedTools`는 승인일 뿐 제한이 아니다), 쓰기 도구
+   (`Edit`·`Write`·`MultiEdit`·`NotebookEdit`·`Bash`)와 다른 세션을 띄우는 도구(`Agent`·`Task`·`Workflow`)는 `--disallowedTools`로 거부, 나머지 가드(`dontAsk`·`--settings`·
    `--max-turns`·예산·`FACTORY_STAGE`)는 디스패처 세션과 같다. `workflow`일 때의 argv·env는 예전과 바이트 단위로 같다
    (`test_237_triage_runs_the_agent_directly_when_orchestration_is_agent`, `test_237_retro_runs_the_analyst_directly_and_keeps_its_failure_contract`).
 3. 직접 triage의 프롬프트는 워크플로가 주입하던 판정 재료(CHARTER `triage.default`, 러너가 계산한 `explicit_submission`)를 그대로
-   싣고, 컨텍스트가 이 런의 이슈 것이 아니면 세션을 띄우지 않고 fail closed한다(`test_237_direct_triage_prompt_carries_charter_default_and_submission`).
+   싣고, 컨텍스트(메모리의 페이로드든 세션이 읽을 디스크의 `context.json`·`loaded.json`이든)가 이 런의 이슈 것이 아니면 세션을 띄우지
+   않고 fail closed한다 — 그때 `triage.json`·`triage.envelope.json`은 거부 봉투로 덮여 지난 런의 판정이 이 런의 출력으로 남지 않는다(`test_237_direct_triage_prompt_carries_charter_default_and_submission`).
 4. 직접 triage 핸드오프의 `issue`·`orchestration: "agent"`·`guarantee`는 **러너가 찍는다** — 에이전트 답이 다른 값을 주장해도
    덮는다. 직접 모드의 **`guarantee` 값은 `verified`**다: 워크플로의 구조(스크립트가 역할을 띄우고 반환값을 스키마로 받는다)가 없고,
    판정은 러너의 사후 검증(`triage.v1` 스키마 검증 + NEVER_AUTOMATE 재확인)이 한다 — §4.2.4가 예고한 그 교환이다. run 기록에는
@@ -4544,6 +4547,8 @@ doctor-ci의 토큰 검사는 `continue-on-error`라 잡을 죽이지 않지만 
    `retro.v1` 불일치는 `retro: full analysis failed` + `last_full_failed`이고 `merges_since`·커서는 그대로다 — 0건 회고로 읽히지 않는다(dw6 테스트).
    직접 세션에서는 **세션 트랜스크립트를 산출물 후보로 쓰지 않는다**: 트랜스크립트 구제(KTB-7/17)는 디스패처의 재타이핑을 위한 것이고,
    직접 세션의 tool_result는 에이전트가 읽은 파일(지난 런의 `triage.json` 등)이지 답이 아니다(같은 두 테스트가 대비로 고정한다).
+   진단 CLI `bin/verify-stage.js`도 같은 규칙을 따른다 — 직접 세션이면 `--transcript`를 줘도 트랜스크립트를 캐지 않아 CI와 같은 답을 낸다
+   (`test_237_verify_cli_agrees_with_run_stage_on_a_failed_direct_triage`).
 
 **바꾸지 않은 것**: KTB의 `.factory/harness.toml`과 템플릿의 기본값은 `workflow` 그대로다 — 이 PR이 머지돼도 KTB에서는 이 경로가 돌지
 않는다. 켜는 것은 사람이 머지하는 `factory:harness` 후속(그 PR이 `harness.toml`의 `# workflow | agent` 주석도 고친다)과 `.factory/bin`

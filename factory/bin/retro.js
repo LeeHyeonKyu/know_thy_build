@@ -48,7 +48,7 @@ import {
 } from "../lib/retro/quarantine-ops.js";
 import { applyRoleAdditions as applyRoleAdditionsText } from "../lib/retro/role-additions.js";
 import { nextN, parseRetroState, renderRetroState, shouldRunFull } from "../lib/retro/state.js";
-import { stageMaxTurns, syncRunRecords, directAgentRole, directAgentClaudeArgs, DIRECT_AGENT_MD } from "./run-stage.js";
+import { stageMaxTurns, syncRunRecords, directAgentRole, directAgentClaudeArgs, directRoleSpec } from "./run-stage.js";
 import { makeRecordsUploadGuard } from "../lib/breaker.js";
 import { hitApiError, apiErrorReason } from "../lib/verify-stage.js";
 import { HARNESS_LABEL } from "../lib/label-catalog.js";
@@ -981,10 +981,11 @@ export async function collectIssues({ gh, since }) {
  * `[factory].max_turns` 공통값, `[factory].max_turns_by_stage.retro`가 있으면 그것이 이긴다,
  * 둘 다 없으면 기본 12 — 를 그대로 재사용한다. 순수 함수라 하네스만 바꿔가며 테스트할 수 있다.
  */
-export function retroClaudeArgs({ harness, charter, ciSettingsPath, orchestration = "workflow", agentMd = null }) {
+export function retroClaudeArgs({ harness, charter, ciSettingsPath, orchestration = "workflow", agentMd = null, model = null }) {
   // #237 — `orchestration = "agent"`면 디스패처 없이 분석가 세션을 직접 띄운다(run-stage의 `directAgentClaudeArgs` 그대로).
+  // `model`은 roles.toml `[retro.analyst].model`(워크플로 경로와 같은 출처) — 없을 때만 md frontmatter가 정한다.
   if (orchestration === "agent") {
-    const role = directAgentRole(agentMd);
+    const role = directAgentRole(agentMd, { model });
     return directAgentClaudeArgs({ prompt: directRetroPrompt(), systemPrompt: role.systemPrompt, model: role.model, tools: role.tools, maxTurns: stageMaxTurns(harness, "retro"), settingsPath: ciSettingsPath, charter });
   }
   const args = ["-p", "/factory-retro", "--permission-mode", "dontAsk", "--max-turns", String(stageMaxTurns(harness, "retro")), "--output-format", "json", "--settings", ciSettingsPath];
@@ -1021,16 +1022,20 @@ export function directRetroPrompt({ candidates = RETRO_CANDIDATES_PATH } = {}) {
  * 직접 경로의 `transcript`는 빈 문자열이다: 트랜스크립트 구제는 디스패처의 재타이핑을 위한 것이고, 직접 세션의
  * tool_result는 분석가가 **읽은** 파일이지 답이 아니다 — 죽은 분석가가 읽은 파일 덕에 "성공"하면 안 된다.
  */
-export function makeRetroAnalyst({ root, harness, charter, run: runner = run, home = homedir(), readFile = (p) => readFileSync(p, "utf8"), readTranscriptText = null }) {
+export function makeRetroAnalyst({ root, harness, charter, roles = null, run: runner = run, home = homedir(), readFile = (p) => readFileSync(p, "utf8"), readTranscriptText = null }) {
   const orchestration = orchestrationFor(harness, "retro");
+  // 역할 md·모델은 roles.toml `[retro.analyst]`에서 온다(`directRoleSpec`) — 운영자가 거기서 바꾼 것이 모드와 무관하게 분석가에 닿는다.
+  let r = roles;
+  if (!r) { try { r = loadRoles(root); } catch { r = {}; } }
+  const spec = directRoleSpec(r, "retro");
   const outDir = join(root, ".factory/out");
   return {
     orchestration,
     claudeP: async ({ period, candidates, stats, history, maturity_gaps }) => {
       mkdirSync(outDir, { recursive: true });
       writeFileSync(join(root, RETRO_CANDIDATES_PATH), `${JSON.stringify({ period, candidates, stats, history, maturity_gaps }, null, 2)}\n`);
-      const agentMd = orchestration === "agent" ? readFile(join(root, DIRECT_AGENT_MD.retro)) : null;
-      const args = retroClaudeArgs({ harness, charter, ciSettingsPath: join(root, ".factory/ci-settings.json"), orchestration, agentMd });
+      const agentMd = orchestration === "agent" ? readFile(join(root, spec.md)) : null;
+      const args = retroClaudeArgs({ harness, charter, ciSettingsPath: join(root, ".factory/ci-settings.json"), orchestration, agentMd, model: spec.model });
       const r = await runner("claude", args, { cwd: root, env: { CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS: "0", CLAUDE_PROJECT_DIR: root } });
       writeFileSync(join(outDir, "retro.json"), r.stdout);
       try { return JSON.parse(r.stdout); } catch { return { is_error: true, result: r.stdout + r.stderr }; }
@@ -1209,7 +1214,7 @@ async function main() {
      * #237 — `claudeP`(후보 파일을 쓰고 `claude -p`를 부른다)와 `transcript`(이 회차의 세션 트랜스크립트, KTB-7 — run-stage와 같은
      * `readTranscript` 계산)는 `makeRetroAnalyst` 한 생산자에서 온다. `orchestration = "agent"`면 분석가를 직접 띄우고 트랜스크립트는 쓰지 않는다.
      */
-    ...(({ claudeP, transcript }) => ({ claudeP, transcript }))(makeRetroAnalyst({ root, harness, charter, run })),
+    ...(({ claudeP, transcript }) => ({ claudeP, transcript }))(makeRetroAnalyst({ root, harness, charter, roles, run })),
     applyLessons: ({ role, adopted, today, minEvidence, citations }) => {
       const rel = fileOf.get(role)?.lessons;
       const text = rel ? readText(join(root, rel)) : "";
