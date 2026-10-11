@@ -108,9 +108,9 @@ function sectionEngineCrash(lines, stage, runner) {
  */
 function sectionConflictRound(lines, stage, runner) {
   const body = lines.filter((l) => l.trim() !== "");
-  if (stage !== "implement" || body.length < 1) return false;
+  if (stage !== "implement" || body.length < 1) return null;
   const m = CONFLICT_ROUND_RE.exec(body[0]);
-  return Boolean(m && m[1] === stage && m[2] === runner);
+  return m && m[1] === stage && m[2] === runner ? { runId: m[3] } : null;   // the tag's run_id: a revocation withdraws only its own run's tag
 }
 
 /** "YYYY-MM-DDTHH:MMZ"(초 없는 short form)도, 일반 ISO도 받는다. 파싱 불가면 null. */
@@ -156,6 +156,7 @@ function parseUsageLine(line) {
 export function parseRunRecord(text, { reviewReworks = false } = {}) {
   const matches = [...text.matchAll(HEADER_RE)];
   const out = [];
+  const tagRunIds = [];                                               // #212 skeptic — out[i]'s tag run_id (kept off the entry: its shape is unchanged)
   for (let i = 0; i < matches.length; i++) {
     const m = matches[i];
     const start = m.index + m[0].length;
@@ -167,7 +168,8 @@ export function parseRunRecord(text, { reviewReworks = false } = {}) {
     // #196 — 키는 크래시 섹션에만 선다: 크래시 줄이 없는 기록의 항목은 바이트 하나 안 바뀐다(옛 소비자·고정이 그대로 본다).
     const engineCrash = sectionEngineCrash(body.split("\n"), m[1], m[3].trim());
     // #212 — 같은 규칙: 키는 conflict-round 섹션에만 선다(그 줄이 없는 기록의 항목은 바이트 하나 안 바뀐다).
-    const conflictRound = !engineCrash && sectionConflictRound(body.split("\n"), m[1], m[3].trim());
+    const conflictRound = engineCrash ? null : sectionConflictRound(body.split("\n"), m[1], m[3].trim());
+    tagRunIds.push(conflictRound ? conflictRound.runId : null);
     out.push({
       stage: m[1],
       at: m[2],
@@ -181,16 +183,22 @@ export function parseRunRecord(text, { reviewReworks = false } = {}) {
       models: parsed ? parsed.models : null,
       ...(engineCrash ? { engine_crash: true } : {}),
       ...(conflictRound ? { conflict_round: true } : {}),
-      // #212 dw6 — only on request (`lib/budget.js`): a review section that sent the issue back (`transition: factory:rework`, the line
-      // runStage writes). A forged line can only ADD a rejection (that counts a conflict round again) — it never hides one.
-      ...(reviewReworks && m[1] === "review" && bodyLines.some((l) => /^transition: factory:rework(?:\s|$)/.test(l)) ? { review_rework: true } : {}),
+      // #212 dw6 — only on request (`lib/budget.js`): a review section that did NOT pass the round — its runner `transition:` line goes
+      // anywhere but factory:approved (factory:rework, and factory:needs-human when the rejection lands at round K / the 2K ceiling,
+      // which is where the #196 flow's re-review sits). A forged line can only ADD a rejection (that counts a conflict round again) —
+      // it never hides one.
+      ...(reviewReworks && m[1] === "review" && bodyLines.some((l) => /^transition: factory:(?!approved(?:\s|$))\S/.test(l)) ? { review_rejected: true } : {}),
     });
-    // #212 skeptic — a runner revocation (first body line, naming this section's implement stage and runner) withdraws that runner's
-    // earlier conflict-round tag: tag without marker is not a conflict round. Records without the line are untouched.
+    // #212 skeptic — a runner revocation (first body line, naming this section's implement stage and runner) withdraws ITS run's
+    // conflict-round tag: tag without marker is not a conflict round. The runner writes it right after its own tag, so it is the LATEST
+    // earlier tag with the same runner AND run_id — not every tag of that runner (outside CI every run is `local/<host>` run_id n/a, and
+    // GHA re-runs share GITHUB_RUN_ID). Records without the line are untouched.
     const first = body.split("\n").filter((l) => l.trim() !== "")[0] ?? "";
     const rv = CONFLICT_REVOKED_RE.exec(first);
     if (rv && m[1] === "implement" && rv[1] === m[1] && rv[2] === m[3].trim()) {
-      for (const e of out) if (e.conflict_round && String(e.runner).trim() === rv[2]) delete e.conflict_round;
+      for (let j = out.length - 2; j >= 0; j--) {
+        if (out[j].conflict_round && String(out[j].runner).trim() === rv[2] && tagRunIds[j] === rv[3]) { delete out[j].conflict_round; break; }
+      }
     }
   }
   return out;

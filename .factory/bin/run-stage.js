@@ -2453,10 +2453,13 @@ export async function scopeInput({ run, cwd, base, issue, plan, maxBytes = SCOPE
  *     runner ran) that is not a conflicted path; and a conflicted path whose resolution changed lines outside its conflict regions (the
  *     lines git placed around the `<<<<<<<`…`>>>>>>>` blocks must survive in order; a conflicted path one side's TREE does not list —
  *     modify/delete, established by `ls-tree`, never inferred from a failed read — may be resolved whole); a conflicted mirror path the
- *     runner resolved (`runnerMirror`) is inside the merge when M holds base's copy of it, which is what the runner wrote.
+ *     runner resolved (`runnerMirror`) is inside the merge when M holds base's copy of it, which is what the runner wrote. Both sides
+ *     holding the path is a content conflict: M deleting it is outside the merge, and where git wrote no markers (a binary conflict) M
+ *     must be one side's blob, by object id.
  * A failed or unexpected git read — any of them — is returned as `error` (the gate fails closed: not GREEN).
  */
-const CONFLICT_WALK_MAX = 50;                                          // SHA40 is the module's one 40-hex rule (declared below, hoisted for calls)
+const CONFLICT_WALK_MAX = 50;
+const CONFLICT_OPEN_RE = /^<{7}(?: |$)/m;                               // the opener `resolvedInsideConflicts` reads                                          // SHA40 is the module's one 40-hex rule (declared below, hoisted for calls)
 export async function conflictScopeInput({ run, cwd, approvedHead, mergedBase = null, paths = [], runnerResolved = [], runnerMirror = [], mirrorSha = null }) {
   const conflicted = (Array.isArray(paths) ? paths : []).filter((p) => typeof p === "string" && p);
   const strings = (xs) => (Array.isArray(xs) ? xs : []).filter((p) => typeof p === "string" && p);
@@ -2518,9 +2521,11 @@ export async function conflictScopeInput({ run, cwd, approvedHead, mergedBase = 
     const ls = await git(["ls-tree", "-z", tree, "--", p]);
     if (ls.code !== 0) return { error: `git ls-tree ${tree.slice(0, 7)} ${p} failed — ${why(ls)}` };
     if (!names(ls).length) return { absent: true };
+    const oid = /^\d+ \w+ ([0-9a-f]{40,64})\t/.exec(names(ls)[0])?.[1];
+    if (!oid) return { error: `git ls-tree ${tree.slice(0, 7)} ${p} printed no object id` };
     const s = await git(["show", `${tree}:${p}`]);
     if (s.code !== 0) return { error: `git show ${tree.slice(0, 7)}:${p} failed — ${why(s)}` };
-    return { text: String(s.stdout ?? "") };
+    return { text: String(s.stdout ?? ""), oid };
   };
   for (const p of names(diff)) {
     if (!allowed.includes(p)) { outside.add(p); continue; }
@@ -2528,12 +2533,18 @@ export async function conflictScopeInput({ run, cwd, approvedHead, mergedBase = 
     if (a.error) return fail(a.error);
     const m = await side(merge.sha, p);
     if (m.error) return fail(m.error);
-    if (mirrorTaken.includes(p)) {
-      const t = await side(theirs, p);
-      if (t.error) return fail(t.error);
-      if (Boolean(t.absent) === Boolean(m.absent) && (t.absent || t.text === m.text)) continue;   // the runner's resolution: base's copy
-    }
-    if (a.absent || m.absent) continue;                               // a side deleted it (modify/delete): the whole file is the conflict
+    const t = await side(theirs, p);
+    if (t.error) return fail(t.error);
+    if (mirrorTaken.includes(p) && Boolean(t.absent) === Boolean(m.absent) && (t.absent || t.text === m.text)) continue;   // the runner's resolution: base's copy
+    // modify/delete is a fact of the two SIDES' trees (ours/theirs), never of git's auto-merge or of M (skeptic): only then is the whole
+    // file the conflict. Both sides hold it → a content conflict: M deleting it (or an auto-merge without it) drops lines outside the region.
+    const o = await side(ours, p);
+    if (o.error) return fail(o.error);
+    if (o.absent || t.absent) continue;
+    if (a.absent || m.absent) { outside.add(p); continue; }
+    // no markers in git's merge (a binary content conflict: ort writes none) → no region to hold M to: M must be one side whole, by
+    // object id (a decoded-text compare would let two different binaries match). `resolvedInsideConflicts` alone was GREEN for any bytes.
+    if (!CONFLICT_OPEN_RE.test(a.text)) { if (m.oid !== o.oid && m.oid !== t.oid) outside.add(p); continue; }
     if (!resolvedInsideConflicts(a.text, m.text)) outside.add(p);
   }
   return { paths: conflicted, outside: [...outside].sort() };
