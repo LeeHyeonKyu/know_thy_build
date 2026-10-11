@@ -29,7 +29,7 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { run } from "../lib/exec.js";
 import { makeGh, resolveFactoryLogins } from "../lib/gh.js";
-import { loadCharter, loadHarness, loadRoles, upstreamRepoOf } from "../lib/config.js";
+import { loadCharter, loadHarness, loadRoles, upstreamRepoOf, orchestrationFor } from "../lib/config.js";
 import { routeMergedIssues } from "../lib/feedback/route.js";
 import { announceFailure } from "../lib/gha.js";
 import { loadInstallManifest, INSTALL_MANIFEST_PATH } from "../lib/feedback/install-manifest.js";
@@ -48,7 +48,7 @@ import {
 } from "../lib/retro/quarantine-ops.js";
 import { applyRoleAdditions as applyRoleAdditionsText } from "../lib/retro/role-additions.js";
 import { nextN, parseRetroState, renderRetroState, shouldRunFull } from "../lib/retro/state.js";
-import { stageMaxTurns, syncRunRecords } from "./run-stage.js";
+import { stageMaxTurns, syncRunRecords, directAgentRole, directAgentClaudeArgs, DIRECT_AGENT_MD } from "./run-stage.js";
 import { makeRecordsUploadGuard } from "../lib/breaker.js";
 import { hitApiError, apiErrorReason } from "../lib/verify-stage.js";
 import { HARNESS_LABEL } from "../lib/label-catalog.js";
@@ -981,10 +981,66 @@ export async function collectIssues({ gh, since }) {
  * `[factory].max_turns` 공통값, `[factory].max_turns_by_stage.retro`가 있으면 그것이 이긴다,
  * 둘 다 없으면 기본 12 — 를 그대로 재사용한다. 순수 함수라 하네스만 바꿔가며 테스트할 수 있다.
  */
-export function retroClaudeArgs({ harness, charter, ciSettingsPath }) {
+export function retroClaudeArgs({ harness, charter, ciSettingsPath, orchestration = "workflow", agentMd = null }) {
+  // #237 — `orchestration = "agent"`면 디스패처 없이 분석가 세션을 직접 띄운다(run-stage의 `directAgentClaudeArgs` 그대로).
+  if (orchestration === "agent") {
+    const role = directAgentRole(agentMd);
+    return directAgentClaudeArgs({ prompt: directRetroPrompt(), systemPrompt: role.systemPrompt, model: role.model, tools: role.tools, maxTurns: stageMaxTurns(harness, "retro"), settingsPath: ciSettingsPath, charter });
+  }
   const args = ["-p", "/factory-retro", "--permission-mode", "dontAsk", "--max-turns", String(stageMaxTurns(harness, "retro")), "--output-format", "json", "--settings", ciSettingsPath];
   if (charter?.budget?.usd_per_stage) args.push("--max-budget-usd", String(charter.budget.usd_per_stage));
   return args;
+}
+
+/** L1이 분석 직전에 쓰는 후보 파일(워크플로는 이 경로를 인자로, 직접 세션은 프롬프트로 받는다). */
+export const RETRO_CANDIDATES_PATH = ".factory/out/retro-candidates.json";
+
+/**
+ * #237 — 직접 분석가 세션의 사용자 프롬프트. 규칙 본문은 시스템 프롬프트(`.claude/agents/factory-retro.md`의 Lens·You must not)에
+ * 이미 있으므로, 여기에는 **역할 md에 없고 `.claude/workflows/factory-retro.js`가 주입하던 것**만 싣는다: 읽는 순서와 후보
+ * 파일 경로, `period`를 그대로 베낄 것, `harness` 항목은 `maturity_gaps`와 일대일, 역할별 상한, 출력은 JSON 하나.
+ * 워크플로 파일은 보호 경로라 import할 수 없다 — 그 프롬프트를 고치면 이것도 고친다(plan open_risks "prompt drift").
+ */
+export function directRetroPrompt({ candidates = RETRO_CANDIDATES_PATH } = {}) {
+  return `You are the factory's retro analyst. Read, in this order: \`${candidates}\` (written by the retro job just now — \`period\`, `
+    + `the accumulated \`candidates\` with the \`runs\` each came from, the deterministic \`stats\`, the \`history\` of previous retros, `
+    + `and \`maturity_gaps\`, the harness gaps already detected); \`docs/factory/runs/*.md\` for the issues those candidates cite; `
+    + `\`.factory/lessons/*.md\` (each header's \`max\` is that role's cap — propose at most the headroom left); \`.claude/agents/*.md\` `
+    + `(Examples 8 good / 8 bad, Perspectives 6 per role); \`docs/factory/CHARTER.md\`.\n\n`
+    + `Copy \`period.from\` and \`period.to\` from \`${candidates}\` into your answer exactly as they appear — do not compute a date. `
+    + `\`harness\` entries must match the \`maturity_gaps\` targets one-for-one (anything else is dropped). Every \`evidence_runs\` entry `
+    + `is an issue you actually read; an item whose \`evidence_runs\` would be empty is left out, and empty arrays are a real answer.\n\n`
+    + `Return exactly the factory.retro.v1 fields (period, lessons, examples, perspectives, harness, proposals, summary). Your final `
+    + `message is parsed by a machine: emit ONLY that one JSON object — no prose, no code fence. Do not edit any file.`;
+}
+
+/**
+ * #237 — main()의 분석가 dep 두 개(`claudeP`·`transcript`)를 한 곳에서 만든다(테스트가 이 생산자를 그대로 돈다). 경로는
+ * `orchestrationFor(harness, "retro")`가 정한다. 직접 경로의 실패는 오늘과 같은 자리로 간다: 역할 md를 못 읽으면 던지고
+ * (`runRetro`의 `step("claude-p")`가 잡아 `last_full_failed`), 빈·오류·스키마 불일치 봉투는 `runRetro`가 그대로 판정한다.
+ * 직접 경로의 `transcript`는 빈 문자열이다: 트랜스크립트 구제는 디스패처의 재타이핑을 위한 것이고, 직접 세션의
+ * tool_result는 분석가가 **읽은** 파일이지 답이 아니다 — 죽은 분석가가 읽은 파일 덕에 "성공"하면 안 된다.
+ */
+export function makeRetroAnalyst({ root, harness, charter, run: runner = run, home = homedir(), readFile = (p) => readFileSync(p, "utf8"), readTranscriptText = null }) {
+  const orchestration = orchestrationFor(harness, "retro");
+  const outDir = join(root, ".factory/out");
+  return {
+    orchestration,
+    claudeP: async ({ period, candidates, stats, history, maturity_gaps }) => {
+      mkdirSync(outDir, { recursive: true });
+      writeFileSync(join(root, RETRO_CANDIDATES_PATH), `${JSON.stringify({ period, candidates, stats, history, maturity_gaps }, null, 2)}\n`);
+      const agentMd = orchestration === "agent" ? readFile(join(root, DIRECT_AGENT_MD.retro)) : null;
+      const args = retroClaudeArgs({ harness, charter, ciSettingsPath: join(root, ".factory/ci-settings.json"), orchestration, agentMd });
+      const r = await runner("claude", args, { cwd: root, env: { CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS: "0", CLAUDE_PROJECT_DIR: root } });
+      writeFileSync(join(outDir, "retro.json"), r.stdout);
+      try { return JSON.parse(r.stdout); } catch { return { is_error: true, result: r.stdout + r.stderr }; }
+    },
+    transcript: (envelope) => {
+      if (orchestration === "agent") return "";
+      if (readTranscriptText) return readTranscriptText(envelope) || "";
+      return readTranscript({ root, home, sessionId: envelope?.session_id, readFile: (p) => (existsSync(p) ? readFileSync(p, "utf8") : null) }) || "";
+    },
+  };
 }
 
 /**
@@ -1095,7 +1151,6 @@ async function main() {
   const retro = charter.retro?.every_merges || {};
   const now = new Date().toISOString();
   const runsDir = join(root, "docs/factory/runs");
-  const outDir = join(root, ".factory/out");
   const statePath = join(runsDir, STATE_FILE);
   const readText = (p) => (existsSync(p) ? readFileSync(p, "utf8") : "");
   const defaultBranch = harness.project?.default_branch ?? "main";
@@ -1150,20 +1205,11 @@ async function main() {
      * 파싱에 실패해도 원본 stdout은 `.factory/out/retro.json`에 남는다 — 사후 감사의 1차 증거다.
      */
     ciSettingsPresent: async () => existsSync(join(root, ".factory/ci-settings.json")),
-    claudeP: async ({ period, candidates, stats, history, maturity_gaps }) => {
-      mkdirSync(outDir, { recursive: true });
-      writeFileSync(join(outDir, "retro-candidates.json"), `${JSON.stringify({ period, candidates, stats, history, maturity_gaps }, null, 2)}\n`);
-      const args = retroClaudeArgs({ harness, charter, ciSettingsPath: join(root, ".factory/ci-settings.json") });
-      const r = await run("claude", args, { cwd: root, env: { CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS: "0", CLAUDE_PROJECT_DIR: root } });
-      writeFileSync(join(outDir, "retro.json"), r.stdout);
-      try { return JSON.parse(r.stdout); } catch { return { is_error: true, result: r.stdout + r.stderr }; }
-    },
     /**
-     * 이 회차의 세션 트랜스크립트 전문(KTB-7). `run-stage.js`와 **같은 계산**을 쓴다
-     * (`lib/stage-artifact.js`의 `readTranscript`) — 스테이지마다 다른 경로 규칙을 갖고 있으면
-     * "트랜스크립트가 1순위 출처"라는 계약이 한쪽만 고쳐지는 순간 갈라진다.
+     * #237 — `claudeP`(후보 파일을 쓰고 `claude -p`를 부른다)와 `transcript`(이 회차의 세션 트랜스크립트, KTB-7 — run-stage와 같은
+     * `readTranscript` 계산)는 `makeRetroAnalyst` 한 생산자에서 온다. `orchestration = "agent"`면 분석가를 직접 띄우고 트랜스크립트는 쓰지 않는다.
      */
-    transcript: (envelope) => readTranscript({ root, home: homedir(), sessionId: envelope?.session_id, readFile: (p) => (existsSync(p) ? readFileSync(p, "utf8") : null) }) || "",
+    ...(({ claudeP, transcript }) => ({ claudeP, transcript }))(makeRetroAnalyst({ root, harness, charter, run })),
     applyLessons: ({ role, adopted, today, minEvidence, citations }) => {
       const rel = fileOf.get(role)?.lessons;
       const text = rel ? readText(join(root, rel)) : "";

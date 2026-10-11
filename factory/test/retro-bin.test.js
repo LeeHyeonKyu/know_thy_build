@@ -15,6 +15,11 @@ import { validate } from "../lib/schemas.js";
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { makeRetroAnalyst, RETRO_CANDIDATES_PATH } from "../bin/retro.js";
+import { makeFakeRun } from "../lib/exec.js";
+import { copyFileSync, existsSync as existsSync237, mkdirSync } from "node:fs";
+import { dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 
 const NOW = "2026-09-12T13:45:30Z";
 const CURSOR = "2026-09-05T00:00:00Z";
@@ -1309,4 +1314,96 @@ test("ymdOf reduces a cursor timestamp to the date the proposal PR needs", async
   expect(ymdOf("2026-09-05T00:00:00Z")).toBe("2026-09-05");
   expect(ymdOf("2026-09-05")).toBe("2026-09-05");
   expect(ymdOf(undefined)).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+});
+
+/**
+ * ── #237 (gap ledger P-11, T-4) — retro launches its analyst directly under `orchestration = "agent"` ────────────
+ *
+ * No `/factory-retro` dispatcher: one session whose system prompt is `.claude/agents/factory-retro.md`, model opus,
+ * write tools denied, prompt naming the candidates file. Its answer is the session's final message — the session's
+ * own tool results are never mined for a `retro.v1` (that rescue exists for a dispatcher re-typing a Workflow
+ * result; a direct analyst has no such hop, and a file it merely read is not its answer). The failure contract is
+ * today's: `last_full_failed`, `merges_since` and the cursor kept, never a zero-yield retro.
+ */
+const RETRO_MD_237 = ".claude/agents/factory-retro.md";
+function retroRoot237() {
+  const r = mkdtempSync(join(tmpdir(), "retro-237-"));
+  mkdirSync(join(r, ".claude/agents"), { recursive: true });
+  copyFileSync(join(dirname(fileURLToPath(import.meta.url)), "../..", RETRO_MD_237), join(r, RETRO_MD_237));
+  return r;
+}
+const retroRun237 = (envelope) => makeFakeRun([{ match: (c) => c === "claude", result: { code: 0, stdout: JSON.stringify(envelope), stderr: "" } }]);
+const after237 = (args, flag) => args[args.indexOf(flag) + 1];
+
+test("test_237_retro_runs_the_analyst_directly_and_keeps_its_failure_contract", async () => {
+  const root = retroRoot237();
+  const md = readFileSync(join(root, RETRO_MD_237), "utf8");
+  const agentHarness = { factory: { orchestration: "agent", max_turns: 12 } };
+  const okEnvelope = { result: JSON.stringify(AGENT_OUT()), total_cost_usd: 0.42, usage: { input_tokens: 1200, output_tokens: 300 }, session_id: "s-237" };
+  const rescue = () => workflowTranscript(AGENT_OUT());                 // a valid retro.v1 sitting in the session's tool results
+
+  // ① the direct analyst: argv, input, and the same adoption as the workflow path
+  const run = retroRun237(okEnvelope);
+  const direct = makeRetroAnalyst({ root, harness: agentHarness, charter: { budget: { usd_per_stage: 5 } }, run, readTranscriptText: rescue });
+  const a = makeDeps({ state: freshState(), overrides: { claudeP: direct.claudeP, transcript: direct.transcript } });
+  expect(await runRetro({ deps: a.deps, now: NOW })).toBe(0);
+  expect(run.calls).toHaveLength(1);
+  const { args } = run.calls[0];
+  expect(args[0]).toBe("-p");
+  expect(args.filter((x) => /^\/factory-/.test(x))).toEqual([]);     // no dispatcher slash command anywhere in the argv
+  expect(args[1].startsWith("/")).toBe(false);
+  expect(args[1]).toContain(RETRO_CANDIDATES_PATH);
+  expect(RETRO_CANDIDATES_PATH).toBe(".factory/out/retro-candidates.json");
+  expect(existsSync237(join(root, RETRO_CANDIDATES_PATH))).toBe(true);
+  const sys = after237(args, "--system-prompt");
+  expect(sys.startsWith("---")).toBe(false);
+  expect(sys).toContain("## Purpose");
+  expect(md.trimEnd().endsWith(sys.trimEnd())).toBe(true);
+  expect(after237(args, "--model")).toBe("opus");
+  expect(after237(args, "--disallowedTools").split(",")).toEqual(expect.arrayContaining(["Edit", "Write", "MultiEdit", "NotebookEdit", "Bash"]));
+  expect(after237(args, "--allowedTools").split(",")).toEqual(["Read", "Grep", "Glob"]);
+  expect(after237(args, "--permission-mode")).toBe("dontAsk");
+  expect(after237(args, "--max-turns")).toBe("12");
+  expect(after237(args, "--output-format")).toBe("json");
+  expect(after237(args, "--settings")).toBe(join(root, ".factory/ci-settings.json"));
+  expect(after237(args, "--max-budget-usd")).toBe("5");
+
+  const w = makeDeps({ state: freshState() });                          // the workflow path: same retro.v1 via the dispatcher
+  expect(await runRetro({ deps: w.deps, now: NOW })).toBe(0);
+  expect(a.last().last_full_failed).toBeUndefined();
+  for (const dep of ["applyLessons", "applyRoleAdditions", "publishLessons", "publishProposal", "createIssue"]) {
+    expect(a.deps[dep].mock.calls, dep).toEqual(w.deps[dep].mock.calls);
+  }
+  expect(a.deps.applyLessons).toHaveBeenCalled();
+
+  // ② workflow: the argv is today's, unchanged
+  const wrun = retroRun237(okEnvelope);
+  const wf = makeRetroAnalyst({ root, harness: { factory: { orchestration: "workflow", max_turns: 12 } }, charter: {}, run: wrun, readTranscriptText: rescue });
+  await wf.claudeP({ period: { from: CURSOR, to: NOW }, candidates: emptyCandidates(), stats: {}, history: [], maturity_gaps: [] });
+  expect(wrun.calls[0].args).toEqual(["-p", "/factory-retro", "--permission-mode", "dontAsk", "--max-turns", "12", "--output-format", "json", "--settings", join(root, ".factory/ci-settings.json")]);
+
+  // ③ a dead direct analyst cannot stretch the interval: each failure is today's `last_full_failed`
+  const dead = {
+    "empty result": { result: "", session_id: "s" },
+    "is_error envelope": { is_error: true, result: "boom", session_id: "s" },
+    "retro.v1 mismatch": { result: JSON.stringify({ lessons: [] }), session_id: "s" },
+  };
+  for (const [name, envelope] of Object.entries(dead)) {
+    const an = makeRetroAnalyst({ root, harness: agentHarness, charter: {}, run: retroRun237(envelope), readTranscriptText: rescue });
+    const { deps, recorded, last } = makeDeps({ state: freshState({ merges_since: 2, n: 3 }), overrides: { claudeP: an.claudeP, transcript: an.transcript } });
+    expect(await runRetro({ deps, now: NOW }), name).toBe(0);
+    const s = last();
+    expect(s.last_full_failed?.at, name).toBe(NOW);
+    expect(s.last_full_failed.reason, name).toBeTruthy();
+    expect(s.merges_since, name).toBe(3);
+    expect(s.cursor.last_retro_at, name).toBe(CURSOR);
+    expect(s.history, name).toEqual([]);
+    expect(deps.applyLessons, name).not.toHaveBeenCalled();
+    expect(recorded.join("\n"), name).toContain("retro: full analysis failed");
+  }
+  // the contrast that pins ③: on the workflow path the same empty result IS rescued from the transcript
+  const wEmpty = makeRetroAnalyst({ root, harness: { factory: { orchestration: "workflow" } }, charter: {}, run: retroRun237({ result: "", session_id: "s" }), readTranscriptText: rescue });
+  const we = makeDeps({ state: freshState(), overrides: { claudeP: wEmpty.claudeP, transcript: wEmpty.transcript } });
+  expect(await runRetro({ deps: we.deps, now: NOW })).toBe(0);
+  expect(we.last().last_full_failed).toBeUndefined();
 });
