@@ -7046,7 +7046,7 @@ async function repo212() {
 }
 
 /** one implement round, wired with the production pieces; `builder` is what the session does after the runner left the merge to it */
-async function implementRound212({ gh, repo, recRoot, runnerId, cost, builder, pending = true, localEntry = null, commentFails = false }) {
+async function implementRound212({ gh, repo, recRoot, runnerId, cost, builder, pending = true, localEntry = null, commentFails = false, transitionRefused = false }) {
   const ctxRoot = ctxRoot212();
   let ctxCache = null;
   const harness = { commands: {}, test: { test_glob: ["nothing/**"], source_glob: [] } };
@@ -7080,8 +7080,16 @@ async function implementRound212({ gh, repo, recRoot, runnerId, cost, builder, p
       verifyStage: () => ({ ok: true, reasons: [], data: { schema: "factory.implement.build.v1", pr: 31, head_sha: "e".repeat(40) } }),
       selfGate: makeSelfGateDep212({ root: repo.root, harness, run: realRun212, mergeBase: async () => repo.ok("merge-base", "main", "HEAD"), getCtx: () => ctxCache }),
       comment: async (n, body) => { if (commentFails) throw new Error("gh: 502 Bad Gateway"); return gh.comment(n, body); },
-      writeHandoff: async () => {},
-      transition: async ({ to }) => { transitionCalls.push(to); gh.label = to; return { ok: true, to }; },
+      // the implement handoff and the hand-off transition are the real ones (`renderHandoff`, `transition()`): the K marker binds to them
+      writeHandoff: async ({ data } = {}) => data?.head_sha && gh.comment(212, renderHandoff({ stage: "implement", issue: 212, summary: "s", data: {
+        schema: "factory.implement.v1", issue: 212, head_sha: data.head_sha, pr: data.pr, gates: { status: "GREEN" }, verifier: { verdict: "accepted" }, orchestration: "workflow", guarantee: "verified" } })),
+      transition: async ({ to, data }) => {
+        transitionCalls.push(to);
+        if (to !== "factory:awaiting-review") { gh.label = to; return { ok: true, to }; }
+        if (transitionRefused) return { ok: false, from: "factory:in-progress", to, reason: "implement head_sha eeeeeee != branch head 0000000" };
+        gh.label = "factory:in-progress";
+        return transition({ gh, issue: 212, to, stage: "implement", env: {}, ctxExtra: { gatesChecked: true, gatesFile: { status: "GREEN", head_sha: data.head_sha } } });
+      },
       runRecord: (lines) => appendRunRecord({ root: recRoot, issue: 212, stage: "implement", runnerId, lines }),
     },
   });
@@ -7139,15 +7147,19 @@ test("test_212_failed_conflict_round_falls_back_to_today", async () => {
   expect(ok.read()).toContain(`(quoted) ${forgedTag}`);
   expect(parseRunRecord(ok.read()).filter((e) => e.conflict_round).map((e) => e.cost_usd)).toEqual([9.5]);
 
-  // (1b) …and when the following review rejects, the next round is not a conflict round, writes no tag, and counts cost and K as today.
+  // (1b) …and when the following review rejects, the conflict round was not a finished conflict round: the next round is not a conflict
+  // round and writes no tag, and cost and K count AS TODAY — the conflict rework and its $9.50 count again (no exempt loop).
+  // Today's figures: K = 2 review reworks + the conflict rework + this reject = 4; cost = 62.38 + 9.50 + 4 = 75.88.
   await reviewRework212(ok.gh, ok.repo.approved);
-  expect(await ok.k()).toBe(3);
+  appendRunRecord({ root: ok.recRoot, issue: 212, stage: "review", runnerId: "gha-r", lines: ["verify: ok", "transition: factory:rework"] });
+  expect(await ok.k()).toBe(4);
   const r1b = await implementRound212({ gh: ok.gh, repo: ok.repo, recRoot: ok.recRoot, runnerId: "gha-3", cost: 4, pending: false,
     builder: async (repo) => { repo.put("factory/lib/other.js", lines212("o").join("\n") + "\nexport const reworkFix = 1;\n"); await repo.ok("add", "-A"); await repo.ok("commit", "-q", "-m", "rework fix"); } });
   expect(r1b.ctx.loaded).not.toHaveProperty("conflict_only");
   expect(parseRunRecord(ok.read()).at(-1)).not.toHaveProperty("conflict_round");
-  expect(ok.capCheck()).toMatchObject({ ok: false, usd: 66.38 });
-  expect(await ok.k()).toBe(3);
+  expect(ok.capCheck()).toMatchObject({ ok: false, usd: 75.88, conflictRevokedUsd: 9.5, conflictRevokedRuns: 1 });
+  expect(ok.capCheck()).not.toHaveProperty("conflictUsd");
+  expect(await ok.k()).toBe(4);
 
   // (2) The same round, but the session adds code outside the merge (a self-critique fix): no tag, K counts, and the cap refuses.
   const bad = await incident212();
@@ -7179,4 +7191,15 @@ test("test_212_failed_conflict_round_falls_back_to_today", async () => {
   expect(parseRunRecord(nm.read()).some((e) => e.conflict_round)).toBe(false);
   expect(await nm.k()).toBe(3);
   expect(nm.capCheck()).toMatchObject({ ok: false });
+
+  // (5) GREEN, but the hand-off transition is REFUSED (skeptic f3): the round did not hand off — no K marker, no tag, cost and K as today.
+  const rf = await incident212();
+  const r5 = await implementRound212({ gh: rf.gh, repo: rf.repo, recRoot: rf.recRoot, runnerId: "gha-2", cost: 9.5, builder: resolveOnly212, transitionRefused: true });
+  expect(r5.code).toBe(2);
+  expect(rf.read()).toMatch(/^conflict-scope: GREEN, but the round did not hand off to factory:awaiting-review \(transition refused: implement head_sha .*\) — no conflict-round marker or tag/m);
+  expect(rf.read()).not.toMatch(/^conflict-round:/m);
+  expect(parseRunRecord(rf.read()).some((e) => e.conflict_round)).toBe(false);
+  expect((await rf.gh.comments()).some((c) => c.body.includes("factory-conflict-round:v1"))).toBe(false);
+  expect(await rf.k()).toBe(3);
+  expect(rf.capCheck()).toMatchObject({ ok: false, usd: 71.88 });
 });

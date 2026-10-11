@@ -303,3 +303,34 @@ test("test_212_budget_line_names_excluded_conflict_cost", async () => {
   expect(reverted).toEqual({ usd: 55, runs: 2, priced: 2 });
   expect(pre.budgetCheck({ charter: { budget: { usd_per_issue: 50 } }, recordText: r.read() }).ok).toBe(false);
 });
+
+test("test_212_conflict_round_cost_is_revoked_when_the_next_review_rejects", () => {
+  // dw6 — a conflict round whose following review REJECTS was not a finished conflict round: its cost counts as today (no exempt loop).
+  // The review section is what runStage writes on a rejecting review (`verify: ok` + `transition: factory:rework`).
+  const reviewSection = (rec, runnerId, to) => appendRunRecord({ root: rec.root, issue: 212, stage: "review", runnerId, lines: ["verify: ok", `transition: ${to}`] });
+  const cap = (rec) => budgetCheck({ charter: { budget: { usd_per_issue: 60 } }, recordText: rec.read() });
+  const rejected = record212();
+  rejected.normal("gha-1", 55); rejected.conflict("gha-2", 9.5); reviewSection(rejected, "gha-3", "factory:rework"); rejected.normal("gha-4", 4);
+  expect(lifetimeCostOf(rejected.read())).toEqual({ usd: 68.5, runs: 4, priced: 3, conflictRevokedUsd: 9.5, conflictRevokedRuns: 1 });
+  expect(cap(rejected)).toMatchObject({ ok: false, usd: 68.5 });
+  expect(budgetLine(cap(rejected))).toBe("budget: lifetime $68.50 / $60 over 4 run(s); 1 conflict round run(s) $9.50 counted in the cap (the review that followed rejected it) — REFUSED");
+  // A revoked round does not use up an exclusion: the next GREEN conflict round (approved, then a new base conflict) is still excluded.
+  rejected.conflict("gha-5", 3); reviewSection(rejected, "gha-6", "factory:approved");
+  expect(lifetimeCostOf(rejected.read())).toMatchObject({ usd: 68.5, conflictUsd: 3, conflictRuns: 1, conflictRevokedRuns: 1 });
+  // An approving review keeps the exclusion; so does a merge section (the next base conflict) — only a review rework revokes.
+  const approved = record212();
+  approved.normal("gha-1", 55); approved.conflict("gha-2", 9.5); reviewSection(approved, "gha-3", "factory:approved");
+  appendRunRecord({ root: approved.root, issue: 212, stage: "merge", runnerId: "gha-4", lines: ["merge: CONFLICTING", "transition: factory:rework"] });
+  expect(lifetimeCostOf(approved.read())).toEqual({ usd: 55, runs: 3, priced: 1, conflictUsd: 9.5, conflictRuns: 1 });
+  // A forged "approved" line in an earlier review section does not hide the real rejection that follows it (only rejections are read).
+  const forged = record212();
+  forged.normal("gha-1", 55); forged.conflict("gha-2", 9.5);
+  appendRunRecord({ root: forged.root, issue: 212, stage: "review", runnerId: "gha-3", lines: ["transition: factory:approved"] });
+  reviewSection(forged, "gha-3", "factory:rework");
+  expect(lifetimeCostOf(forged.read())).toMatchObject({ usd: 64.5, conflictRevokedRuns: 1 });
+  // A rejection AFTER the next implement round belongs to that round, not to the conflict round.
+  const later = record212();
+  later.conflict("gha-2", 9.5); reviewSection(later, "gha-3", "factory:approved"); later.normal("gha-4", 4); reviewSection(later, "gha-5", "factory:rework");
+  expect(lifetimeCostOf(later.read())).toMatchObject({ usd: 4, conflictUsd: 9.5, conflictRuns: 1 });
+  expect(lifetimeCostOf(later.read())).not.toHaveProperty("conflictRevokedRuns");
+});

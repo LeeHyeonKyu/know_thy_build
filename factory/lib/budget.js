@@ -37,21 +37,24 @@ export const ENGINE_CRASH_EXCLUDED_RUNS = 2;
 export const CONFLICT_ROUND_EXCLUDED_RUNS = 2;
 
 export function lifetimeCostOf(recordText) {
-  const entries = recordText ? parseRunRecord(String(recordText)) : [];
+  const entries = recordText ? parseRunRecord(String(recordText), { reviewReworks: true }) : [];
   let usd = 0, priced = 0, runs = 0, engineUsd = 0, engineRuns = 0, crashCountedUsd = 0, crashCountedRuns = 0;
-  let conflictUsd = 0, conflictRuns = 0, conflictCountedUsd = 0, conflictCountedRuns = 0;
-  for (const e of entries) {
+  let conflictUsd = 0, conflictRuns = 0, conflictCountedUsd = 0, conflictCountedRuns = 0, conflictRevokedUsd = 0, conflictRevokedRuns = 0;
+  entries.forEach((e, i) => {
     const cost = e.cost_usd != null && Number.isFinite(Number(e.cost_usd)) ? Number(e.cost_usd) : null;
-    if (e.engine_crash && engineRuns < ENGINE_CRASH_EXCLUDED_RUNS) { engineRuns++; if (cost != null) engineUsd += cost; continue; }
+    if (e.engine_crash && engineRuns < ENGINE_CRASH_EXCLUDED_RUNS) { engineRuns++; if (cost != null) engineUsd += cost; return; }
+    // #212 dw6 — 뒤따른 리뷰가 거부한 conflict 라운드는 끝난 conflict 라운드가 아니다: 오늘처럼 센다(면제의 고리가 없다), 상한의 칸도 쓰지 않는다
+    const revoked = e.conflict_round && reviewRejectedAfter(entries, i);
     // #212 — 기록 순서로 앞의 CONFLICT_ROUND_EXCLUDED_RUNS개 conflict-round 섹션만 빠진다
-    if (e.conflict_round && conflictRuns < CONFLICT_ROUND_EXCLUDED_RUNS) { conflictRuns++; if (cost != null) conflictUsd += cost; continue; }
+    if (e.conflict_round && !revoked && conflictRuns < CONFLICT_ROUND_EXCLUDED_RUNS) { conflictRuns++; if (cost != null) conflictUsd += cost; return; }
     runs++;
     if (cost != null) { usd += cost; priced++; }
     // skeptic f2 — 한 사건분을 넘은 크래시 런: usd에 들어가지만, 크래시였다는 사실은 줄에 남는다(따로 센다)
     if (e.engine_crash) { crashCountedRuns++; if (cost != null) crashCountedUsd += cost; }
     // #212 — 상한을 넘은 conflict 런도 같다: usd에 들어가고, 그 사실이 줄에 남는다(operator: 상한에 닿은 순간이 보여야 한다)
-    if (e.conflict_round) { conflictCountedRuns++; if (cost != null) conflictCountedUsd += cost; }
-  }
+    if (revoked) { conflictRevokedRuns++; if (cost != null) conflictRevokedUsd += cost; }
+    else if (e.conflict_round) { conflictCountedRuns++; if (cost != null) conflictCountedUsd += cost; }
+  });
   const round2 = (n) => Math.round(n * 100) / 100;
   return {
     usd: round2(usd), runs, priced,
@@ -60,7 +63,22 @@ export function lifetimeCostOf(recordText) {
     // #212 — 키는 conflict 섹션이 하나라도 있을 때만 선다: 그 섹션이 없는 기록은 값도 모양도 오늘과 같다.
     ...(conflictRuns ? { conflictUsd: round2(conflictUsd), conflictRuns } : {}),
     ...(conflictCountedRuns ? { conflictCountedUsd: round2(conflictCountedUsd), conflictCountedRuns } : {}),
+    ...(conflictRevokedRuns ? { conflictRevokedUsd: round2(conflictRevokedUsd), conflictRevokedRuns } : {}),
   };
+}
+
+/**
+ * #212 dw6 — did a review REJECT the conflict round at `i`? Its review is any `review` section after it and before the next `implement`
+ * section (the next round). Only rejections are read (`review_rework`, the runner's `transition: factory:rework` line): forged text can add
+ * a rejection — the round then counts, as today — but cannot hide one. The K side reads the same event from the issue comments
+ * (`lib/retro/issue-comments.js` `conflictExemptIndices`: the next rework after the round is not the merge stage's).
+ */
+function reviewRejectedAfter(entries, i) {
+  for (let j = i + 1; j < entries.length; j++) {
+    if (entries[j].stage === "implement") return false;
+    if (entries[j].review_rework) return true;
+  }
+  return false;
 }
 
 /** `[budget].usd_per_issue` — 양수일 때만 켜진다. 그 밖(없음·0·문자열)은 "검사 없음"이다. */
@@ -92,7 +110,8 @@ const engineCrashNote = (b) => (b.engineRuns ? `; engine crash $${Number(b.engin
   + (b.crashCountedRuns ? `; ${b.crashCountedRuns} further engine crash run(s) $${Number(b.crashCountedUsd ?? 0).toFixed(2)} counted in the cap (past the one-episode exclusion)` : "");
 /** #212 — conflict 런도 같은 모양으로: 빠진 돈과 런 수, 그리고 상한을 넘어 다시 센 런(그 순간이 줄에서 보이게). 섹션이 없으면 빈 문자열이다. */
 const conflictRoundNote = (b) => (b.conflictRuns ? `; conflict round $${Number(b.conflictUsd ?? 0).toFixed(2)} over ${b.conflictRuns} run(s) excluded from the cap (base moved under an approved PR, #212)` : "")
-  + (b.conflictCountedRuns ? `; ${b.conflictCountedRuns} further conflict round run(s) $${Number(b.conflictCountedUsd ?? 0).toFixed(2)} counted in the cap (past the CONFLICT_ROUND_EXCLUDED_RUNS=${CONFLICT_ROUND_EXCLUDED_RUNS} exclusion)` : "");
+  + (b.conflictCountedRuns ? `; ${b.conflictCountedRuns} further conflict round run(s) $${Number(b.conflictCountedUsd ?? 0).toFixed(2)} counted in the cap (past the CONFLICT_ROUND_EXCLUDED_RUNS=${CONFLICT_ROUND_EXCLUDED_RUNS} exclusion)` : "")
+  + (b.conflictRevokedRuns ? `; ${b.conflictRevokedRuns} conflict round run(s) $${Number(b.conflictRevokedUsd ?? 0).toFixed(2)} counted in the cap (the review that followed rejected it)` : "");
 export const budgetLine = (b) => b.cap == null
   ? `budget: no [budget].usd_per_issue in CHARTER — lifetime cost $${b.usd.toFixed(2)} over ${b.runs} run(s) is not capped${engineCrashNote(b)}${conflictRoundNote(b)}`
   : `budget: lifetime $${b.usd.toFixed(2)} / $${b.cap} over ${b.runs} run(s)${engineCrashNote(b)}${conflictRoundNote(b)}${b.ok ? "" : " — REFUSED"}`;

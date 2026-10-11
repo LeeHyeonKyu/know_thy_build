@@ -145,7 +145,7 @@ function parseUsageLine(line) {
  * run 기록 전체 텍스트 → 스테이지별 배열. `usage:` 줄이 없는 섹션(예: verdict만 남긴 리뷰 스테이지)은
  * usage 관련 필드 전부가 null이다 — 0이 아니다(0은 "돌았지만 비용 없음"과 혼동된다).
  */
-export function parseRunRecord(text) {
+export function parseRunRecord(text, { reviewReworks = false } = {}) {
   const matches = [...text.matchAll(HEADER_RE)];
   const out = [];
   for (let i = 0; i < matches.length; i++) {
@@ -173,6 +173,9 @@ export function parseRunRecord(text) {
       models: parsed ? parsed.models : null,
       ...(engineCrash ? { engine_crash: true } : {}),
       ...(conflictRound ? { conflict_round: true } : {}),
+      // #212 dw6 — only on request (`lib/budget.js`): a review section that sent the issue back (`transition: factory:rework`, the line
+      // runStage writes). A forged line can only ADD a rejection (that counts a conflict round again) — it never hides one.
+      ...(reviewReworks && m[1] === "review" && bodyLines.some((l) => /^transition: factory:rework(?:\s|$)/.test(l)) ? { review_rework: true } : {}),
     });
   }
   return out;

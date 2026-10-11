@@ -1526,24 +1526,30 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runAt
       }
       exhaustedReason = dec.reason;
     }
+    const t = await d.transition({ to: toFinal, data: v.data, ...(exhausted ? { reason: exhaustedReason } : {}) });
     /**
-     * #212 (ADR-040) — a GREEN conflict-only round: the runner's K marker (issue comment, `countedTransitionIndices` reads it) goes out
-     * first, then the run's last section opens with the runner's `conflict-round:` line (`lib/budget.js` reads it). Here, on the hand-off
-     * path only — a round that went back to planned or to a person is not a finished conflict round. No marker → no tag (both or neither).
+     * #212 (ADR-040) — a GREEN conflict-only round that HANDED OFF: only after the transition to awaiting-review succeeded does the
+     * runner's K marker go out (issue comment, `countedTransitionIndices` reads it and requires it after that hand-off), and only then
+     * does the run's last section open with the runner's `conflict-round:` line (`lib/budget.js` reads it). A refused transition, or a
+     * round sent to a person, is not a finished conflict round (skeptic f3): no marker, no tag — counted as today. No marker → no tag.
      */
+    const conflictNote = [];
     if (conflictOnly && conflictGreen) {
       const head = typeof v.data?.head_sha === "string" && SHA40.test(v.data.head_sha) ? v.data.head_sha : null;
-      try {
-        if (!head) throw new Error(`the handoff head ${v.data?.head_sha ?? "none"} is not a 40-hex sha`);
-        if (!d.comment) throw new Error("no issue comment dep is wired");
-        await d.comment(issue, conflictRoundComment({ issue, approvedHead: conflictOnly.approved_head, head }));
-        conflictTag = conflictRoundLine({ stage, runnerId, runId, approvedHead: conflictOnly.approved_head, head });
-      } catch (e) {
-        record([`conflict-scope: GREEN, but the conflict-round marker was not written — ${e?.message || e}; this round counts as a normal round (cost and K)`]);
+      if (!t.ok || t.to !== "factory:awaiting-review") {
+        conflictNote.push(`conflict-scope: GREEN, but the round did not hand off to factory:awaiting-review (${t.ok ? `went to ${t.to}` : `transition refused: ${t.reason ?? "unknown"}`}) — no conflict-round marker or tag; this round counts as a normal round (cost and K)`);
+      } else {
+        try {
+          if (!head) throw new Error(`the handoff head ${v.data?.head_sha ?? "none"} is not a 40-hex sha`);
+          if (!d.comment) throw new Error("no issue comment dep is wired");
+          await d.comment(issue, conflictRoundComment({ issue, approvedHead: conflictOnly.approved_head, head }));
+          conflictTag = conflictRoundLine({ stage, runnerId, runId, approvedHead: conflictOnly.approved_head, head });
+        } catch (e) {
+          conflictNote.push(`conflict-scope: GREEN, but the conflict-round marker was not written — ${e?.message || e}; this round counts as a normal round (cost and K)`);
+        }
       }
     }
-    const t = await d.transition({ to: toFinal, data: v.data, ...(exhausted ? { reason: exhaustedReason } : {}) });
-    record([...(conflictTag ? [conflictTag] : []), "verify: ok", ...(t.ok ? [`transition: ${t.to}`] : refusal(t)), ...(checkoutSha ? [`checkout: ${checkoutSha.slice(0, 7)}`] : []), ...gatesNote, usage]);
+    record([...(conflictTag ? [conflictTag] : []), "verify: ok", ...(t.ok ? [`transition: ${t.to}`] : refusal(t)), ...(checkoutSha ? [`checkout: ${checkoutSha.slice(0, 7)}`] : []), ...conflictNote, ...gatesNote, usage]);
     return t.ok ? 0 : 2;
   } catch (e) {
     console.error(`factory: stage ${stage} aborted — ${e?.message || e}`);

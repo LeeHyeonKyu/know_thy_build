@@ -4554,23 +4554,37 @@ doctor-ci의 토큰 검사는 `continue-on-error`라 잡을 죽이지 않지만 
 2. **판정은 진짜 merge 커밋에서 잰다**(`bin/run-stage.js` `conflictScopeInput` → `lib/self-gate.js` `conflict-scope`;
    `test_212_conflict_scope_against_a_real_merge`): HEAD^1 = 승인 head, HEAD^2 = 러너가 병합한 base, 그 뒤에는 이 런의 러너 미러 커밋만.
    충돌 경로 밖에서 git 자신의 병합(`git merge-tree --write-tree`)과 다른 경로, 충돌 블록 밖의 줄을 바꾼 충돌 경로, merge 앞뒤의 빌더 커밋은
-   `conflict round changed <path> outside the merge`이다. 측정 실패도 RED다(GREEN이 아니다).
+   `conflict round changed <path> outside the merge`이다. 측정 실패도 RED다(GREEN이 아니다) — 어느 git 읽기든(`rev-list`·`diff-tree`·
+   `merge-base --is-ancestor`·`diff`·`ls-tree`·`show`) 실패하면 판정 불가다. modify/delete(한쪽이 지운 충돌 경로)는 트리가 그 경로를 나열하지
+   않을 때(`ls-tree`)만이고, 실패한 읽기에서 추론하지 않는다(`test_212_conflict_scope_fails_closed_on_every_git_read`).
 3. **RED는 막지 않는다**(plan d3): 워크플로가 아직 self-critique를 돌리므로, 막으면 충돌을 만난 승인 PR이 오늘보다 나빠진다. RED 라운드는 그냥
    충돌 라운드가 아니다 — 비용도 K도 오늘처럼 세고 리뷰도 오늘의 전체 리뷰다(`test_212_failed_conflict_round_falls_back_to_today`).
 4. **GREEN일 때만 둘을 쓴다, 둘 다 아니면 하나도 아니다**(`test_212_failed_conflict_round_falls_back_to_today`): 이슈 코멘트에 러너 마커
    `<!-- factory-conflict-round:v1 … -->`, 그리고 그 런의 마지막 기록 섹션 첫 줄에 `conflict-round: stage=implement runner=… run_id=… approved=… head=…`
-   (`lib/usage.js` `conflictRoundLine`). usage 줄에 `conflict=true` 키를 붙이지 않는다 — 그 줄의 모양은 `USAGE_RE`가 소유하고, 키 하나는 ADR-036 2의
+   (`lib/usage.js` `conflictRoundLine`). 둘 다 **awaiting-review로의 전이가 성공한 뒤에만** 나간다 — 거부된 전이·사람에게 간 라운드는 끝난
+   충돌 라운드가 아니다(같은 테스트의 (5)). usage 줄에 `conflict=true` 키를 붙이지 않는다 — 그 줄의 모양은 `USAGE_RE`가 소유하고, 키 하나는 ADR-036 2의
    위조 방어를 다시 연다.
 5. **비용**(`lib/budget.js`; `test_212_conflict_round_cost_is_tagged_and_excluded_from_the_cap`): `parseRunRecord`는 자리가 맞는(implement 섹션의
    첫 줄, 그 섹션의 러너) `conflict-round:` 줄에만 `conflict_round`를 세우고, `lifetimeCostOf`는 그 섹션을 `usd`·`runs`에서 빼 `conflictUsd`·`conflictRuns`로
    돌려준다. `budgetCheck`는 `usd`로만 판정한다. 기록의 다른 자리·다른 러너·개행 뒤에 옮겨 적힌 같은 문구는 아무것도 빼지 않는다(쓰는 쪽
    `quoteConflictRoundLines`·`neutralizeRecordLine`이 인용한다).
 6. **상한은 런 개수다 — `CONFLICT_ROUND_EXCLUDED_RUNS = 2`**(같은 테스트가 핀한다). 뜨거운 파일을 고친 PR은 "승인 → 충돌 → 해소 → 승인 → 다시 충돌"을
-   되풀이할 수 있고, 거기서 아무것도 세지 않으면 멈출 장치가 없다. 기록 순서로 앞의 두 섹션만 빠지고 그 뒤는 센다.
+   되풀이할 수 있고, 거기서 아무것도 세지 않으면 멈출 장치가 없다. 기록 순서로 앞의 두 섹션만 빠지고 그 뒤는 센다. 상한은 **평생**이다: K의
+   창은 재큐마다 다시 열리므로, 쓰는 쪽(`lib/context.js`)이 이슈의 평생 마커 수(`conflictRoundsUsed`)가 상한에 닿으면 conflict-only를 켜지
+   않는다 — 그 라운드는 마커도 태그도 없는 보통 라운드이고 기록에 `conflict-only: not applied — this issue already used …`가 남는다
+   (`test_212_conflict_round_bound_is_lifetime_across_a_requeue`). 거부로 취소된 라운드도 그 칸을 쓴다(보수적: 면제가 상한을 넘지 않는다).
+6b. **뒤따른 리뷰가 거부하면 면제는 취소된다**(dw6, 면제의 고리가 없다): 충돌 라운드 다음의 리뷰가 rework을 내면 그 라운드는 끝난 충돌
+   라운드가 아니다 — 비용은 그 섹션 뒤 다음 implement 섹션 전의 review 섹션에 러너의 `transition: factory:rework` 줄이 있으면 다시 세고
+   (`budgetLine`: `conflict round run(s) … counted in the cap (the review that followed rejected it)`; `test_212_conflict_round_cost_is_revoked_when_the_next_review_rejects`),
+   K는 그 충돌 rework 다음의 rework 전이가 머지 스테이지의 것이 아니면 다시 센다(`test_212_conflict_marker_binds_to_its_round_and_a_rejecting_review_revokes_it`).
+   위조된 줄은 거부를 더할 수만 있고(세는 쪽) 숨길 수는 없다. #196 흐름 전체는 `test_212_failed_conflict_round_falls_back_to_today` (1b)가 오늘의
+   셈(K 4, $75.88)으로 핀한다.
 7. **사람이 읽는 줄**(`budgetLine`; `test_212_budget_line_names_excluded_conflict_cost`): 빠진 돈과 런 수를 적고, 상한을 넘어 다시 센 런도
    `further conflict round run(s) … counted in the cap`으로 적는다. 충돌 섹션이 없는 기록의 값과 줄은 이 변경 전 코드와 같다.
 8. **K**(`lib/retro/issue-comments.js` `countedTransitionIndices`; `test_212_merge_conflict_rework_is_not_a_review_round`): 그 뒤에 러너 마커가
-   있는 머지 스테이지의 CONFLICTING rework는 K로 세지 않는다 — 같은 상수까지. 규칙은 그 함수 하나라 `reviewRounds`와 #174 재시작의 `offset`이
+   있는 머지 스테이지의 CONFLICTING rework는 K로 세지 않는다 — 같은 상수까지. 마커는 **그 라운드에 묶여야** 한다: 본문 맨 앞의 마커 코멘트
+   (`conflictRoundOf` — 다른 글 안에 인용된 마커는 아니다), 그 충돌 rework 뒤의 awaiting-review 전이 **뒤**, 다음 rework 전, 그리고 `approved=`·
+   `issue=`가 그 rework 앞의 승인 review 핸드오프의 head·이슈와 같아야 한다(`test_212_conflict_marker_binds_to_its_round_and_a_rejecting_review_revokes_it`). 규칙은 그 함수 하나라 `reviewRounds`와 #174 재시작의 `offset`이
    같은 셈을 본다. 2K 천장의 셈(`attempts`, 취소를 따르지 않는 셈)은 면제하지 않는다 — 마커도 factory 계정의 코멘트라 위조할 수 있고, 위조는
    많아야 두 칸만큼 K를 늦출 뿐 천장을 넘기지 못한다. 충돌 전이가 없는 창의 K·재시작·`reviewRoundOf`는 이 변경 전 규칙과 같다
    (`test_212_windows_without_a_conflict_transition_count_as_before`). R(sweeper 재시도)은 이 경로에 없어 손대지 않는다.
