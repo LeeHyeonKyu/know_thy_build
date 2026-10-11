@@ -11,9 +11,9 @@ import { neverAutomateHits } from "./verify-stage.js";
  *   3. **큐 길이**(`back_pressure.queue_max`) — 외부 에이전트의 큐 홍수. `awaiting_review_max`는 리뷰 대기 수지 큐 길이가 아니다.
  *   4. **자기생성 이슈의 상한**(`self_generated.open_max`, `depth_max`) — 실측 증식률(캠페인 28머지 → 자기생성 7 = 0.25/머지)에서
  *      루프는 이미 수렴한다. 이 상한은 지문 드리프트 같은 결함에 대한 보험이다. 자기생성인지는 **러너가 쓴 마커와 작성 계정**으로
- *      판정한다 — 제출자의 자기 신고(`by=`)가 아니다. 심사하는 이슈와 기원 사슬의 상한은 **마커 또는 라벨**로 건다(#231 rework cf1):
- *      gh.issue()가 작성자를 싣기 전에는 작성자 갈래가 프로덕션에서 돈 적이 없고, 그것을 켜면 공유 계정(PAT 폴백)에서 소유자가 쓴
- *      보통 피처가 open_max에, 그 피처에서 수확한 flaky가 depth_max에 걸린다. 공장이 연 이슈는 어느 계정이든 마커·라벨을 단다.
+ *      판정한다 — 제출자의 자기 신고(`by=`)가 아니다. 상한의 판정(`isSelfGenerated`)은 넓은 쪽(마커 또는 라벨 또는 공장 작성자)
+ *      그대로다(#231 plan non_goals[1]): 좁히면 공장이 사람 계정(PAT 폴백)으로 연 이슈가 세지지 않아 증식 상한이 조용히 풀린다.
+ *      공유 계정에서 소유자의 보통 피처까지 세지는 것은 알려진 한계다(non_goals[3] — 핀하고 고치지 않는다).
  *
  * 리허설(ADR-025)과 같은 자리에서, 같은 방식(배선된 검사기, fail closed)으로 돈다. 상한 상수는 CHARTER에 있고 사람만 고친다.
  */
@@ -32,8 +32,8 @@ const isFactoryLogin = (login, factoryLogins) => !!login && (Array.isArray(facto
 
 /**
  * 공장이 만든 이슈인가 — 마커(개선·하네스·flaky) **또는** 공장 라벨 **또는** 작성 계정이 팩토리 계정.
- * 진행 중 자기생성 수가 쓰는 넓은 판정이다. 공장이 소유자 PAT으로 연 이슈(ADR-038 폴백)와 마커만 남은 옛 이슈도 상한에는 세진다.
- * `queueAdmission`은 심사하는 이슈와 기원 사슬에 `factoryLogins` 없이 부른다(rework cf1 — 마커·라벨만, 작성자 갈래 없이).
+ * **상한(open_max·depth_max)·진행 중 자기생성 수·기원 사슬**이 쓰는 넓은 판정이다. #231은 이것을 좁히지 않는다: 공장이 소유자 PAT으로
+ * 연 이슈(ADR-038 폴백)와 마커만 남은 옛 이슈도 상한에는 세져야 한다 — 좁히면 증식 상한이 조용히 풀린다(fail open).
  * done_when 면제는 더 좁은 `doneWhenExemption`이 따로 판정한다.
  */
 export function isSelfGenerated(issue, factoryLogins = []) {
@@ -138,11 +138,8 @@ export function queueAdmission({ issue, charter, queued = [], openSelfGenerated 
   const caps = { ...SELF_GENERATED_DEFAULTS, ...(charter?.self_generated || {}) };
   const queueMax = Number.isInteger(charter?.back_pressure?.queue_max) ? charter.back_pressure.queue_max : caps.queue_max;
   const reasons = [];
-  // rework cf1 — 상한은 러너가 쓴 마커·라벨로만 건다(작성자 갈래 없이: 공유 계정에서는 소유자의 피처도 공장 작성자다).
-  // plan non_goal "open_max/depth_max·openSelfGenerated·기원 사슬의 판정을 바꾸지 않는다"와의 관계: #231 전의 gh.issue()는 작성자를
-  // 싣지 않아 작성자 갈래가 프로덕션에서 한 번도 참이 된 적이 없다 — 지금까지 실제로 돈 판정은 마커 또는 라벨이고, 세 상한 입력
-  // (이 이슈, openSelfGenerated, 기원 사슬)이 모두 `[]`로 그 판정을 그대로 지킨다. 작성자를 실은 것이 상한을 바꾸지 않게 하는 것이다.
-  const self = isSelfGenerated(issue, []);
+  // rework spec1 — 세 상한 입력(이 이슈, openSelfGenerated, 기원 사슬)은 plan non_goals[1]의 판정(마커 또는 라벨 또는 공장 작성자)을 쓴다.
+  const self = isSelfGenerated(issue, factoryLogins);
   const body = String(issue?.body ?? "");
 
   // #231 — done_when 면제는 상한의 판정(`self`)보다 좁다: 마커는 공장 로그인이 연 이슈에서만 면제한다(`doneWhenExemption`).
@@ -180,7 +177,7 @@ export function queueAdmission({ issue, charter, queued = [], openSelfGenerated 
     let depth = gen(issue), cur = originOf(issue), hops = 0;
     while (cur && hops++ < 10) {
       const parent = byNumber(cur.number);
-      if (!parent || !isSelfGenerated(parent, [])) break;
+      if (!parent || !isSelfGenerated(parent, factoryLogins)) break;
       depth += gen(parent);
       cur = originOf(parent);
     }
@@ -213,8 +210,7 @@ export function makeQueueAdmission({ gh, charter, factoryLogins = null }) {
       for (const c of candidates.values()) {
         if (c.number === it.number) continue;
         const full = await gh.issue(c.number);
-        // 상한 입력은 셋 다 같은 판정(마커 또는 라벨, rework cf1 — queueAdmission의 `self` 주석)으로 센다.
-        if (labelsOf(full).some((l) => ACTIVE.includes(l)) && isSelfGenerated(full, [])) openSelfGenerated.push({ number: c.number });
+        if (labelsOf(full).some((l) => ACTIVE.includes(l)) && isSelfGenerated(full, logins)) openSelfGenerated.push({ number: c.number });
       }
       const cache = new Map();
       const byNumber = (n) => cache.get(n) ?? null;

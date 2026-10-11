@@ -491,7 +491,7 @@ test("test_231_factory_flaky_issue_under_pat_author_still_admitted", async () =>
     expect(deep.ok).toBe(false);
     expect(deep.reasons.join(" ")).toMatch(/generation 2 > 1/);
   }
-  // 상한의 판정은 마커 또는 라벨이다(rework cf1 — 심사 경로는 작성자 갈래를 쓰지 않는다): 사람이 붙여 넣은 마커(done_when 있음)도,
+  // 상한의 판정은 마커 또는 라벨 또는 공장 작성자다(plan non_goals[1]): 사람이 붙여 넣은 마커(done_when 있음)도,
   // 라벨만 단 이슈도 상한에는 센다 — 상한을 면제 규칙(공장 작성자의 마커)으로 좁히거나 라벨 경로를 좁히면 여기서 실패한다
   const fullCaps = [1, 2].map((number) => ({ number }));
   for (const it of [
@@ -514,9 +514,17 @@ test("test_231_factory_flaky_issue_under_pat_author_still_admitted", async () =>
   expect(await specAdmit({ issue: 70 })).toEqual({ ok: true, reasons: [], self_generated: true });
   expect((await specAdmit({ issue: 71 })).reasons.join(" ")).toMatch(/generation 2 > 1/);
 
-  // rework cf1 — 상한은 **러너가 쓴 마커·라벨**로만 걸린다. 공유 계정(PAT 폴백)에서 소유자가 쓴 보통 피처(done_when 있음, 마커·라벨
-  // 없음)는 작성자가 공장 로그인이어도 open_max에 막히지 않고, 그 피처에서 수확한 flaky의 세대도 1이다(예전 배선과 같다:
-  // gh.issue()가 작성자를 싣기 전에는 이 둘이 들어갔다).
+  // rework spec1 — 상한의 판정은 plan non_goals[1]대로 **마커 또는 라벨 또는 공장 작성자**다. 마커·라벨 없이 done_when을 가진
+  // 이슈도 작성자가 공장 로그인이면 open_max에 센다 — 작성자 갈래를 지우면 여기서 실패한다.
+  const appFeature = { ...busy, 90: { number: 90, body: person.body, labels: ["backlog"], author: appAuthor("ktb-factory") } };
+  const lists = { lists: { "factory:flaky": [{ number: 41 }, { number: 51 }, { number: 52 }] } };
+  const byApp = await makeQueueAdmission({ gh: ghOver(appFeature, lists), charter: charter(), factoryLogins: FACTORY })({ issue: 90 });
+  expect(byApp).toEqual({ ok: false, reasons: ["self-generated open 2 ≥ 2 (self_generated.open_max)"], self_generated: true });
+  // 같은 이슈를 사람이 쓰면 자기생성이 아니다
+  const byPerson = await makeQueueAdmission({ gh: ghOver({ ...appFeature, 90: { ...appFeature[90], author: humanAuthor("LeeHyeonKyu") } }, lists), charter: charter(), factoryLogins: FACTORY })({ issue: 90 });
+  expect(byPerson).toEqual({ ok: true, reasons: [], self_generated: false });
+  // 알려진 한계(plan non_goals[3] — 공유 계정에서는 사람과 에이전트를 가를 수 없다, 고치지 않고 핀한다): 공장이 소유자 계정으로
+  // 도는 저장소(PAT 폴백)에서는 소유자가 쓴 보통 피처도 공장 작성자라 open_max에 세지고, 그 피처에서 수확한 flaky는 2세대다.
   const SHARED = async () => ({ ok: true, logins: ["LeeHyeonKyu"] });
   const full = {
     ...busy,
@@ -527,10 +535,12 @@ test("test_231_factory_flaky_issue_under_pat_author_still_admitted", async () =>
   for (const k of [53, 54, 55]) full[k] = { ...flakyFrom(k, 7, humanAuthor("LeeHyeonKyu")), labels: ["factory:queue", "factory:flaky"] };
   full[41] = { ...full[41], labels: ["factory:in-progress", "factory:flaky"] };
   const sharedAdmit = makeQueueAdmission({ gh: ghOver(full, { lists: { "factory:flaky": fiveOpen.map((number) => ({ number })) } }), charter: { ...charter(), self_generated: { open_max: 5, depth_max: 1 } }, factoryLogins: SHARED });
-  expect(await sharedAdmit({ issue: 80 })).toEqual({ ok: true, reasons: [], self_generated: false });
-  // 같은 배선에서 공장의 flaky는 여전히 open_max에 걸린다(상한은 풀리지 않았다)
+  expect(await sharedAdmit({ issue: 80 })).toEqual({ ok: false, reasons: ["self-generated open 6 ≥ 5 (self_generated.open_max)"], self_generated: true });
+  // 같은 배선에서 공장의 flaky도 open_max에 걸린다(상한은 풀리지 않았다)
   expect((await sharedAdmit({ issue: 81 })).reasons.join(" ")).toMatch(/self-generated open 6 ≥ 5/);
-  // 소유자가 쓴 #7에서 수확한 flaky는 한 세대다 — 공유 로그인이 #7을 공장 세대로 만들지 않는다
+  // 소유자가 쓴 #7은 공유 로그인에서 공장 세대다 — 그 아래 flaky는 2세대로 depth_max에 걸린다(공장 로그인을 모르면 1세대)
   const quiet = makeQueueAdmission({ gh: ghOver({ 7: issues[7], 81: full[81] }), charter: charter(), factoryLogins: SHARED });
-  expect(await quiet({ issue: 81 })).toEqual({ ok: true, reasons: [], self_generated: true });
+  expect((await quiet({ issue: 81 })).reasons).toEqual(["self-generated generation 2 > 1 (self_generated.depth_max) — an issue the factory made from an issue the factory made"]);
+  const unshared = makeQueueAdmission({ gh: ghOver({ 7: issues[7], 81: full[81] }), charter: charter(), factoryLogins: FACTORY });
+  expect(await unshared({ issue: 81 })).toEqual({ ok: true, reasons: [], self_generated: true });
 });
