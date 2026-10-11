@@ -5,6 +5,8 @@ import { join } from "node:path";
 import { buildStatus, renderStatus } from "../lib/status.js";
 import { statusCommand } from "../cli/status.js";
 import { THRESHOLD_DEFAULTS } from "../lib/config.js";
+import { makeGh } from "../lib/gh.js";
+import { makeFakeRun } from "../lib/exec.js";
 
 const NOW = "2026-09-15T12:00:00Z";
 const minutesAgo = (n) => new Date(Date.parse(NOW) - n * 60000).toISOString();
@@ -511,4 +513,203 @@ test("test_3_status_usage_none_when_only_retro: a branch holding only _retro sti
   expect(section).toContain(": $0 / 0 runs");
   expect(section).toContain("- total: $0 / 0 runs");
   expect(oText.err).toEqual([]);
+});
+
+// ── #234 (gap P-8, B-2) — `ACTIONS BLOCKED?` at the top of `factory status` ──────────────────────
+// Actions가 막히면(포함 분 소진·spending limit·GitHub 장애) 그것을 알려 줄 sweeper 자신이 워크플로다.
+// 그래서 사람이 Actions 밖에서 돌리는 이 화면이 맨 윗줄로 말한다. 런 픽스처는 gh 어댑터가 내놓는
+// 정규화된 모양(`recentRuns`·`runJobs`·`jobAnnotations`)이고, dw4 테스트는 같은 경로를 gh CLI의 바이트부터 지난다.
+
+const BLOCKED_HEAD = (n) => `ACTIONS BLOCKED? ${n} run(s) queued >24 min / cancelled before any step — check Actions billing`;
+const ghRun = (o) => ({ id: 1, status: "completed", conclusion: "success", createdAt: minutesAgo(5), updatedAt: minutesAgo(4), workflowName: "factory-triage", ...o });
+const neverStartedJob = { id: 901, status: "completed", conclusion: "failure", steps: 0, annotations: [] };
+const startedJob = (annotations = []) => ({ id: 902, status: "completed", conclusion: "failure", steps: 4, annotations });
+const firstLine = (s) => renderStatus(s).split("\n")[0];
+const withActions = (runs, queued = []) => buildStatus({ ...baseArgs(), actions: { runs, queued } });
+
+test("test_234_status_flags_runs_stuck_in_queue_as_actions_blocked", async () => {
+  // healthy: a success, a skipped run, and a concurrency-group cancel (jobs [], ended in a second) → no line
+  const healthy = withActions([
+    ghRun({ id: 1 }),
+    ghRun({ id: 2, conclusion: "skipped" }),
+    ghRun({ id: 3, conclusion: "cancelled", createdAt: minutesAgo(3), updatedAt: minutesAgo(3), jobs: [] }),
+  ]);
+  expect(healthy.actionsBlocked).toBeNull();
+  expect(renderStatus(healthy)).not.toContain("ACTIONS BLOCKED?");
+  expect(firstLine(healthy)).toBe("## Needs You");
+
+  // trigger 1 — a run still queued after more than 24 minutes
+  const queued = withActions([ghRun({ id: 10, status: "queued", conclusion: "", createdAt: minutesAgo(25), updatedAt: minutesAgo(25) })]);
+  expect(firstLine(queued)).toBe(BLOCKED_HEAD(1));
+  for (const status of ["pending", "waiting", "requested"]) {
+    expect(firstLine(withActions([ghRun({ id: 11, status, conclusion: "", createdAt: minutesAgo(40) })])), status).toBe(BLOCKED_HEAD(1));
+  }
+  // …but not one that has waited only 24 minutes (the bar is "more than 24")
+  expect(withActions([ghRun({ id: 12, status: "queued", conclusion: "", createdAt: minutesAgo(24) })]).actionsBlocked).toBeNull();
+
+  // trigger 2 — cancelled without any job having started, after sitting in the queue for more than 24 minutes
+  const cancelled = withActions([ghRun({ id: 20, conclusion: "cancelled", createdAt: minutesAgo(40), updatedAt: minutesAgo(10), jobs: [] })]);
+  expect(firstLine(cancelled)).toBe(BLOCKED_HEAD(1));
+  // a cancelled run whose job DID start (someone pressed cancel mid-run) does not count
+  expect(withActions([ghRun({ id: 21, conclusion: "cancelled", createdAt: minutesAgo(40), updatedAt: minutesAgo(10), jobs: [startedJob()] })]).actionsBlocked).toBeNull();
+
+  // trigger 3 — a failed run whose job text (the annotation gh delivers) mentions billing / a spending limit
+  for (const msg of [
+    "The job was not started because recent account payments have failed or your spending limit needs to be increased. Please check the 'Billing & plans' section of your settings",
+    "The job was not started because your account is locked due to a billing issue.",
+  ]) {
+    const billing = withActions([ghRun({ id: 30, conclusion: "failure", jobs: [startedJob([msg])] })]);
+    expect(firstLine(billing), msg).toBe(BLOCKED_HEAD(1));
+  }
+
+  // trigger 4 — an issue has held factory:queue for more than 10 minutes and no run has started since
+  const label = withActions([ghRun({ id: 40, createdAt: minutesAgo(60), updatedAt: minutesAgo(59) })], [{ number: 5, labeledAt: minutesAgo(15) }]);
+  expect(firstLine(label).startsWith(BLOCKED_HEAD(0))).toBe(true);
+  expect(firstLine(label)).toContain("#5");
+  expect(withActions([], [{ number: 5, labeledAt: minutesAgo(9) }]).actionsBlocked).toBeNull();
+
+  // two run triggers together → the count is 2, still on the first line
+  const two = withActions([
+    ghRun({ id: 50, status: "queued", conclusion: "", createdAt: minutesAgo(30) }),
+    ghRun({ id: 51, conclusion: "cancelled", createdAt: minutesAgo(50), updatedAt: minutesAgo(20), jobs: [] }),
+  ]);
+  expect(firstLine(two)).toBe(BLOCKED_HEAD(2));
+  expect(renderStatus(two).indexOf("## Needs You")).toBeGreaterThan(0);
+
+  // statusCommand: the run list is read (20 rows) and a stuck run surfaces at the top of the real output
+  const gh = { ...fakeGh(), recentRuns: vi.fn(async () => [ghRun({ id: 60, status: "queued", conclusion: "", createdAt: minutesAgo(30), updatedAt: minutesAgo(30) })]), runJobs: vi.fn(async () => []), jobAnnotations: vi.fn(async () => []) };
+  const { io: iOk, o: oOk } = io();
+  expect(await statusCommand({ root: mkdtempSync(join(tmpdir(), "status-234-")), argv: [], io: iOk, gh, run: vi.fn(), now: () => NOW, readRecords: vi.fn(async () => new Map()) })).toBe(0);
+  expect(gh.recentRuns).toHaveBeenCalledWith(20);
+  expect(oOk.out[0].split("\n")[0]).toBe(BLOCKED_HEAD(1));
+
+  // statusCommand: the run list cannot be read → no line, every other section, exit 0
+  const broken = { ...fakeGh(), recentRuns: vi.fn(async () => { throw new Error("gh run list failed (1): HTTP 502"); }) };
+  const { io: iB, o: oB } = io();
+  expect(await statusCommand({ root: mkdtempSync(join(tmpdir(), "status-234-broken-")), argv: [], io: iB, gh: broken, run: vi.fn(), now: () => NOW, readRecords: vi.fn(async () => new Map()) })).toBe(0);
+  const brokenText = oB.out.join("\n");
+  expect(brokenText).not.toContain("ACTIONS BLOCKED?");
+  for (const h of ["## Needs You", "## 진행 중", "## 큐", "## 역압", "## 최근 머지", "## 사용량"]) expect(brokenText).toContain(h);
+});
+
+/**
+ * dw4 — 진짜 "Actions가 시작조차 못 한다"의 모양은 billing 낱말이 **run list 어디에도 없다**: `startup_failure`
+ * (데모 2026-09-12 라운드 9~11), 그리고 잡이 한 스텝도 못 돈 `failure`(spending limit). 이 테스트는 gh CLI가
+ * 실제로 내놓는 JSON(`gh run list`·`gh run view --json jobs`·check-run annotations)부터 `statusCommand`까지 지난다.
+ */
+function statusRun({ runs, jobs = {}, annotations = {}, queueIssues = [], queueEvents = {} }) {
+  return makeFakeRun([
+    { match: (c, a) => c === "gh" && a[0] === "run" && a[1] === "list", result: () => ({ code: 0, stdout: JSON.stringify(runs), stderr: "" }) },
+    { match: (c, a) => c === "gh" && a[0] === "run" && a[1] === "view", result: (c, a) => ({ code: 0, stdout: JSON.stringify({ jobs: jobs[a[2]] ?? [] }), stderr: "" }) },
+    {
+      match: (c, a) => c === "gh" && a[0] === "api" && /check-runs\/\d+\/annotations/.test(a[1] || ""),
+      result: (c, a) => ({ code: 0, stdout: JSON.stringify(annotations[/check-runs\/(\d+)/.exec(a[1])[1]] ?? []), stderr: "" }),
+    },
+    {
+      match: (c, a) => c === "gh" && a[0] === "api" && /issues\/\d+\/events/.test(a[1] || ""),
+      result: (c, a) => ({ code: 0, stdout: JSON.stringify([queueEvents[/issues\/(\d+)\/events/.exec(a[1])[1]] ?? []]), stderr: "" }),
+    },
+    { match: (c, a) => c === "gh" && a[0] === "api" && /comments/.test(a[1] || ""), result: { code: 0, stdout: "[[]]", stderr: "" } },
+    {
+      match: (c, a) => c === "gh" && a[0] === "issue" && a[1] === "list",
+      result: (c, a) => ({ code: 0, stdout: JSON.stringify(a.includes("factory:queue") ? queueIssues : []), stderr: "" }),
+    },
+    { match: (c, a) => c === "gh" && a[0] === "pr" && a[1] === "list", result: { code: 0, stdout: "[]", stderr: "" } },
+  ]);
+}
+
+/** `gh run list --json …` 한 행 — billing 낱말은 어디에도 없다. */
+const listRow = (o) => ({ databaseId: 1, status: "completed", conclusion: "failure", createdAt: minutesAgo(8), updatedAt: minutesAgo(7), startedAt: minutesAgo(8), displayTitle: "factory-triage", workflowName: "factory-triage", event: "issues", ...o });
+/** `gh run view --json jobs`의 잡 하나. */
+const ghJob = (id, steps) => ({ databaseId: id, name: "stage", status: "completed", conclusion: "failure", startedAt: minutesAgo(8), completedAt: minutesAgo(7), steps });
+const STEPS = [{ name: "Set up job", status: "completed", conclusion: "success", number: 1 }, { name: "Run tests", status: "completed", conclusion: "failure", number: 2 }];
+
+async function statusFirstLine(facts) {
+  const run = statusRun(facts);
+  const gh = makeGh({ run, repo: "o/r" });
+  const { io: i, o } = io();
+  const code = await statusCommand({ root: mkdtempSync(join(tmpdir(), "status-234-gh-")), argv: [], io: i, gh, run: vi.fn(), now: () => NOW, readRecords: vi.fn(async () => new Map()) });
+  expect(code).toBe(0);
+  return { line: o.out[0].split("\n")[0], calls: run.calls };
+}
+
+test("test_234_status_counts_never_started_failures_but_not_ordinary_failures", async () => {
+  // startup_failure — no billing word in any run-list field, no jobs at all
+  const startup = await statusFirstLine({ runs: [listRow({ databaseId: 101, conclusion: "startup_failure" })] });
+  expect(startup.line).toBe(BLOCKED_HEAD(1));
+  // the run list was read with a 20-row limit
+  expect(startup.calls.find((c) => c.args[0] === "run" && c.args[1] === "list").args).toEqual(expect.arrayContaining(["--limit", "20"]));
+
+  // failure where the run's only job never ran a step (the spending-limit shape) — no billing text anywhere
+  const noStep = await statusFirstLine({ runs: [listRow({ databaseId: 102 })], jobs: { 102: [ghJob(7102, [])] } });
+  expect(noStep.line).toBe(BLOCKED_HEAD(1));
+  // failure with no job created at all
+  expect((await statusFirstLine({ runs: [listRow({ databaseId: 103 })], jobs: { 103: [] } })).line).toBe(BLOCKED_HEAD(1));
+
+  // an ordinary test failure: the job ran its steps, the annotation is the usual exit code → no line
+  const ordinary = await statusFirstLine({
+    runs: [listRow({ databaseId: 104 })],
+    jobs: { 104: [ghJob(7104, STEPS)] },
+    annotations: { 7104: [{ path: ".github", annotation_level: "failure", message: "Process completed with exit code 1." }] },
+  });
+  expect(ordinary.line).toBe("## Needs You");
+
+  // billing wording is matched where gh delivers it — the job's check-run annotation …
+  const billing = await statusFirstLine({
+    runs: [listRow({ databaseId: 105 })],
+    jobs: { 105: [ghJob(7105, STEPS)] },
+    annotations: { 7105: [{ path: ".github", annotation_level: "failure", message: "The job was not started because recent account payments have failed or your spending limit needs to be increased." }] },
+  });
+  expect(billing.line).toBe(BLOCKED_HEAD(1));
+  expect(billing.calls.some((c) => c.args[0] === "api" && c.args[1] === "repos/o/r/check-runs/7105/annotations")).toBe(true);
+  // … and NOT in run-list fields gh fills with other things (a PR titled "fix billing page" that failed its tests)
+  const title = await statusFirstLine({
+    runs: [listRow({ databaseId: 106, displayTitle: "fix billing page spending limit copy" })],
+    jobs: { 106: [ghJob(7106, STEPS)] },
+    annotations: { 7106: [{ path: ".github", annotation_level: "failure", message: "Process completed with exit code 1." }] },
+  });
+  expect(title.line).toBe("## Needs You");
+
+  // the queue-label trigger through the real adapter: label time comes from the issue's `labeled` event
+  const queue = await statusFirstLine({
+    runs: [],
+    queueIssues: [{ number: 5, title: "waiting triage", body: "", labels: [{ name: "factory:queue" }], updatedAt: minutesAgo(1), closedAt: null }],
+    queueEvents: { 5: [{ event: "labeled", label: { name: "factory:queue" }, actor: { login: "o" }, created_at: minutesAgo(15) }] },
+  });
+  expect(queue.line.startsWith(BLOCKED_HEAD(0))).toBe(true);
+  expect(queue.line).toContain("#5");
+});
+
+test("test_234_status_actions_blocked_clears_once_a_later_run_starts", () => {
+  const blocked = ghRun({ id: 1, conclusion: "failure", createdAt: minutesAgo(60), updatedAt: minutesAgo(59), jobs: [neverStartedJob] });
+  // the never-started run is the newest → flags
+  expect(firstLine(withActions([blocked]))).toBe(BLOCKED_HEAD(1));
+  // a LATER run that never got a runner (skipped by `if:`, or cancelled by a concurrency group) does not clear it
+  expect(firstLine(withActions([
+    ghRun({ id: 2, conclusion: "skipped", createdAt: minutesAgo(30) }),
+    ghRun({ id: 3, conclusion: "cancelled", createdAt: minutesAgo(29), updatedAt: minutesAgo(29), jobs: [] }),
+    blocked,
+  ]))).toBe(BLOCKED_HEAD(1));
+  // a later run that started (success / in progress / a failure whose job ran) clears it — billing is back
+  for (const later of [
+    ghRun({ id: 4, conclusion: "success", createdAt: minutesAgo(30) }),
+    ghRun({ id: 5, status: "in_progress", conclusion: "", createdAt: minutesAgo(30) }),
+    ghRun({ id: 6, conclusion: "failure", createdAt: minutesAgo(30), jobs: [startedJob()] }),
+  ]) {
+    expect(withActions([later, blocked]).actionsBlocked, String(later.id)).toBeNull();
+  }
+  // an EARLIER started run does not clear a later block
+  expect(firstLine(withActions([blocked, ghRun({ id: 7, conclusion: "success", createdAt: minutesAgo(90) })]))).toBe(BLOCKED_HEAD(1));
+
+  // the same for a run stuck in the queue and for a startup_failure
+  const stuck = ghRun({ id: 8, status: "queued", conclusion: "", createdAt: minutesAgo(40) });
+  expect(firstLine(withActions([stuck]))).toBe(BLOCKED_HEAD(1));
+  expect(withActions([ghRun({ id: 9, conclusion: "success", createdAt: minutesAgo(5) }), stuck]).actionsBlocked).toBeNull();
+  const startup = ghRun({ id: 10, conclusion: "startup_failure", createdAt: minutesAgo(40) });
+  expect(withActions([ghRun({ id: 11, conclusion: "success", createdAt: minutesAgo(5) }), startup]).actionsBlocked).toBeNull();
+
+  // a stuck queue label: flags while nothing started after the label, clears once a run started after it
+  const q = [{ number: 5, labeledAt: minutesAgo(20) }];
+  expect(firstLine(withActions([ghRun({ id: 12, conclusion: "success", createdAt: minutesAgo(25) })], q)).startsWith(BLOCKED_HEAD(0))).toBe(true);
+  expect(withActions([ghRun({ id: 13, conclusion: "success", createdAt: minutesAgo(15) })], q).actionsBlocked).toBeNull();
 });
