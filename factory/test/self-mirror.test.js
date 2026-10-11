@@ -40,20 +40,26 @@ const manifest = () => buildManifest({ pkgRoot: repoRoot }).map((e) => ({ ...e, 
  * 생성기가 없는 파일에는 `freshContent`가 바이트 그대로를 돌려주므로 기존 불변식은 그대로다.
  */
 const vars = projectVars(repoRoot, repoRoot);
-function drifted(pairs) {
+function drifted(pairs, { root = repoRoot, vars: v = vars } = {}) {
   return pairs
-    .filter((e) => !existsSync(e.destAbs) || freshContent(e, { readFile: (p) => readFileSync(p, "utf8"), vars }) !== readFileSync(e.destAbs, "utf8"))
-    .map(({ destAbs }) => relative(repoRoot, destAbs).split(sep).join("/"));
+    .filter((e) => !existsSync(e.destAbs) || freshContent(e, { readFile: (p) => readFileSync(p, "utf8"), vars: v }) !== readFileSync(e.destAbs, "utf8"))
+    .map(({ destAbs }) => relative(root, destAbs).split(sep).join("/"));
 }
 
-function assertMirrored(pairs) {
-  const bad = drifted(pairs);
-  // #253 — 빌더 세션(FACTORY_STAGE=implement) 안에서 mirrorStep 가족의 드리프트는 러너의 몫이다: 노트와 함께 통과.
-  // 가족 밖(commands)은 RED를 지키되 재생성·커밋을 시키지 않는다. 그 밖의 세션에서 아래 판정은 오늘과 같다.
-  const verdict = selfMirrorVerdict({ bad, env: process.env, hint: UPGRADE_HINT });
-  if (verdict.note) return;
+/**
+ * #253 — 빌더 세션(FACTORY_STAGE=implement) 안에서 mirrorStep 가족의 드리프트는 러너의 몫이다: 노트와 함께 통과.
+ * 가족 밖(commands)은 RED를 지키되 재생성·커밋을 시키지 않는다. 그 밖의 세션에서 아래 판정은 오늘과 같다.
+ * `env`·`root`·`vars`는 주입할 수 있다 — test_253_*가 가짜 드리프트 픽스처로 **이 함수 자체**(바이트 대조 → 판정 → expect)를
+ * 두 env 경로 모두에서 돌린다. 위의 실제 self-mirror 테스트는 기본값(ambient `process.env`, 이 저장소)으로 부른다.
+ * @returns 통과한 판정(`{ok:true}` 또는 `{ok:true, note}`). RED는 expect가 던진다.
+ */
+function assertMirrored(pairs, { env = process.env, root = repoRoot, vars: v = vars } = {}) {
+  const bad = drifted(pairs, { root, vars: v });
+  const verdict = selfMirrorVerdict({ bad, env, hint: UPGRADE_HINT });
+  if (verdict.note) return verdict;
   if (!verdict.ok) return void expect(bad, verdict.message).toEqual([]);
   expect(bad, bad.length ? `${bad.join(", ")} — ${UPGRADE_HINT}` : undefined).toEqual([]);
+  return verdict;
 }
 
 test("self-mirror: .factory/lib/** is byte-identical to factory/lib/**", () => {
@@ -95,112 +101,141 @@ import { vi } from "vitest";
 import { inMirrorFamily } from "../lib/mirror.js";
 import { BUILDER_SESSION_NOTE, isBuilderSession, selfMirrorVerdict } from "./helpers/builder-session.js";
 
-/** tmp에 소스와 **다른** 설치본을 써서 진짜 드리프트한 한 쌍을 만들고, 실제 생산자(`freshContent`)로 드리프트를 잰다. */
-function driftedFixture(dest) {
-  const dir = mkdtempSync(join(tmpdir(), "ktb-253-"));
-  const src = join(dir, "src", "source.txt");
-  const destAbs = join(dir, ...dest.split("/"));
+/**
+ * tmp에 소스와 **다른** 설치본을 써서 진짜 드리프트한 한 쌍을 만든다. 쌍과 그 루트를 돌려준다 — 바이트 대조는 여기서 하지
+ * 않고, 각 env 아래에서 `assertMirrored`가 실제 생산자(`freshContent`)로 매번 다시 한다. `withContext`면 픽스처 루트에
+ * `.factory/out/context.json`을 둔다(러너 게이트 프로세스의 모양). 판정은 파일을 읽지 않는다 — 그 파일이 있어도 RED여야 한다.
+ */
+function driftedFixture(dest, { withContext = false } = {}) {
+  const root = mkdtempSync(join(tmpdir(), "ktb-253-"));
+  const src = join(root, "src", "source.txt");
+  const destAbs = join(root, ...dest.split("/"));
   mkdirSync(dirname(src), { recursive: true });
   mkdirSync(dirname(destAbs), { recursive: true });
   writeFileSync(src, "export const v = 2;\n");
   writeFileSync(destAbs, "export const v = 1;\n");
-  const e = { src, dest, destAbs, owner: "factory" };
-  const bad = freshContent(e, { readFile: (p) => readFileSync(p, "utf8"), vars: {} }) !== readFileSync(destAbs, "utf8") ? [dest] : [];
-  rmSync(dir, { recursive: true, force: true });
-  return bad;
+  if (withContext) {
+    mkdirSync(join(root, ".factory", "out"), { recursive: true });
+    writeFileSync(join(root, ".factory", "out", "context.json"), "{}\n");
+  }
+  const pairs = [{ src, dest, destAbs, owner: "factory" }];
+  return { pairs, root, opts: { root, vars: {} }, done: () => rmSync(root, { recursive: true, force: true }) };
+}
+
+/** assertMirrored가 던진 RED의 메시지(던지지 않으면 null). */
+function redOf(fn) {
+  try { fn(); return null; } catch (err) { return String(err?.message ?? err); }
 }
 
 const FAMILY_SAMPLES = [".factory/lib/x.js", ".factory/bin/run-stage.js", ".factory/actions/gate/action.yml", ".claude/hooks/block-dangerous.sh"];
 
 test("test_253_self_mirror_passes_with_a_note_inside_a_builder_session", () => {
   expect(BUILDER_SESSION_NOTE).toBe("self-mirror: skipped inside a builder session — the runner regenerates .factory/** after the handoff (mirrorStep)");
-  const log = vi.spyOn(console, "log").mockImplementation(() => {});
+  // mockImplementation 없이 엿본다 — 노트는 실제로 출력된다(삼키지 않는다).
+  const log = vi.spyOn(console, "log");
   try {
     for (const dest of FAMILY_SAMPLES) {
-      const bad = driftedFixture(dest);
-      expect(bad).toEqual([dest]); // 픽스처가 진짜로 드리프트했다 — 아니면 아래 통과는 아무것도 증명하지 않는다
-      log.mockClear();
-      const inside = selfMirrorVerdict({ bad, env: { FACTORY_STAGE: "implement" }, hint: UPGRADE_HINT });
-      expect(inside.ok).toBe(true);
-      expect(inside.note).toBe(BUILDER_SESSION_NOTE);
-      expect(log).toHaveBeenCalledTimes(1);
-      expect(log).toHaveBeenCalledWith(BUILDER_SESSION_NOTE);
+      const fx = driftedFixture(dest);
+      try {
+        expect(drifted(fx.pairs, fx.opts)).toEqual([dest]); // 픽스처가 진짜로 드리프트했다 — 아니면 아래 통과는 아무것도 증명하지 않는다
+        log.mockClear();
+        // 실제 self-mirror 테스트가 판정하는 그 함수(assertMirrored)를 env 주입으로 돈다.
+        const inside = assertMirrored(fx.pairs, { ...fx.opts, env: { FACTORY_STAGE: "implement" } });
+        expect(inside).toEqual({ ok: true, note: BUILDER_SESSION_NOTE });
+        expect(log).toHaveBeenCalledTimes(1);
+        expect(log).toHaveBeenCalledWith(BUILDER_SESSION_NOTE);
 
-      log.mockClear();
-      const outside = selfMirrorVerdict({ bad, env: {}, hint: UPGRADE_HINT });
-      expect(outside.ok).toBe(false);
-      expect(outside.note).toBeUndefined();
-      expect(outside.message).toContain(dest);
-      expect(outside.message).toContain(UPGRADE_HINT);
-      expect(log).not.toHaveBeenCalled();
+        log.mockClear();
+        const red = redOf(() => assertMirrored(fx.pairs, { ...fx.opts, env: {} }));
+        expect(red).not.toBeNull();
+        expect(red).toContain(dest);
+        expect(red).toContain(UPGRADE_HINT);
+        expect(log).not.toHaveBeenCalled();
+      } finally { fx.done(); }
     }
     // 드리프트가 없으면 노트도 없다 — 진짜로 비교해 통과한 것을 "skipped"라고 적지 않는다.
-    expect(selfMirrorVerdict({ bad: [], env: { FACTORY_STAGE: "implement" }, hint: UPGRADE_HINT })).toEqual({ ok: true });
-    expect(log).toHaveBeenCalledTimes(0);
+    const clean = driftedFixture(".factory/lib/x.js");
+    try {
+      writeFileSync(clean.pairs[0].destAbs, readFileSync(clean.pairs[0].src, "utf8"));
+      log.mockClear();
+      expect(assertMirrored(clean.pairs, { ...clean.opts, env: { FACTORY_STAGE: "implement" } })).toEqual({ ok: true });
+      expect(log).not.toHaveBeenCalled();
+    } finally { clean.done(); }
+
+    // 기본값 배선: env를 넘기지 않으면 assertMirrored는 ambient process.env를 읽는다(실제 self-mirror 테스트의 경로).
+    // vi.stubEnv로 바꾸고 unstubAllEnvs로 반드시 되돌린다.
+    const fx = driftedFixture(".factory/lib/x.js");
+    try {
+      vi.stubEnv("FACTORY_STAGE", "implement");
+      log.mockClear();
+      expect(assertMirrored(fx.pairs, fx.opts)).toEqual({ ok: true, note: BUILDER_SESSION_NOTE });
+      expect(log).toHaveBeenCalledTimes(1);
+      vi.stubEnv("FACTORY_STAGE", "review");
+      expect(redOf(() => assertMirrored(fx.pairs, fx.opts))).toContain(UPGRADE_HINT);
+    } finally { vi.unstubAllEnvs(); fx.done(); }
   } finally {
     log.mockRestore();
   }
 });
 
 test("test_253_runner_gate_env_still_byte_compares_the_mirror", () => {
-  const ctxDir = mkdtempSync(join(tmpdir(), "ktb-253-ctx-"));
-  mkdirSync(join(ctxDir, ".factory", "out"), { recursive: true });
-  writeFileSync(join(ctxDir, ".factory", "out", "context.json"), "{}\n");
   const log = vi.spyOn(console, "log").mockImplementation(() => {});
   try {
     const envs = [
       {}, { FACTORY_STAGE: "" }, { FACTORY_STAGE: "review" }, { FACTORY_STAGE: "merge" }, { FACTORY_STAGE: "1" },
-      { FACTORY_RUNNER_ID: "gha-1" }, // 러너의 게이트 프로세스 모양 — `root`의 .factory/out/context.json이 있다
+      { FACTORY_RUNNER_ID: "gha-1" }, // 러너의 게이트 프로세스 모양 — 픽스처 루트에 .factory/out/context.json이 있다
       { GITHUB_ACTIONS: "true", FACTORY_RUNNER_ID: "gha-1" },
       { CLAUDE_PROJECT_DIR: "/repo" },
     ];
     for (const dest of FAMILY_SAMPLES) {
-      const bad = driftedFixture(dest);
-      expect(bad).toEqual([dest]);
-      for (const env of envs) {
-        expect(isBuilderSession(env)).toBe(false);
-        const v = selfMirrorVerdict({ bad, env, hint: UPGRADE_HINT, root: ctxDir });
-        expect(v.ok, JSON.stringify(env)).toBe(false);
-        expect(v.note).toBeUndefined();
-        expect(v.message).toContain(dest);
-        expect(v.message).toContain(UPGRADE_HINT);
-      }
+      const fx = driftedFixture(dest, { withContext: true });
+      try {
+        expect(existsSync(join(fx.root, ".factory", "out", "context.json"))).toBe(true);
+        for (const env of envs) {
+          expect(isBuilderSession(env)).toBe(false);
+          // 각 env 아래에서 바이트 대조부터 다시 한다(assertMirrored → drifted → freshContent).
+          const red = redOf(() => assertMirrored(fx.pairs, { ...fx.opts, env }));
+          expect(red, JSON.stringify(env)).not.toBeNull();
+          expect(red).toContain(dest);
+          expect(red).toContain(UPGRADE_HINT);
+          expect(red).not.toContain(BUILDER_SESSION_NOTE);
+        }
+      } finally { fx.done(); }
     }
     expect(log).not.toHaveBeenCalled();
   } finally {
     log.mockRestore();
-    rmSync(ctxDir, { recursive: true, force: true });
   }
 });
 
 test("test_253_commands_family_is_never_skipped_because_mirror_step_does_not_regenerate_it", () => {
   const dest = ".claude/commands/factory-implement.md";
   expect(inMirrorFamily(dest)).toBe(false); // mirrorStep의 가족 밖 — 그래서 노트로 통과할 자격이 없다
-  const bad = driftedFixture(dest);
-  expect(bad).toEqual([dest]);
+  const fx = driftedFixture(dest);
   const log = vi.spyOn(console, "log").mockImplementation(() => {});
   try {
-    const inside = selfMirrorVerdict({ bad, env: { FACTORY_STAGE: "implement" }, hint: UPGRADE_HINT });
-    expect(inside.ok).toBe(false);
-    expect(inside.note).toBeUndefined();
-    expect(inside.message).toContain(dest);
-    expect(inside.message).not.toContain(UPGRADE_HINT);
-    expect(inside.message).not.toMatch(/init --upgrade/);
-    expect(inside.message).not.toMatch(/commit/i);
-    expect(inside.message).toMatch(/runner or the operator/);
+    expect(drifted(fx.pairs, fx.opts)).toEqual([dest]);
+    const inside = redOf(() => assertMirrored(fx.pairs, { ...fx.opts, env: { FACTORY_STAGE: "implement" } }));
+    expect(inside).not.toBeNull();
+    expect(inside).toContain(dest);
+    expect(inside).not.toContain(UPGRADE_HINT);
+    expect(inside).not.toMatch(/init --upgrade/);
+    expect(inside).not.toMatch(/commit/i);
+    expect(inside).toMatch(/runner or the operator/);
 
     // 한 묶음에 가족 안·밖이 섞여도 밖의 경로가 RED를 지킨다.
     const mixed = selfMirrorVerdict({ bad: [".factory/lib/x.js", dest], env: { FACTORY_STAGE: "implement" }, hint: UPGRADE_HINT });
     expect(mixed.ok).toBe(false);
     expect(mixed.message).toContain(dest);
 
-    const outside = selfMirrorVerdict({ bad, env: {}, hint: UPGRADE_HINT });
-    expect(outside.ok).toBe(false);
-    expect(outside.message).toContain(dest);
-    expect(outside.message).toContain(UPGRADE_HINT);
+    const outside = redOf(() => assertMirrored(fx.pairs, { ...fx.opts, env: {} }));
+    expect(outside).not.toBeNull();
+    expect(outside).toContain(dest);
+    expect(outside).toContain(UPGRADE_HINT);
     expect(log).not.toHaveBeenCalled();
   } finally {
     log.mockRestore();
+    fx.done();
   }
   // 개수 핀은 어느 세션에서나 돈다 — 실제 매니페스트에서.
   expect(manifest().filter((e) => /^\.claude\/commands\/factory-.*\.md$/.test(e.dest)).length).toBe(5);
