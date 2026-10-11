@@ -18,30 +18,21 @@
 
 | metric | this window | cumulative |
 | --- | --- | --- |
-| merged | 4 | 20 |
-| review rounds avg | 1.75 | 1.75 |
-| rounds/issue (plan/impl/review) | 1.25 / 2.5 / 1.75 | 0.9 / 2 / 1.75 |
-| escaped defects | 5 (#234×1, #226×4) | 25 |
-| revert rate | 0.00 (0/4) | 0.00 (0/20) |
-| needs-human | 24 | 84 |
-| rejects by role | correctness 1, architecture 1, spec-conformance 2, security 2 | spec-conformance 10, qa 4, correctness 13, architecture 7, security 4 |
-| reviewer overlap | 0.50 (3/6, runs 10) | 0.50 (21/42, runs 46) |
-| unique findings by role | architecture 1, security 1, spec-conformance 1 | spec-conformance 4, qa 4, correctness 6, architecture 4, security 3 |
-| qa na ratio | 0.26 (27/104 claims, na-heavy 4/15 approvals) | 0.24 (57/242 claims, na-heavy 8/34 approvals) |
-| cost (usd) | 361.06 | 1271.17 |
-| tokens | input 8725372 / output 788801 | input 31252229 / output 2568342 |
-| retro cost (usd) | 1.12 | 11.56 |
-| retro tokens | input 4 / output 3076 | input 34 / output 29746 |
+| merged | 0 | 20 |
+| review rounds avg | 0 | 1.75 |
+| rounds/issue (plan/impl/review) | 0 / 0 / 0 | 0.9 / 2 / 1.75 |
+| escaped defects | 0 | 25 |
+| revert rate | 없음 | 0.00 (0/20) |
+| needs-human | 0 | 84 |
+| rejects by role | 없음 | spec-conformance 10, qa 4, correctness 13, architecture 7, security 4 |
+| reviewer overlap | 없음 | 0.50 (21/42, runs 46) |
+| unique findings by role | 없음 | spec-conformance 4, qa 4, correctness 6, architecture 4, security 3 |
+| qa na ratio | 없음 | 0.24 (57/242 claims, na-heavy 8/34 approvals) |
+| cost (usd) | 13.95 | 1271.17 |
+| tokens | input 29407 / output 2940 | input 31252229 / output 2568342 |
+| retro cost (usd) | 0.00 | 11.56 |
+| retro tokens | input 0 / output 0 | input 34 / output 29746 |
 | full retros | — | 10 |
-
-### Rounds per issue (this window)
-
-| issue | plan | implement | review | escaped |
-| --- | --- | --- | --- | --- |
-| #260 | 1 | 1 | 1 | 0 |
-| #253 | 2 | 2 | 1 | 0 |
-| #234 | 1 | 2 | 2 | 1 |
-| #226 | 1 | 5 | 3 | 4 |
 
 ### Phase-2 gate baseline (this session)
 
@@ -2119,83 +2110,33 @@
     ]
   },
   "stats": {
-    "merged": 4,
-    "review_rounds_avg": 1.75,
-    "plan_rounds_avg": 1.25,
-    "implement_rounds_avg": 2.5,
-    "rounds_per_issue": [
-      {
-        "issue": 260,
-        "plan": 1,
-        "implement": 1,
-        "review": 1
-      },
-      {
-        "issue": 253,
-        "plan": 2,
-        "implement": 2,
-        "review": 1
-      },
-      {
-        "issue": 234,
-        "plan": 1,
-        "implement": 2,
-        "review": 2
-      },
-      {
-        "issue": 226,
-        "plan": 1,
-        "implement": 5,
-        "review": 3
-      }
-    ],
-    "escaped_defects": 5,
-    "escaped_defects_detail": [
-      {
-        "issue": 234,
-        "count": 1
-      },
-      {
-        "issue": 226,
-        "count": 4
-      }
-    ],
+    "merged": 0,
+    "review_rounds_avg": 0,
+    "plan_rounds_avg": 0,
+    "implement_rounds_avg": 0,
+    "rounds_per_issue": [],
+    "escaped_defects": 0,
+    "escaped_defects_detail": [],
     "reverts": 0,
     "reverted_issues": [],
-    "revert_rate": 0,
-    "rejects_by_role": {
-      "correctness": 1,
-      "architecture": 1,
-      "spec-conformance": 2,
-      "security": 2
-    },
-    "review_runs": 10,
-    "findings_total": 6,
-    "overlapping_findings": 3,
-    "unique_findings_by_role": {
-      "architecture": 1,
-      "security": 1,
-      "spec-conformance": 1
-    },
-    "overlap_ratio": 0.5,
-    "needs_human": 24,
-    "qa_approvals": 15,
-    "qa_claims_total": 77,
-    "qa_na_total": 27,
-    "qa_na_ratio": 0.26,
-    "qa_na_heavy_approvals": 4,
+    "revert_rate": null,
+    "rejects_by_role": {},
+    "review_runs": 0,
+    "findings_total": 0,
+    "overlapping_findings": 0,
+    "unique_findings_by_role": {},
+    "overlap_ratio": 0,
+    "needs_human": 0,
+    "qa_approvals": 0,
+    "qa_claims_total": 0,
+    "qa_na_total": 0,
+    "qa_na_ratio": 0,
+    "qa_na_heavy_approvals": 0,
     "usage": {
-      "cost_usd": 361.064002,
+      "cost_usd": 13.95075,
       "tokens": {
-        "input": 8725372,
-        "output": 788801
-      }
-    },
-    "retro_usage": {
-      "cost_usd": 1.123119,
-      "tokens": {
-        "input": 4,
-        "output": 3076
+        "input": 29407,
+        "output": 2940
       }
     }
   },
