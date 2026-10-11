@@ -25,7 +25,7 @@ import { makeQueueAdmission } from "../lib/admission.js";
 import { mirrorStep, mirrorMatchesHead, inMirrorFamily, regenerateMirror, mirrorApplicable, isUnionMergePath, MIRROR_FAMILIES } from "../lib/mirror.js";
 import { REHEARSAL_UNWIRED } from "../lib/transition.js";
 export { HARNESS_LABEL };   // 재수출 — retro.js와 이 값이 같은 소스에서 왔다는 것을 테스트가 import equality로 확인한다
-import { buildContext, resolveTier, contextManifestLines } from "../lib/context.js";
+import { buildContext, resolveTier, raisedTierOf, contextManifestLines } from "../lib/context.js";
 import { resolveReviewRoster } from "../lib/review-roster.js";
 import { startHeartbeat } from "../lib/heartbeat.js";
 import { readProgress, progressMarker } from "../lib/progress.js";
@@ -2551,6 +2551,27 @@ export function makePrEvidenceDeps({ gh, issue, repo = null, readRecord = null, 
 }
 
 /**
+ * 감사 H3 / KTB-46 r3 — merge 스테이지의 `reviewRoster` dep(정족수의 로스터). main()의 인라인 클로저였던 것을 꺼냈다(#233 cf1/arch1/qa1):
+ * 그래야 "merge 정족수가 review 스테이지의 `context.json`과 같은 tier 규칙에서 나오는가"를 테스트가 실제 배선으로 핀한다.
+ * 해석은 `lib/review-roster.js` 하나다 — sweeper의 사람-머지 반영 팔이 같은 함수를 부른다(판정이 두 벌이면 한쪽 문이 조용히 싸진다).
+ * 여기만이 diff로 tier를 올릴 수 있다. 코멘트 조회의 실패도 예전과 같은 문장으로 접는다(그 조회는 helper 밖에서 일어난다).
+ * 게터인 이유 — charter·harness는 `charterReady` 뒤에 생긴다.
+ */
+export function makeMergeReviewRosterDep({ run, root, gh, issue, getCharter, getHarness, mergeBase }) {
+  return async () => {
+    try {
+      const comments = await gh.comments(issue);
+      return await resolveReviewRoster({
+        charter: getCharter(), roles: () => loadRoles(root), comments,
+        // #233 cf1/arch1/qa1 — triage 검증의 올림(`raisedTierOf`)을 buildContext(context.js)와 똑같이 넘긴다. 빠지면 리뷰는 올린
+        // 로스터로 돌고 정족수는 신고/바닥 로스터로 세어 `verdict count N != roster size M`으로 머지가 막힌다.
+        effectiveTier: async (tier) => resolveTier({ run, cwd: root, base: await mergeBase(), harness: getHarness(), tier, raised: raisedTierOf(latestHandoff(comments, "triage")?.data) }),
+      });
+    } catch (e) { return { ok: false, reason: `review roster for this tier could not be resolved — ${e?.message || e}` }; }
+  };
+}
+
+/**
  * `makeMergeSelfChangeDeps`: merge-stage의 `selfChange`·`engine`·`neverAutomate`·`mergePr`·`vetoWindow`·`vetoLabel`·`now`·`jobStartedAt`·`jobTimeoutMinutes`.
  * `selfChange`·`engine`은 **게터**다(CHARTER와 base 판정은 charterReady에서 생긴다) — 조립하는 쪽은 펼치지(`...`) 말고
  * `Object.getOwnPropertyDescriptors`로 옮긴다. GitHub 호출은 전부 gh.js를 지난다: 창은 `setStatus`/`commitStatuses`, 거부권은
@@ -3955,17 +3976,7 @@ async function main() {
      * 한 규칙에서 나온다. (리뷰 batch-1의 잠정 `reviewTier(claimed, gates.json)` 바닥은 이 canonical
      * 계산으로 대체됐다 — gates.json은 PR head에서 쓰이지만 이것은 base + diff에서 도출된다.)
      */
-    reviewRoster: async () => {
-      // KTB-46 r3: 해석은 `lib/review-roster.js` 하나다 — sweeper의 사람-머지 반영 팔이 같은 함수를
-      // 부른다(판정이 두 벌이면 한쪽 문이 조용히 싸진다). 여기만이 diff로 tier를 올릴 수 있다.
-      // 코멘트 조회의 실패도 예전과 같은 문장으로 접는다(그 조회는 helper 밖에서 일어난다).
-      try {
-        return await resolveReviewRoster({
-          charter, roles: () => loadRoles(root), comments: await gh.comments(issue),
-          effectiveTier: async (tier) => resolveTier({ run, cwd: root, base: await mergeBase(), harness, tier }),
-        });
-      } catch (e) { return { ok: false, reason: `review roster for this tier could not be resolved — ${e?.message || e}` }; }
-    },
+    reviewRoster: makeMergeReviewRosterDep({ run, root, gh, issue, getCharter: () => charter, getHarness: () => harness, mergeBase }),
     /**
      * 리뷰 batch-1 MF-2 — 머지 직전 §(6b2)의 재료: `factory/records` 브랜치의 run 기록에 **러너가**
      * 쓴 `review-evidence:` 줄. 브랜치를 읽지 못하는 것은 "기록이 없다"가 아니라 **판정 불가**이므로

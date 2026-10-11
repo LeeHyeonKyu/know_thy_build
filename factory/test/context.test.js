@@ -750,6 +750,8 @@ test("test_174_builder_context_takes_the_brief_bound_to_the_restart_transition",
 import { verifyStage } from "../lib/verify-stage.js";
 import { parseHandoffs } from "../lib/handoff.js";
 import * as runStage233 from "../bin/run-stage.js";
+import { loadCharter, loadHarness } from "../lib/config.js";
+import { verifyReviewQuorum } from "../lib/review-quorum.js";
 
 const root233 = () => {
   const r = mkdtempSync(join(tmpdir(), "ctx-233-"));
@@ -825,4 +827,36 @@ test("test_233_raised_tier_is_not_lowered_once_a_diff_exists", async () => {
   // 바닥이 진짜 load-bearing이면 그쪽이 이긴다(출처는 floor)
   const lbDiff = await buildContext({ root: root233(), gh: gh233(44, plain), issue: 44, stage: "review", run: diffRun("M\tfactory/bin/run-stage.js\n"), base: "b" });
   expect([lbDiff.tier_effective, lbDiff.tier_source]).toEqual(["load-bearing", "floor"]);
+});
+
+test("test_233_merge_quorum_roster_follows_the_raised_tier", async () => {
+  // 두 문(review의 context.json, merge의 정족수 로스터)이 같은 handoff·같은 diff에서 같은 로스터를 내야 한다.
+  // 올린 이슈의 diff가 load-bearing 경로를 건드리지 않아도 merge는 리뷰가 실제로 돌린 4인 로스터로 정족수를 센다.
+  const mergeRoster = (r, comments, diff) => runStage233.makeMergeReviewRosterDep({
+    run: diffRun(diff), root: r, gh: gh233(0, comments), issue: 0,
+    getCharter: () => loadCharter(r), getHarness: () => loadHarness(r), mergeBase: async () => "b",
+  })();
+  const fourApprovals = { verdicts: LB_ROSTER.map((role) => ({ role, verdict: "approve", must_fix: [] })) };
+  const twoApprovals = { verdicts: ["correctness", "qa"].map((role) => ({ role, verdict: "approve", must_fix: [] })) };
+  const raised = [verifiedTriage233(45, ["factory/bin/run-stage.js"])];
+  for (const diff of ["M\tdocs/a.md\n", "M\tfactory/lib/context.js\n"]) {
+    const r = root233();
+    const rev = await buildContext({ root: r, gh: gh233(45, raised), issue: 45, stage: "review", run: diffRun(diff), base: "b" });
+    const ros = await mergeRoster(r, raised, diff);
+    expect(ros.ok).toBe(true);
+    expect([ros.tier, ros.tier_source]).toEqual(["load-bearing", "impact-paths"]);
+    expect(ros.roles).toEqual(LB_ROSTER);
+    expect(ros.roles).toEqual(rev.roster);
+    // 리뷰가 낸 4인 approve handoff는 merge 정족수를 통과하고, 2인짜리는 통과하지 못한다
+    expect(verifyReviewQuorum({ data: fourApprovals, rosterSize: ros.roles.length, rosterRoles: ros.roles })).toEqual({ ok: true });
+    expect(verifyReviewQuorum({ data: twoApprovals, rosterSize: ros.roles.length, rosterRoles: ros.roles }).ok).toBe(false);
+  }
+  // 올리지 않은 handoff + 같은 docs diff → 두 문 모두 신고 tier의 2인 로스터
+  const plain = [verifiedTriage233(46, ["factory/lib/context.js"])];
+  const r = root233();
+  const rev = await buildContext({ root: r, gh: gh233(46, plain), issue: 46, stage: "review", run: diffRun("M\tdocs/a.md\n"), base: "b" });
+  const ros = await mergeRoster(r, plain, "M\tdocs/a.md\n");
+  expect([ros.tier, ros.tier_source]).toEqual(["standard", "triage"]);
+  expect(ros.roles).toEqual(["correctness", "qa"]);
+  expect(ros.roles).toEqual(rev.roster);
 });
