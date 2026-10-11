@@ -183,3 +183,27 @@ test("test_196_record_neutralizer_leaves_real_producer_lines_byte_identical", ()
   expect(text).toBe(`# Run · #9\n\n## implement · 2026-10-03T00:00Z · gha-1\n${lines.join("\n")}\n`);
   expect(parseRunRecord(text)).toEqual([expect.objectContaining({ stage: "implement", cost_usd: 2.5, num_turns: 4, engine_crash: true })]);
 });
+
+// ── #212 skeptic — the runner's tag revocation (marker post failed): it can only withdraw an exemption, never create or move one ─────────
+import { conflictRoundLine as conflictRoundLine212, conflictRoundRevokedLine as conflictRoundRevokedLine212 } from "../lib/usage.js";
+import { lifetimeCostOf as lifetimeCostOf212 } from "../lib/budget.js";
+
+test("test_212_tag_revocation_only_withdraws_its_own_runners_tag", () => {
+  const root = mkdtempSync(join(tmpdir(), "usage212rv-"));
+  const write = (runnerId, lines) => appendRunRecord({ root, issue: 212, stage: "implement", runnerId, lines });
+  const tag = (runnerId) => conflictRoundLine212({ stage: "implement", runnerId, runId: runnerId.slice(4), approvedHead: "a".repeat(40), head: "c".repeat(40) });
+  const use = (cost) => usageLine({ usage: {}, total_cost_usd: cost, num_turns: 1, terminal_reason: "end_turn" });
+  write("gha-1", [tag("gha-1"), "verify: ok", use(5)]);
+  write("gha-2", [tag("gha-2"), "verify: ok", use(7)]);
+  const read = () => readFileSync(join(root, "docs/factory/runs/212.md"), "utf8");
+  expect(lifetimeCostOf212(read())).toMatchObject({ usd: 0, conflictUsd: 12, conflictRuns: 2 });
+  // Not in the first-line position, or naming another runner than its own section: withdraws nothing.
+  write("gha-2", ["verify: ok", conflictRoundRevokedLine212({ stage: "implement", runnerId: "gha-2", runId: "2", error: "x" })]);
+  write("gha-3", [conflictRoundRevokedLine212({ stage: "implement", runnerId: "gha-1", runId: "1", error: "x" })]);
+  expect(parseRunRecord(read()).filter((e) => e.conflict_round).map((e) => e.runner)).toEqual(["gha-1", "gha-2"]);
+  // The runner's own revocation withdraws exactly its tag: that run's cost counts again, the other conflict run stays excluded.
+  write("gha-2", [conflictRoundRevokedLine212({ stage: "implement", runnerId: "gha-2", runId: "2", error: new Error("gh: 502 Bad Gateway") })]);
+  expect(parseRunRecord(read()).filter((e) => e.conflict_round).map((e) => e.runner)).toEqual(["gha-1"]);
+  expect(lifetimeCostOf212(read())).toMatchObject({ usd: 7, conflictUsd: 5, conflictRuns: 1 });
+  expect(read()).toMatch(/^conflict-round-revoked: stage=implement runner=gha-2 run_id=2 — the conflict-round marker was not posted \(gh: 502 Bad Gateway\)/m);
+});

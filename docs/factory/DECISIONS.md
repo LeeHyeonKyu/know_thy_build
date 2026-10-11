@@ -4556,13 +4556,22 @@ doctor-ci의 토큰 검사는 `continue-on-error`라 잡을 죽이지 않지만 
    충돌 경로 밖에서 git 자신의 병합(`git merge-tree --write-tree`)과 다른 경로, 충돌 블록 밖의 줄을 바꾼 충돌 경로, merge 앞뒤의 빌더 커밋은
    `conflict round changed <path> outside the merge`이다. 측정 실패도 RED다(GREEN이 아니다) — 어느 git 읽기든(`rev-list`·`diff-tree`·
    `merge-base --is-ancestor`·`diff`·`ls-tree`·`show`) 실패하면 판정 불가다. modify/delete(한쪽이 지운 충돌 경로)는 트리가 그 경로를 나열하지
-   않을 때(`ls-tree`)만이고, 실패한 읽기에서 추론하지 않는다(`test_212_conflict_scope_fails_closed_on_every_git_read`).
+   않을 때(`ls-tree`)만이고, 실패한 읽기에서 추론하지 않는다(`test_212_conflict_scope_fails_closed_on_every_git_read`). 러너가 같은 병합에서
+   푼 충돌 경로도 병합의 일부다: union 경로(DECISIONS.md)는 같은 충돌 블록 규칙을, 미러 경로는 러너가 쓴 그대로 **base의 사본과 바이트까지
+   같을 때**만 안이다(`resolveMirrorConflicts`는 base의 사본을 통째로 받아 브랜치의 다른 hunk를 의도적으로 버리고, 세션 뒤 미러 커밋이
+   다시 만든다 — 블록 규칙을 대면 올바른 라운드가 RED가 된다; `test_212_runner_mirror_copy_in_the_merge_is_not_outside_it`,
+   `test_212_conflict_round_with_a_runner_mirror_path_is_green_end_to_end`).
 3. **RED는 막지 않는다**(plan d3): 워크플로가 아직 self-critique를 돌리므로, 막으면 충돌을 만난 승인 PR이 오늘보다 나빠진다. RED 라운드는 그냥
    충돌 라운드가 아니다 — 비용도 K도 오늘처럼 세고 리뷰도 오늘의 전체 리뷰다(`test_212_failed_conflict_round_falls_back_to_today`).
 4. **GREEN일 때만 둘을 쓴다, 둘 다 아니면 하나도 아니다**(`test_212_failed_conflict_round_falls_back_to_today`): 이슈 코멘트에 러너 마커
    `<!-- factory-conflict-round:v1 … -->`, 그리고 그 런의 마지막 기록 섹션 첫 줄에 `conflict-round: stage=implement runner=… run_id=… approved=… head=…`
    (`lib/usage.js` `conflictRoundLine`). 둘 다 **awaiting-review로의 전이가 성공한 뒤에만** 나간다 — 거부된 전이·사람에게 간 라운드는 끝난
-   충돌 라운드가 아니다(같은 테스트의 (5)). usage 줄에 `conflict=true` 키를 붙이지 않는다 — 그 줄의 모양은 `USAGE_RE`가 소유하고, 키 하나는 ADR-036 2의
+   충돌 라운드가 아니다(같은 테스트의 (5)). 순서는 **태그 먼저**다: 태그가 든 섹션은 실패를 삼키지 않는 쓰기로 나가고, 실패하면 마커도
+   나가지 않는다(섹션은 태그 없이 다시 쓴다). 그다음 마커를 게시하고, 그 게시가 실패하면 러너가 다음 섹션 첫 줄에
+   `conflict-round-revoked: stage=implement runner=… run_id=… —`(`conflictRoundRevokedLine`)를 써서 같은 러너의 태그를 거둔다 — 비용은 다시
+   센다. 취소 줄은 면제를 없앨 뿐 만들지 못하므로 위조는 세는 쪽으로만 간다(`test_212_tag_and_marker_are_both_or_neither`,
+   `test_212_tag_revocation_only_withdraws_its_own_runners_tag`). 남는 반쪽은 태그와 마커 사이의 프로세스 죽음(또는 취소 줄 쓰기의 두 번째
+   실패) 하나다: 태그만 있고 마커가 없다 — K는 오늘처럼 세고, 비용 면제는 6의 상수 안에 묶인다. usage 줄에 `conflict=true` 키를 붙이지 않는다 — 그 줄의 모양은 `USAGE_RE`가 소유하고, 키 하나는 ADR-036 2의
    위조 방어를 다시 연다.
 5. **비용**(`lib/budget.js`; `test_212_conflict_round_cost_is_tagged_and_excluded_from_the_cap`): `parseRunRecord`는 자리가 맞는(implement 섹션의
    첫 줄, 그 섹션의 러너) `conflict-round:` 줄에만 `conflict_round`를 세우고, `lifetimeCostOf`는 그 섹션을 `usd`·`runs`에서 빼 `conflictUsd`·`conflictRuns`로
@@ -4589,7 +4598,9 @@ doctor-ci의 토큰 검사는 `continue-on-error`라 잡을 죽이지 않지만 
    많아야 두 칸만큼 K를 늦출 뿐 천장을 넘기지 못한다. 충돌 전이가 없는 창의 K·재시작·`reviewRoundOf`는 이 변경 전 규칙과 같다
    (`test_212_windows_without_a_conflict_transition_count_as_before`). R(sweeper 재시도)은 이 경로에 없어 손대지 않는다.
 9. **조용히 꺼지지 않는다**(같은 dw5·dw1 테스트): 머지 스테이지의 문구가 바뀌면 그 rework는 보통 K 라운드로 세고, implement 런 기록에
-   `conflict-only: not applied — …` 한 줄이 남는다. `merge-stage.js`는 이 이슈가 건드릴 수 없어 문구를 상수로 나눠 쓰지 못한다 — 그 결합은 남는다.
+   `conflict-only: not applied — …` 한 줄이 남는다. 그 줄은 머지 스테이지가 낼 수 있는 전이(from=approved 또는 blocked의 머지 재시도,
+   `by=` 러너)에만 선다 — 사람의 rework(`by=human`)에는 서지 않아 거짓 경보가 되지 않는다
+   (`test_212_reworded_note_covers_the_blocked_retry_and_spares_human_reworks`). `merge-stage.js`는 이 이슈가 건드릴 수 없어 문구를 상수로 나눠 쓰지 못한다 — 그 결합은 남는다.
 
 **되돌리면**: 이 변경을 revert하면 옛 파서가 `conflict-round:` 줄을 모르는 줄로 읽고 그 런을 다시 센다 — 던지지 않는다
 (`test_212_budget_line_names_excluded_conflict_cost`가 이 변경 전 코드로 확인한다). 이미 남은 마커가 있는 창의 K도 옛 규칙으로 다시 센다 —

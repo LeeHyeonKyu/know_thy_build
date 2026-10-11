@@ -7046,7 +7046,7 @@ async function repo212() {
 }
 
 /** one implement round, wired with the production pieces; `builder` is what the session does after the runner left the merge to it */
-async function implementRound212({ gh, repo, recRoot, runnerId, cost, builder, pending = true, localEntry = null, commentFails = false, transitionRefused = false }) {
+async function implementRound212({ gh, repo, recRoot, runnerId, cost, builder, pending = true, localEntry = null, commentFails = false, transitionRefused = false, checkout = null, runRecordFails = null }) {
   const ctxRoot = ctxRoot212();
   let ctxCache = null;
   const harness = { commands: {}, test: { test_glob: ["nothing/**"], source_glob: [] } };
@@ -7066,6 +7066,7 @@ async function implementRound212({ gh, repo, recRoot, runnerId, cost, builder, p
         await repo.ok("add", "--", "docs/factory/DECISIONS.md");
         return { ok: true, branch: "claude/fq-212", existed: true, base: "main", merged: repo.base, conflicts: [C212], partial: { mirror: [], union: ["docs/factory/DECISIONS.md"] } };
       },
+      ...(checkout ? { checkoutBranch: () => checkout(repo) } : {}),
       baseMergeComplete: async () => ({ ok: true }),
       buildContext: async ({ mergeConflicts } = {}) => (ctxCache = await buildContext212({ root: ctxRoot, gh, issue: 212, stage: "implement", mergeConflicts })),
       resetAgentsLog: async () => {},
@@ -7090,7 +7091,10 @@ async function implementRound212({ gh, repo, recRoot, runnerId, cost, builder, p
         gh.label = "factory:in-progress";
         return transition({ gh, issue: 212, to, stage: "implement", env: {}, ctxExtra: { gatesChecked: true, gatesFile: { status: "GREEN", head_sha: data.head_sha } } });
       },
-      runRecord: (lines) => appendRunRecord({ root: recRoot, issue: 212, stage: "implement", runnerId, lines }),
+      runRecord: (lines) => {
+        if (runRecordFails?.(lines)) throw new Error("EIO: run record write failed");
+        return appendRunRecord({ root: recRoot, issue: 212, stage: "implement", runnerId, lines });
+      },
     },
   });
   return { code, ctx: ctxCache, transitionCalls };
@@ -7106,9 +7110,9 @@ const resolveThenSelfCritique212 = async (repo) => {
   await repo.ok("add", "-A"); await repo.ok("commit", "-q", "-m", "self-critique: fix");
 };
 /** the #196 setup: two review reworks, an approving review, the record at its lifetime cap, then the real merge stage's CONFLICTING */
-async function incident212({ reworded = false } = {}) {
+async function incident212({ reworded = false, makeRepo = repo212 } = {}) {
   const gh = issue212();
-  const repo = await repo212();
+  const repo = await makeRepo();
   const recRoot = mkdtempSync(join(tmpdir(), "rec212-"));
   await reviewRework212(gh, repo.approved); await reviewRework212(gh, repo.approved);
   await review212(gh, repo.approved, [approve212("correctness"), approve212("qa")], "approved");
@@ -7202,4 +7206,101 @@ test("test_212_failed_conflict_round_falls_back_to_today", async () => {
   expect((await rf.gh.comments()).some((c) => c.body.includes("factory-conflict-round:v1"))).toBe(false);
   expect(await rf.k()).toBe(3);
   expect(rf.capCheck()).toMatchObject({ ok: false, usd: 71.88 });
+});
+
+// ── #212 skeptic findings: the runner's mirror resolution inside the same merge, and the K marker and the cost tag as both or neither ────
+const MIR212 = ".factory/lib/conflicted.js";
+/** repo212 where the conflicted source carries its mirror (every factory/** PR here does): the branch also has a clean hunk in both copies */
+async function repoMirror212() {
+  const root = mkdtempSync(join(tmpdir(), "fq212mir-"));
+  const git = (...args) => realRun212("git", ["-c", "user.email=t@example.invalid", "-c", "user.name=t", "-c", "commit.gpgsign=false", ...args], { cwd: root });
+  const ok = async (...args) => { const r = await git(...args); expect(r.code, `git ${args.join(" ")}: ${r.stderr}`).toBe(0); return r.stdout.trim(); };
+  const put = (p, s) => { mkdirSync(dirname(join(root, p)), { recursive: true }); writeFileSync(join(root, p), s); };
+  const both = (ls) => { put(C212, ls.join("\n") + "\n"); put(MIR212, ls.join("\n") + "\n"); };
+  await ok("init", "-q", "-b", "main");
+  both(lines212("c")); put("factory/lib/other.js", lines212("o").join("\n") + "\n");
+  await ok("add", "-A"); await ok("commit", "-q", "-m", "base");
+  await ok("checkout", "-q", "-b", "claude/fq-212");
+  const b = lines212("c"); b[15] = "export const c15 = 'branch';"; b[28] = "export const c28 = 'branch, clean hunk';"; both(b);
+  await ok("add", "-A"); await ok("commit", "-q", "-m", "approved change + its mirror");
+  const approved = await ok("rev-parse", "HEAD");
+  await ok("checkout", "-q", "main");
+  const m = lines212("c"); m[15] = "export const c15 = 'main';"; both(m);
+  await ok("add", "-A"); await ok("commit", "-q", "-m", "main moves on (source + mirror)");
+  const base = await ok("rev-parse", "HEAD");
+  await ok("checkout", "-q", "claude/fq-212");
+  return { root, git, ok, put, approved, base, read: (p) => readFileSync(join(root, p), "utf8") };
+}
+/** what mergeBaseIntoBranch → resolveMirrorConflicts leaves: the mirror path given base's copy, only the source conflict handed over */
+const mirrorCheckout212 = async (repo) => {
+  expect((await repo.git("merge", "--no-edit", repo.base)).code).not.toBe(0);
+  expect(await repo.ok("diff", "--name-only", "--diff-filter=U")).toBe([MIR212, C212].join("\n"));
+  await repo.ok("checkout", repo.base, "--", MIR212);
+  return { ok: true, branch: "claude/fq-212", existed: true, base: "main", merged: repo.base, conflicts: [C212], partial: { mirror: [MIR212], union: [] } };
+};
+const resolveOnlyMirror212 = async (repo) => {
+  const r = lines212("c"); r[28] = "export const c28 = 'branch, clean hunk';"; r.splice(15, 1, "export const c15 = 'branch';", "export const c15b = 'main';");
+  repo.put(C212, r.join("\n") + "\n");
+  await repo.ok("add", "-A"); await repo.ok("commit", "-q", "--no-edit");
+};
+
+test("test_212_conflict_round_with_a_runner_mirror_path_is_green_end_to_end", async () => {
+  // The #196 incident class in this repo: factory/lib/X.js conflicts and so does its .factory/lib/X.js mirror. The runner resolves the mirror
+  // with base's whole copy (dropping the branch's clean hunk in it); the builder resolves only the source. That round is resolution-only.
+  const inc = await incident212({ makeRepo: repoMirror212 });
+  const r = await implementRound212({ gh: inc.gh, repo: inc.repo, recRoot: inc.recRoot, runnerId: "gha-2", cost: 9.5, builder: resolveOnlyMirror212, checkout: mirrorCheckout212 });
+  expect(r.code).toBe(0);
+  expect(r.ctx.loaded.conflict_only).toBe(true);
+  expect(await inc.repo.ok("rev-parse", "HEAD~1^1")).toBe(inc.repo.approved);       // HEAD = mirror commit, HEAD~1 = the merge commit
+  expect(await inc.repo.ok("rev-parse", "HEAD~1^2")).toBe(inc.repo.base);
+  expect(await inc.repo.ok("show", `HEAD~1:${MIR212}`)).not.toContain("clean hunk");    // base's copy really dropped the branch's other hunk
+  expect(inc.read()).not.toMatch(/^conflict-scope: RED/m);
+  expect(inc.read()).toMatch(/^conflict-round: stage=implement runner=gha-2 /m);
+  expect(parseRunRecord(inc.read()).at(-1)).toMatchObject({ runner: "gha-2", cost_usd: 9.5, conflict_round: true });
+  expect(await inc.k()).toBe(2);
+  expect(inc.capCheck()).toMatchObject({ ok: true, usd: 62.38, conflictUsd: 9.5, conflictRuns: 1 });
+});
+
+test("test_212_tag_and_marker_are_both_or_neither", async () => {
+  const markers = async (gh) => (await gh.comments()).filter((c) => c.body.startsWith("<!-- factory-conflict-round:v1"));
+  // (a) GREEN and handed off, but the run-record write of the section that carries the tag FAILS: the marker must not go out either —
+  // otherwise K is exempt while the cost is not (the half state ADR-040 4 rules out). The round counts as today, and says so.
+  const wf = await incident212();
+  let tagWriteFailed = false;
+  const r = await implementRound212({ gh: wf.gh, repo: wf.repo, recRoot: wf.recRoot, runnerId: "gha-2", cost: 9.5, builder: resolveOnly212,
+    runRecordFails: (lines) => (lines.some((l) => l.startsWith("conflict-round: ")) ? (tagWriteFailed = true) : false) });
+  expect(tagWriteFailed).toBe(true);
+  expect(r.code).toBe(0);
+  expect(await markers(wf.gh)).toEqual([]);
+  expect(wf.read()).toMatch(/^conflict-scope: GREEN, but the conflict-round tag could not be written to the run record — EIO: run record write failed; no marker either — this round counts as a normal round \(cost and K\)/m);
+  expect(parseRunRecord(wf.read()).at(-1)).toMatchObject({ runner: "gha-2", cost_usd: 9.5 });
+  expect(parseRunRecord(wf.read()).some((e) => e.conflict_round)).toBe(false);
+  expect(await wf.k()).toBe(3);
+  expect(wf.capCheck()).toMatchObject({ ok: false, usd: 71.88 });
+
+  // (b) The tag was written, then the marker post fails: the tag is revoked by the runner's own line in the next section — the cost counts
+  // again (K never had a marker). A forged revocation could only count MORE, never less.
+  const mf = await incident212();
+  const r2 = await implementRound212({ gh: mf.gh, repo: mf.repo, recRoot: mf.recRoot, runnerId: "gha-2", cost: 9.5, builder: resolveOnly212, commentFails: true });
+  expect(r2.code).toBe(0);
+  expect(mf.read()).toMatch(/^conflict-round: stage=implement runner=gha-2 /m);
+  expect(mf.read()).toMatch(/^conflict-round-revoked: stage=implement runner=gha-2 run_id=2 — the conflict-round marker was not posted/m);
+  expect(parseRunRecord(mf.read()).some((e) => e.conflict_round)).toBe(false);
+  expect(await markers(mf.gh)).toEqual([]);
+  expect(await mf.k()).toBe(3);
+  expect(mf.capCheck()).toMatchObject({ ok: false, usd: 71.88 });
+  expect(mf.capCheck()).not.toHaveProperty("conflictUsd");
+
+  // (c) The success path still writes both, tag BEFORE marker: the record already holds the tag when the marker comment goes out.
+  const both = await incident212();
+  let tagAtMarker = null;
+  const origComment = both.gh.comment;
+  both.gh.comment = async (n, body) => { if (body.startsWith("<!-- factory-conflict-round:v1")) tagAtMarker = /^conflict-round: /m.test(both.read()); return origComment(n, body); };
+  const r3 = await implementRound212({ gh: both.gh, repo: both.repo, recRoot: both.recRoot, runnerId: "gha-2", cost: 9.5, builder: resolveOnly212 });
+  expect(r3.code).toBe(0);
+  expect(tagAtMarker).toBe(true);
+  expect((await markers(both.gh)).length).toBe(1);
+  expect(parseRunRecord(both.read()).filter((e) => e.conflict_round).length).toBe(1);
+  expect(await both.k()).toBe(2);
+  expect(both.capCheck()).toMatchObject({ ok: true, conflictUsd: 9.5 });
 });

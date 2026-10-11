@@ -39,7 +39,7 @@ import { validate } from "../lib/schemas.js";
 import { blockedOrigin, commentsSinceRequeue, commentsSinceCycleStart, countTransitionsTo, TRANSITION_TO, countSelfGateRetries, countAllSelfGateRetries, SELF_GATE_RETRY_BACKSTOP, selfGateRetryComment, kRestartState, kRestartComment, kRestartBriefOf, sameKRestartBrief, wherePaths, conflictRoundComment } from "../lib/retro/issue-comments.js";
 import { transition } from "../lib/transition.js";
 import { appendRunRecord, appendRunRecordLine, runRecordPath, reviewEvidenceLine, parseReviewEvidence, runIdOfRunner } from "../lib/run-record.js";
-import { engineCrashLine, quoteEngineCrashLines, conflictRoundLine, quoteConflictRoundLines } from "../lib/usage.js";
+import { engineCrashLine, quoteEngineCrashLines, conflictRoundLine, conflictRoundRevokedLine, quoteConflictRoundLines } from "../lib/usage.js";
 import { parseHeartbeatComment } from "../lib/board.js";
 import { syncRecords, hydrateRecord, readRecordsDetailed } from "../lib/records-branch.js";
 import { budgetCheck, budgetLine } from "../lib/budget.js";
@@ -288,12 +288,17 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runAt
   let crashLine = null;
   /** #212 — 이 런의 진짜 conflict-round 줄(GREEN conflict-scope 뒤 마지막 섹션의 첫 줄, 아래에서만 정한다). 그 밖의 줄머리 `conflict-round:`는 인용된다. */
   let conflictTag = null;
+  const safeLines = (lines) => lines.map((l) => (crashLine !== null && l === crashLine ? l
+    : conflictTag !== null && l === conflictTag ? l
+    : quoteConflictRoundLines(quoteEngineCrashLines(l))));
   const record = (lines) => {
     if (usage && lines.includes(usage)) usageRecorded = true;
-    const safe = lines.map((l) => (crashLine !== null && l === crashLine ? l
-      : conflictTag !== null && l === conflictTag ? l
-      : quoteConflictRoundLines(quoteEngineCrashLines(l))));
-    try { d.runRecord(safe); } catch (e) { console.error(`factory: run record write failed — ${e.message}`); }
+    try { d.runRecord(safeLines(lines)); } catch (e) { console.error(`factory: run record write failed — ${e.message}`); }
+  };
+  /** #212 skeptic — the one write whose failure must be KNOWN (the conflict-round tag's section): throws instead of swallowing. */
+  const recordOrThrow = (lines) => {
+    d.runRecord(safeLines(lines));
+    if (usage && lines.includes(usage)) usageRecorded = true;
   };
   /**
    * 체크 상태 게시는 부수 효과다 — 실패해도 런을 죽이지 않는다. sha가 없으면 애초에 게시할 대상이
@@ -1535,23 +1540,42 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runAt
      * does the run's last section open with the runner's `conflict-round:` line (`lib/budget.js` reads it). A refused transition, or a
      * round sent to a person, is not a finished conflict round (skeptic f3): no marker, no tag — counted as today. No marker → no tag.
      */
+    /**
+     * Both or neither (ADR-040 4; skeptic): the TAG goes first, through a write whose failure is known (`recordOrThrow`) — if the record
+     * cannot take it, no marker is posted and the section is written again without the tag. Only then the K marker; if that post fails,
+     * the runner's revocation line (`conflictRoundRevokedLine`) withdraws the tag in the next section, so the cost counts again. What is
+     * left is a process death (or a second failed write) between the tag and the marker: tag without marker — K counts as today, and the
+     * cost exemption stays inside CONFLICT_ROUND_EXCLUDED_RUNS.
+     */
     const conflictNote = [];
+    let marker = null;
     if (conflictOnly && conflictGreen) {
       const head = typeof v.data?.head_sha === "string" && SHA40.test(v.data.head_sha) ? v.data.head_sha : null;
       if (!t.ok || t.to !== "factory:awaiting-review") {
         conflictNote.push(`conflict-scope: GREEN, but the round did not hand off to factory:awaiting-review (${t.ok ? `went to ${t.to}` : `transition refused: ${t.reason ?? "unknown"}`}) — no conflict-round marker or tag; this round counts as a normal round (cost and K)`);
+      } else if (!head || !d.comment) {
+        const why = !head ? `the handoff head ${v.data?.head_sha ?? "none"} is not a 40-hex sha` : "no issue comment dep is wired";
+        conflictNote.push(`conflict-scope: GREEN, but the conflict-round marker was not written — ${why}; this round counts as a normal round (cost and K)`);
       } else {
-        try {
-          if (!head) throw new Error(`the handoff head ${v.data?.head_sha ?? "none"} is not a 40-hex sha`);
-          if (!d.comment) throw new Error("no issue comment dep is wired");
-          await d.comment(issue, conflictRoundComment({ issue, approvedHead: conflictOnly.approved_head, head }));
-          conflictTag = conflictRoundLine({ stage, runnerId, runId, approvedHead: conflictOnly.approved_head, head });
-        } catch (e) {
-          conflictNote.push(`conflict-scope: GREEN, but the conflict-round marker was not written — ${e?.message || e}; this round counts as a normal round (cost and K)`);
-        }
+        conflictTag = conflictRoundLine({ stage, runnerId, runId, approvedHead: conflictOnly.approved_head, head });
+        marker = conflictRoundComment({ issue, approvedHead: conflictOnly.approved_head, head });
       }
     }
-    record([...(conflictTag ? [conflictTag] : []), "verify: ok", ...(t.ok ? [`transition: ${t.to}`] : refusal(t)), ...(checkoutSha ? [`checkout: ${checkoutSha.slice(0, 7)}`] : []), ...conflictNote, ...gatesNote, usage]);
+    const finalLines = (note) => ["verify: ok", ...(t.ok ? [`transition: ${t.to}`] : refusal(t)), ...(checkoutSha ? [`checkout: ${checkoutSha.slice(0, 7)}`] : []), ...note, ...gatesNote, usage];
+    if (!conflictTag) {
+      record(finalLines(conflictNote));
+      return t.ok ? 0 : 2;
+    }
+    try { recordOrThrow([conflictTag, ...finalLines(conflictNote)]); }
+    catch (e) {
+      conflictTag = null;
+      record(finalLines([...conflictNote, `conflict-scope: GREEN, but the conflict-round tag could not be written to the run record — ${e?.message || e}; no marker either — this round counts as a normal round (cost and K)`]));
+      return t.ok ? 0 : 2;
+    }
+    try { await d.comment(issue, marker); }
+    catch (e) {
+      record([conflictRoundRevokedLine({ stage, runnerId, runId, error: e }), `conflict-scope: GREEN, but the conflict-round marker was not written — ${e?.message || e}; this round counts as a normal round (cost and K)`]);
+    }
     return t.ok ? 0 : 2;
   } catch (e) {
     console.error(`factory: stage ${stage} aborted — ${e?.message || e}`);
