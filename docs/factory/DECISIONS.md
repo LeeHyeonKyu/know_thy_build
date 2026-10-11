@@ -4721,6 +4721,7 @@ blocked·exit 2·상한이 적힌 기록, 구성원 그대로), `test_249_blocke
 #249 main 병합(#278 위로): `test_249_merge_git_auth_survives_the_base_merge`(main()이 첫 git/gh 호출 전에 `mergeGitAuth({ stage, env: process.env })`를 `process.env`에 얹는 그 한 줄을 소스에서 읽어 그대로 실행한다 — merge + `GH_TOKEN`이면 `gitAuthEnv`의 extraheader 설정, 다른 스테이지면 아무것도 더하지 않는다. ADR-038 보정의 #278 단언은 고치지 않았다).
 
 **#249 main 병합(#261 위로)**: 거부 코드 `codes`는 거부 결과의 **열거되지 않는** 속성이다 — #231·#260 테스트가 `toEqual`로 핀한 거부 결과의 모양을 바꾸지 않고, 같은 프로세스의 `entryRecheck`는 그대로 읽는다(펼치거나 JSON을 지나면 코드가 사라지고 `unreadable`로 남는다 — 내보내지 않는 쪽). #231의 "factory logins could not be resolved" 거부는 `no-done-when`이 아니라 `unreadable`이다: 문은 같은 문장으로 거부하지만 triage 진입 재심사는 로그인 조회 한 번의 실패로 큐의 공장 이슈를 needs-info로 내리지 않는다. 검증: `test_249_unresolved_factory_logins_refusal_is_unreadable_at_the_entry_recheck`, `test_249_local_entry_production_wiring_passes_admission`(main()의 심사기 바인딩이 `factoryLogins: () => resolveFactoryLogins({ gh, env: process.env })` 그대로이고, App 모드에서 마커만 있는 공장 이슈는 들어가며 작성자만 공장인 이슈는 `open_max`에 세진다).
+
 ## ADR-041 base가 움직여 생긴 충돌 해소 라운드는 평생 상한과 K에서 빠진다 — 러너가 잰 GREEN일 때만, 이슈당 두 번까지 — 2026-10-11 (#212)
 
 **질문**: 리뷰가 전원 승인한 PR이 base 이동으로 충돌해 `factory:rework`로 돌아오면(머지 스테이지 `merge conflict — rebase onto <base>`), 그

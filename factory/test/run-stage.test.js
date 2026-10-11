@@ -7736,6 +7736,7 @@ test("test_249_merge_git_auth_survives_the_base_merge", () => {
     expect(apply(stage, { GH_TOKEN: token }), stage).toEqual({ GH_TOKEN: token });
   }
 });
+
 // ── #212 (ADR-041) — the #196 incident flow, end to end in one run-stage sequence ───────────────────────────────────────────────
 // approve handoff → the REAL runMergeStage on a CONFLICTING PR (real transition() comments) → the implement round: the runner's base
 // merge on a real git repository, the real buildContext (conflict_only), the builder resolving the conflict, the runner mirror commit,
