@@ -232,3 +232,333 @@ test("test_136_harness_flaky_alternation_is_bounded", async () => {
   expect((await admit({ issue: 40 })).ok).toBe(true);
   for (const n of [50, 60, 70, 80]) expect((await admit({ issue: n })).ok, `#${n}`).toBe(false);
 });
+
+// ── #231 — admission의 두 파서 결함(허점 원장 E-5·E-6, P-3·P-5) ──────────────────────────────────────────────
+// (1) Impact paths 파서는 백틱 안 토큰만 읽었다 — `:issue` 템플릿은 백틱이 없어서 템플릿대로 쓴 이슈는 NEVER_AUTOMATE
+//     조기 차단에 아무 경로도 보이지 않았다. (2) 본문에 `Detected while implementing #N.` 한 줄을 붙여 넣으면 done_when 요구가
+//     면제됐다 — 마커는 공장이 **연** 이슈일 때만(작성자가 공장 로그인일 때만) 면제한다. 상한(open_max/depth_max)의 판정은 그대로다.
+import { readFileSync as readFileSync231 } from "node:fs";
+import { fileURLToPath as fileURLToPath231 } from "node:url";
+import { makeGh as makeGh231 } from "../lib/gh.js";
+import { makeFakeRun as makeFakeRun231 } from "../lib/exec.js";
+import { loadCharter as loadCharter231 } from "../lib/config.js";
+import { mkdtempSync as mkdtempSync231, rmSync as rmSync231 } from "node:fs";
+import { tmpdir as tmpdir231 } from "node:os";
+import { join as joinPath231 } from "node:path";
+import { runStageGates as runStageGates231 } from "../lib/gates.js";
+import { renderUpstreamIssue as renderUpstreamIssue231, UPSTREAM_LABELS as UPSTREAM_LABELS231 } from "../lib/feedback/upstream-issue.js";
+
+const ROOT231 = fileURLToPath231(new URL("../..", import.meta.url));
+
+test("test_231_impact_paths_reads_backticked_and_plain_list_items", () => {
+  const want = ["factory/lib/admission.js", "templates/know-thy-build/issue.md"];
+  const shapes = {
+    backticked: "## Impact paths\n- `factory/lib/admission.js`\n- `templates/know-thy-build/issue.md`\n",
+    plain: "## Impact paths\n- factory/lib/admission.js\n- templates/know-thy-build/issue.md\n",
+    h3: "### Impact paths\n- `factory/lib/admission.js`\n* templates/know-thy-build/issue.md\n",
+    spacedBackticks: "## Impact paths\n- `factory/lib/admission.js templates/know-thy-build/issue.md`\n",
+    notes: "## Impact paths\n- factory/lib/admission.js (신규)\n- `templates/know-thy-build/issue.md` (템플릿 예시)\n",
+    multiComma: "## Impact paths\n- `factory/lib/admission.js`, `templates/know-thy-build/issue.md`\n",
+    trailingPunct: "## Impact paths\n- factory/lib/admission.js,\n- templates/know-thy-build/issue.md.\n",
+  };
+  for (const [name, section] of Object.entries(shapes)) {
+    expect(impactPathsOf(`## What\nx\n\n${section}\n## done_when (draft)\n- [ ] \`test_1_a\` — a`), name).toEqual(want);
+  }
+  // 산문 항목은 경로가 없으면 아무것도 내지 않는다
+  expect(impactPathsOf("## Impact paths\n- 문서 전반\n- 없음\n- factory/lib/admission.js 근처의 주석\n")).toEqual(["factory/lib/admission.js"]);
+  // 절이 없으면 빈 배열
+  expect(impactPathsOf("## What\n- factory/lib/admission.js\n\n## done_when\n- `factory/lib/gh.js`")).toEqual([]);
+  // 다음 제목(#, ##, ###)이 절을 끝낸다 — 뒤 절의 백틱 테스트 이름은 경로가 아니다
+  expect(impactPathsOf("### Impact paths\n- `a/b.ts`\n\n### done_when (draft)\n- [ ] `test_9_x.y` — `not/a/path.ts`")).toEqual(["a/b.ts"]);
+  expect(impactPathsOf("## Impact paths\n- a/b.ts\n# Next\n- c/d.ts")).toEqual(["a/b.ts"]);
+  // 이 이슈(#231) 자신의 Impact paths 모양: 한 항목에 백틱 경로 여럿 — 두 번째 자리의 금지 경로도 읽힌다
+  const own = "## Impact paths\n- `factory/lib/admission.js`, `templates/factory/harness.toml`, `factory/bin/run-stage.js`\n- `factory/test/admission.test.js`\n";
+  expect(impactPathsOf(own)).toEqual(["factory/lib/admission.js", "templates/factory/harness.toml", "factory/bin/run-stage.js", "factory/test/admission.test.js"]);
+  const r = queueAdmission({ issue: { ...person, body: `${own}\n## done_when\n- [ ] \`test_1_a\`` }, charter: charter({ never_automate: ["templates/factory/**"] }), ...base });
+  expect(r.ok).toBe(false);
+  expect(r.reasons.join(" ")).toContain("templates/factory/harness.toml (glob templates/factory/**)");
+  // 백틱 없는 금지 경로도 문에서 걸린다(예전에는 빈 배열이라 통과했다)
+  const plainForbidden = queueAdmission({ issue: { ...person, body: "## Impact paths\n- templates/factory/harness.toml (게이트)\n\n## done_when\n- [ ] `test_1_a`" }, charter: charter({ never_automate: ["templates/factory/**"] }), ...base });
+  expect(plainForbidden.reasons.join(" ")).toContain("NEVER_AUTOMATE: templates/factory/harness.toml (glob templates/factory/**)");
+  // ASCII 산문 항목도 경로가 아니다 — 경로 모양 검사(`/`·`.`)가 이것을 막는다(한글 산문은 문자 검사가 먼저 막으므로 따로 핀)
+  expect(impactPathsOf("## Impact paths\n- none\n- TBD\n- see below\n- e.g.\n- i.e. the parser\n")).toEqual([]);
+  // 백틱 없는 경로 뒤에 백틱 설명이 붙어도 그 경로를 읽는다(백틱 토큰도 함께 읽는다 — 넓게 읽는 쪽이 fail closed)
+  expect(impactPathsOf("## Impact paths\n- templates/factory/harness.toml (see `ci.yml`)\n")).toEqual(["ci.yml", "templates/factory/harness.toml"]);
+  expect(impactPathsOf("## Impact paths\n- templates/factory/harness.toml — guarded by `test_1_a`\n")).toContain("templates/factory/harness.toml");
+  // self-critique (#231) — 배열 전체를 핀한다(백틱 토큰은 어디서든 읽는다는 예전 규칙 그대로). 버전 번호(`v1.2`)는 경로 모양이 아니다
+  expect(impactPathsOf("## Impact paths\n- templates/factory/harness.toml — guarded by `test_1_a`\n")).toEqual(["test_1_a", "templates/factory/harness.toml"]);
+  expect(impactPathsOf("## Impact paths\n- a/b.ts — guarded by `test_1_a` and v1.2 or 2.0.1\n- README.md\n")).toEqual(["test_1_a", "a/b.ts", "README.md"]);
+  // 백틱 없는 쉼표 목록: 두 번째 자리의 금지 경로도 읽힌다
+  expect(impactPathsOf("## Impact paths\n- factory/lib/a.js, templates/factory/harness.toml\n")).toEqual(["factory/lib/a.js", "templates/factory/harness.toml"]);
+  // 번호 목록도 목록이다
+  expect(impactPathsOf("## Impact paths\n1. templates/factory/harness.toml\n2) factory/lib/a.js\n")).toEqual(["templates/factory/harness.toml", "factory/lib/a.js"]);
+  for (const body of ["- factory/lib/a.js, templates/factory/harness.toml", "1. templates/factory/harness.toml", "- templates/factory/harness.toml (see `ci.yml`)"]) {
+    const refused = queueAdmission({ issue: { ...person, body: `## Impact paths\n${body}\n\n## done_when\n- [ ] \`test_1_a\`` }, charter: charter({ never_automate: ["templates/factory/**"] }), ...base });
+    expect(refused.reasons.join(" "), body).toContain("NEVER_AUTOMATE: templates/factory/harness.toml (glob templates/factory/**)");
+  }
+  // self-critique (#231) — 괄호 안·링크 대상·조사가 붙은 경로·따옴표·굵게·코드 펜스 속 `#` 줄: 모두 경로를 내고, 진짜 CHARTER에서 거부된다
+  const leaky = {
+    link: "- [harness](templates/factory/harness.toml)",
+    parenthesised: "- harness config (templates/factory/harness.toml)",
+    koreanParticle: "- templates/factory/harness.toml에서",
+    quoted: "- \"templates/factory/harness.toml\"",
+    ideographicComma: "- templates/factory/harness.toml、x",
+    bold: "- **templates/factory/harness.toml**",
+    fencedHashLine: "```\n# note\n```\n- templates/factory/harness.toml",
+  };
+  const realCharter231 = loadCharter231(ROOT231);
+  for (const [name, item] of Object.entries(leaky)) {
+    const sectionBody = `## Impact paths\n${item}\n\n## done_when\n- [ ] \`test_1_a\``;
+    expect(impactPathsOf(sectionBody), name).toContain("templates/factory/harness.toml");
+    // self-critique (#231) — 정확히 그 경로 하나다: `**…**`를 벗기기 전의 별표 토큰 같은 찌꺼기 항목이 섞이지 않는다
+    expect(impactPathsOf(sectionBody), name).toEqual(["templates/factory/harness.toml"]);
+    const refused = queueAdmission({ issue: { ...person, body: sectionBody }, charter: realCharter231, ...base });
+    expect(refused.ok, name).toBe(false);
+    expect(refused.reasons.join(" "), name).toContain("NEVER_AUTOMATE: templates/factory/harness.toml (glob templates/factory/**)");
+  }
+  // 펜스 밖의 제목은 여전히 절을 끝낸다
+  expect(impactPathsOf("## Impact paths\n```\n# note\n```\n- a/b.ts\n## done_when\n- c/d.ts")).toEqual(["a/b.ts"]);
+  // rework cf1·qa1 — 웹 UI로 쓴 이슈 본문은 CRLF로 저장된다: 백틱 없는 목록 항목도 LF와 똑같이 읽히고, 같은 절 끝에서 멈추며, 진짜 CHARTER에서 거부된다
+  for (const [name, section] of Object.entries(shapes)) {
+    expect(impactPathsOf(`## What\nx\n\n${section}\n## done_when (draft)\n- [ ] \`test_1_a\` — a`.replace(/\n/g, "\r\n")), `crlf ${name}`).toEqual(want);
+  }
+  const crlf = "## Impact paths\r\n- templates/factory/harness.toml\r\n- .github/workflows/publish.yml\r\n\r\n## done_when\r\n- [ ] `test_1_a`\r\n";
+  expect(impactPathsOf(crlf)).toEqual(["templates/factory/harness.toml", ".github/workflows/publish.yml"]);
+  const crlfRefused = queueAdmission({ issue: { ...person, body: crlf }, charter: realCharter231, ...base });
+  expect(crlfRefused.ok).toBe(false);
+  expect(crlfRefused.reasons.join(" ")).toContain("NEVER_AUTOMATE: templates/factory/harness.toml (glob templates/factory/**)");
+});
+
+/** 진짜 `:issue` 템플릿의 첫 마크다운 블록(Impact paths가 든 것)을 그대로 꺼내고, 자리표시자를 실제 값으로 채운다. */
+function filledIssueTemplate(paths) {
+  const md = readFileSync231(`${ROOT231}templates/know-thy-build/issue.md`, "utf8");
+  const block = [...md.matchAll(/```markdown\n([\s\S]*?)```/g)].map((m) => m[1]).find((b) => b.includes("{{path_1}}"));
+  return { md, block, body: block.replace("{{path_1}}", paths[0]).replace("{{path_2}}", paths[1]).replace(/\{\{(\w+)\}\}/g, "filled $1").replace("test_NNN_<slug>", "test_12_button_crash") };
+}
+
+test("test_231_issue_template_impact_paths_are_backticked", async () => {
+  const { md, block } = filledIssueTemplate(["x", "y"]);
+  // 템플릿의 Impact paths 항목은 백틱이다
+  expect(block).toMatch(/^## Impact paths\n- `\{\{path_1\}\}`\n- `\{\{path_2\}\}`$/m);
+  expect(md).not.toMatch(/^- \{\{path_\d\}\}$/m);
+  // 템플릿대로 채운 이슈 — 파서가 정확히 그 경로들을 읽는다
+  const clean = filledIssueTemplate(["client/lib/screens/a.dart", "factory/lib/admission.js"]).body;
+  expect(impactPathsOf(clean)).toEqual(["client/lib/screens/a.dart", "factory/lib/admission.js"]);
+  // 진짜 CHARTER의 NEVER_AUTOMATE에 걸리는 경로를 템플릿대로 적으면 큐 문에서 거부되고, 이유가 경로와 글롭을 말한다
+  const realCharter = loadCharter231(ROOT231);
+  expect(realCharter.never_automate).toContain("templates/factory/**");
+  const forbidden = filledIssueTemplate(["factory/lib/admission.js", "templates/factory/harness.toml"]).body;
+  const refused = queueAdmission({ issue: { number: 12, body: forbidden, labels: ["backlog"], author: "LeeHyeonKyu" }, charter: realCharter, ...base });
+  expect(refused.ok).toBe(false);
+  expect(refused.reasons).toHaveLength(1);
+  expect(refused.reasons[0]).toContain("NEVER_AUTOMATE: templates/factory/harness.toml (glob templates/factory/**)");
+  // 같은 본문에서 금지 경로만 빼면 들어간다(템플릿의 done_when 초안이 job 모양을 채운다)
+  const admitted = queueAdmission({ issue: { number: 12, body: clean, labels: ["backlog"], author: "LeeHyeonKyu" }, charter: realCharter, ...base });
+  expect(admitted).toEqual({ ok: true, reasons: [], self_generated: false });
+  // self-critique (#231) — 사용자가 실제로 보는 문: 템플릿대로 채운 이슈를 진짜 `makeGh().issue()`(가짜는 gh 실행 경계뿐)로 읽는 큐 심사기
+  const viaGh = (body) => makeQueueAdmission({ gh: ghOver({ 12: { number: 12, body, labels: ["backlog"], author: humanAuthor("LeeHyeonKyu") } }), charter: realCharter, factoryLogins: FACTORY })({ issue: 12 });
+  expect(await viaGh(forbidden)).toEqual({ ok: false, reasons: [refused.reasons[0]], self_generated: false });
+  expect(await viaGh(clean)).toEqual({ ok: true, reasons: [], self_generated: false });
+});
+
+// ── 프로덕션 배선: 가짜는 `gh` 실행 경계에만 둔다. 작성자는 진짜 `makeGh().issue()`가 `gh issue view --json` 출력에서 읽는다.
+// 작성자 모양은 gh CLI 소스 api/queries_issue.go `Author.MarshalJSON`(v2.102.0): 사람 `{is_bot:false, login, id, name}`,
+// 봇(GraphQL `Bot`, `... on User`가 비어 ID 없음) `{is_bot:true, login:"app/<slug>"}`.
+const ghIssueJson = (it) => JSON.stringify({ number: it.number, title: it.title ?? `#${it.number}`, body: it.body, labels: (it.labels || []).map((name) => ({ name })), ...("author" in it ? { author: it.author } : {}) });
+const humanAuthor = (login) => ({ id: "MDQ6VXNlcjE=", is_bot: false, login, name: login });
+const appAuthor = (slug) => ({ is_bot: true, login: `app/${slug}` });
+/**
+ * 진짜 flaky 생산자(gates.js의 runStageGates, review 단계의 수확 경로)를 fake exec로 돌려, 그것이 gh.createIssue에 넘긴
+ * {body, labels}를 돌려준다 — gates.test.js의 "review: flaky-existing" 케이스와 같은 배선이다.
+ */
+async function harvestFlakyIssue(issue) {
+  const cwd = mkdtempSync231(joinPath231(tmpdir231(), "adm231-flaky-"));
+  const TO = "vitest run 'test/a.test.js' -t 'flaky one'";
+  const ok = { code: 0, stdout: "", stderr: "" }, bad = { code: 1, stdout: "", stderr: "boom" };
+  const codes = [1, 0]; let i = 0;
+  const run = makeFakeRun231([
+    { match: (c, a, o) => c === "bash" && a[1] === TO && o.cwd.endsWith("classify-wt"), result: () => (codes[i++] === 0 ? ok : bad) },
+    { match: (c, a) => c === "bash" && a[1] === TO, result: ok },
+    { match: (c, a) => c === "bash" && a[1] === "vitest --json", result: bad },
+    { match: (c, a) => c === "git" && a[0] === "diff" && a[1] === "--name-status", result: { code: 0, stdout: "M\tsrc/a.js\n", stderr: "" } },
+    { match: (c, a) => c === "git" && a[0] === "rev-parse", result: { code: 0, stdout: `${"h".repeat(40)}\n`, stderr: "" } },
+    { match: (c, a) => c === "git" && a[0] === "worktree", result: ok },
+  ]);
+  const harness = {
+    harness: { maturity: "M2" },
+    commands: { unit: "vitest --json", test_files: "vitest run {files}", test_one: "vitest run {file} -t {name}", proof: {} },
+    gates: { required: ["unit"], fast: ["unit"], full: ["unit"], deep: ["unit"], thresholds: { new_test_repeats: 1, flaky_isolation_runs: 1, flaky_base_runs: 2, flaky_max: 2, quarantine_max_effective: 3 } },
+    test: { unit_report: ".factory/out/unit.json", test_glob: ["test/**"], source_glob: ["src/**"] },
+  };
+  const readFile = (p) => (p.endsWith("unit.json") ? JSON.stringify({ numTotalTests: 1, numPassedTests: 0, numFailedTests: 1, testResults: [{ name: joinPath231(cwd, "test/a.test.js"), assertionResults: [{ fullName: "flaky one", status: "failed" }] }] }) : null);
+  const created = [];
+  const gh = { async createIssue(args) { created.push(args); return 900 + created.length; }, async searchIssues() { return []; }, async comment() { return "u"; } };
+  await runStageGates231({ run, cwd, harness, stage: "review", tier: "standard", base: "b".repeat(40), gh, issue, readFile });
+  rmSync231(cwd, { recursive: true, force: true });
+  expect(created).toHaveLength(1);
+  return { body: created[0].body, labels: created[0].labels };
+}
+
+function ghOver(issues, { lists = {} } = {}) {
+  const run = makeFakeRun231([
+    { match: (c, a) => c === "gh" && a[0] === "issue" && a[1] === "view", result: (c, a) => (issues[a[2]] ? { code: 0, stdout: ghIssueJson(issues[a[2]]), stderr: "" } : { code: 1, stdout: "", stderr: "Could not resolve to an issue" }) },
+    { match: (c, a) => c === "gh" && a[0] === "issue" && a[1] === "list", result: (c, a) => ({ code: 0, stdout: JSON.stringify(lists[a[a.indexOf("--label") + 1]] ?? []), stderr: "" }) },
+  ]);
+  return makeGh231({ run, repo: "LeeHyeonKyu/know_thy_build" });
+}
+const FACTORY = async () => ({ ok: true, logins: ["ktb-factory[bot]"] });
+
+test("test_231_self_generated_needs_marker_and_factory_author", async () => {
+  const markers = {
+    flaky: "Detected while implementing #9. evidence: {}",
+    harness: "<!-- factory-harness-request for=9 -->\nharness: …",
+    improvement: "<!-- factory-improvement fp=abc tags=ktb from=LeeHyeonKyu/own-calendar#17 -->\n\n## 무엇이 일어났나\n…",
+  };
+  const issues = { 9: { number: 9, body: person.body, labels: ["backlog"], author: humanAuthor("LeeHyeonKyu") } };
+  let n = 100;
+  const mk = (body, author) => { const it = { number: ++n, body, labels: ["backlog"], ...(author === undefined ? {} : { author }) }; issues[it.number] = it; return it.number; };
+  const admit = (logins = FACTORY) => makeQueueAdmission({ gh: ghOver(issues), charter: charter(), factoryLogins: logins });
+
+  for (const [kind, body] of Object.entries(markers)) {
+    // 사람이 마커를 붙여 넣었다(라벨 없음, done_when 없음) — 거부, 이유가 작성자를 말하고 done_when을 요구한다
+    const human = await admit()({ issue: mk(body, humanAuthor("LeeHyeonKyu")) });
+    expect(human.ok, kind).toBe(false);
+    const why = human.reasons.join(" ");
+    expect(why, kind).toMatch(/not an explicit job/);
+    expect(why, kind).toMatch(/factory marker but its author `LeeHyeonKyu` is not a factory login/);
+    expect(why, kind).toMatch(/add a `done_when` section/);
+    // 공장이 연 이슈(App 작성자, gh가 `app/<slug>`로 준다) — 들어간다
+    const factory = await admit()({ issue: mk(body, appAuthor("ktb-factory")) });
+    expect(factory, kind).toEqual({ ok: true, reasons: [], self_generated: true });
+    // 작성자를 읽을 수 없다(gh가 null — 삭제된 계정) — 마커만으로는 거부, 이유가 그것을 말한다
+    const ghost = await admit()({ issue: mk(body, null) });
+    expect(ghost.ok, kind).toBe(false);
+    expect(ghost.reasons.join(" "), kind).toMatch(/factory marker but the author could not be read/);
+    // 공장 로그인을 알아내지 못했다 — 마커만으로는 거부, 이유가 그것을 말한다(로그인 해석이 던져도, ok:false여도)
+    for (const logins of [async () => { throw new Error("gh api user failed"); }, async () => ({ ok: false, reason: "no factory login could be resolved" }), null]) {
+      const unresolved = await admit(logins)({ issue: mk(body, appAuthor("ktb-factory")) });
+      expect(unresolved.ok, kind).toBe(false);
+      expect(unresolved.reasons.join(" "), kind).toMatch(/factory marker but the factory logins could not be resolved/);
+    }
+  }
+  // 마커 없는 공장 작성자, done_when 없음 — 작성 계정만으로는 면제되지 않는다
+  const bare = await admit()({ issue: mk("please fix the button", appAuthor("ktb-factory")) });
+  expect(bare.ok).toBe(false);
+  expect(bare.reasons).toContain("not an explicit job: the body has no `done_when` section (and no factory marker)");
+  // 알려진 한계(공유 계정, ADR-038 PAT 폴백): 소유자 로그인이 곧 공장 로그인이면 소유자가 붙인 마커는 여전히 면제된다
+  const shared = await admit(async () => ({ ok: true, logins: ["LeeHyeonKyu"] }))({ issue: mk("Detected while implementing #8. evidence: {}", humanAuthor("LeeHyeonKyu")) });
+  expect(shared).toEqual({ ok: true, reasons: [], self_generated: true });
+  // 순수 심사도 같다: 작성자 미상 + 마커는 거부
+  expect(queueAdmission({ issue: { number: 300, body: markers.flaky, labels: ["backlog"] }, charter: charter(), ...base }).ok).toBe(false);
+  expect(queueAdmission({ issue: { number: 301, body: markers.flaky, labels: ["backlog"], author: "bot-hk" }, charter: charter(), ...base }).ok).toBe(true);
+});
+
+test("test_231_factory_flaky_issue_under_pat_author_still_admitted", async () => {
+  // 진짜 생산자의 모양: gates.js의 flaky 수확(본문·라벨)과 feedback/upstream-issue.js의 개선 이슈.
+  // flaky 이슈는 손으로 짓지 않는다 — 진짜 runStageGates가 수확하며 gh.createIssue에 넘긴 본문·라벨을 그대로 쓴다.
+  const harvested = {};
+  for (const of of [7, 20, 50, 60]) harvested[of] = await harvestFlakyIssue(of);
+  expect(harvested[7].labels).toEqual(["backlog", "factory:flaky"]);
+  expect(harvested[7].body).toMatch(/^Detected while implementing #7\. evidence: \{/);
+  const flakyFrom = (number, of, author) => ({ number, body: harvested[of].body, labels: [...harvested[of].labels], author });
+  const up = renderUpstreamIssue231({ fingerprint: "ab12cd34ef56", tags: ["ktb"], payload: { reason: "gate misread" }, sourceRepo: "LeeHyeonKyu/own-calendar", sourceIssue: 17 });
+  const issues = {
+    7: { number: 7, body: person.body, labels: ["factory:in-progress"], author: humanAuthor("LeeHyeonKyu") },
+    // PAT 폴백: 공장이 소유자 계정으로 연 flaky 이슈 — 작성자는 공장 로그인이 아니다
+    41: flakyFrom(41, 7, humanAuthor("LeeHyeonKyu")),
+    // 소비자 저장소의 공장이 이 저장소에 연 개선 이슈 — 작성자는 이 저장소의 공장 로그인이 아니다
+    42: { number: 42, body: up.body, labels: [...UPSTREAM_LABELS231], author: appAuthor("own-calendar-factory") },
+  };
+  const admit = makeQueueAdmission({ gh: ghOver(issues), charter: charter(), factoryLogins: FACTORY });
+  expect(await admit({ issue: 41 })).toEqual({ ok: true, reasons: [], self_generated: true });
+  expect(await admit({ issue: 42 })).toEqual({ ok: true, reasons: [], self_generated: true });
+  // 그 둘을 들여보낸 것은 **라벨**이다: 같은 본문·같은 작성자에서 라벨을 떼면 마커만으로는 면제되지 않는다
+  const unlabelled = { 43: { ...issues[41], number: 43, labels: ["backlog"] }, 44: { ...issues[42], number: 44, labels: ["backlog"] } };
+  const bareAdmit = makeQueueAdmission({ gh: ghOver({ ...issues, ...unlabelled }), charter: charter(), factoryLogins: FACTORY });
+  expect((await bareAdmit({ issue: 43 })).reasons.join(" ")).toMatch(/author `LeeHyeonKyu` is not a factory login/);
+  expect((await bareAdmit({ issue: 44 })).reasons.join(" ")).toMatch(/author `own-calendar-factory\[bot\]` is not a factory login/);
+
+  // 상한은 그대로 센다: 공장 로그인이 아닌 작성자의 진행 중 flaky 둘이 open_max(2)를 채운다
+  const busy = {
+    ...issues,
+    51: { ...flakyFrom(51, 7, humanAuthor("LeeHyeonKyu")), labels: ["factory:in-progress", "factory:flaky"] },
+    52: { ...flakyFrom(52, 7, null), labels: ["factory:queue", "factory:flaky"] },
+  };
+  const capped = await makeQueueAdmission({ gh: ghOver(busy, { lists: { "factory:flaky": [{ number: 41 }, { number: 51 }, { number: 52 }] } }), charter: charter(), factoryLogins: FACTORY })({ issue: 41 });
+  expect(capped.ok).toBe(false);
+  expect(capped.reasons.join(" ")).toMatch(/self-generated open 2 ≥ 2/);
+  expect((await makeQueueAdmission({ gh: ghOver(busy, { lists: { "factory:flaky": [{ number: 41 }, { number: 51 }, { number: 52 }] } }), charter: charter(), factoryLogins: FACTORY })({ issue: 42 })).reasons.join(" ")).toMatch(/self-generated open 2 ≥ 2/);
+
+  // 기원 사슬도 그대로 센다: 마커만 있고 작성자가 사람(또는 미상)인 부모도 공장의 세대다
+  for (const parentAuthor of [humanAuthor("LeeHyeonKyu"), null]) {
+    const chain = {
+      ...issues,
+      60: { number: 60, body: "Detected while implementing #7. evidence: {}", labels: ["backlog"], author: parentAuthor },
+      61: flakyFrom(61, 60, appAuthor("ktb-factory")),
+    };
+    const deep = await makeQueueAdmission({ gh: ghOver(chain), charter: charter(), factoryLogins: FACTORY })({ issue: 61 });
+    expect(deep.ok).toBe(false);
+    expect(deep.reasons.join(" ")).toMatch(/generation 2 > 1/);
+  }
+  // 상한의 판정은 마커 또는 라벨 또는 공장 작성자다(plan non_goals[1]): 사람이 붙여 넣은 마커(done_when 있음)도,
+  // 라벨만 단 이슈도 상한에는 센다 — 상한을 면제 규칙(공장 작성자의 마커)으로 좁히거나 라벨 경로를 좁히면 여기서 실패한다
+  const fullCaps = [1, 2].map((number) => ({ number }));
+  for (const it of [
+    { number: 70, body: `${person.body}\n\nDetected while implementing #7.`, labels: ["backlog"], author: "LeeHyeonKyu" },
+    { number: 72, body: person.body, labels: ["backlog", "factory:flaky"], author: "LeeHyeonKyu" },
+  ]) {
+    const r = queueAdmission({ issue: it, charter: charter(), ...base, openSelfGenerated: fullCaps });
+    expect(r.self_generated, String(it.number)).toBe(true);
+    expect(r.reasons, String(it.number)).toEqual(["self-generated open 2 ≥ 2 (self_generated.open_max)"]);
+  }
+  // #136 세대 접기는 그대로다 — 사람 #17 → 개선 #20 → 하네스 #50 → flaky #70(소유자 작성)은 한 세대
+  const spec = {
+    17: { number: 17, body: person.body, labels: ["backlog"], author: humanAuthor("LeeHyeonKyu") },
+    20: { ...improvement(20, "LeeHyeonKyu/own-calendar#17"), author: appAuthor("ktb-factory") },
+    50: { number: 50, body: "<!-- factory-harness-request for=20 -->\nharness", labels: ["backlog", "factory:harness"], author: appAuthor("ktb-factory") },
+    70: flakyFrom(70, 50, humanAuthor("LeeHyeonKyu")),
+    71: flakyFrom(71, 20, humanAuthor("LeeHyeonKyu")),
+  };
+  const specAdmit = makeQueueAdmission({ gh: ghOver(spec), charter: charter(), factoryLogins: FACTORY });
+  expect(await specAdmit({ issue: 70 })).toEqual({ ok: true, reasons: [], self_generated: true });
+  expect((await specAdmit({ issue: 71 })).reasons.join(" ")).toMatch(/generation 2 > 1/);
+
+  // rework spec1 — 상한의 판정은 plan non_goals[1]대로 **마커 또는 라벨 또는 공장 작성자**다. 마커·라벨 없이 done_when을 가진
+  // 이슈도 작성자가 공장 로그인이면 open_max에 센다 — 작성자 갈래를 지우면 여기서 실패한다.
+  const appFeature = { ...busy, 90: { number: 90, body: person.body, labels: ["backlog"], author: appAuthor("ktb-factory") } };
+  const lists = { lists: { "factory:flaky": [{ number: 41 }, { number: 51 }, { number: 52 }] } };
+  const byApp = await makeQueueAdmission({ gh: ghOver(appFeature, lists), charter: charter(), factoryLogins: FACTORY })({ issue: 90 });
+  expect(byApp).toEqual({ ok: false, reasons: ["self-generated open 2 ≥ 2 (self_generated.open_max)"], self_generated: true });
+  // 같은 이슈를 사람이 쓰면 자기생성이 아니다
+  const byPerson = await makeQueueAdmission({ gh: ghOver({ ...appFeature, 90: { ...appFeature[90], author: humanAuthor("LeeHyeonKyu") } }, lists), charter: charter(), factoryLogins: FACTORY })({ issue: 90 });
+  expect(byPerson).toEqual({ ok: true, reasons: [], self_generated: false });
+  // self-critique (#231, dw5 "factory work is not refused") — 공장이 소유자 계정으로 도는 저장소(PAT 폴백)에서는 소유자 로그인이
+  // 공장 로그인 목록에 든다. 작성자 갈래가 그 로그인으로 서면 소유자의 보통 피처가 전부 자기생성이 되어 open_max에 막히고, 그 피처에서
+  // 수확한 flaky는 2세대로 depth_max에 막힌다 — #231 전에는 gh.issue()가 작성자를 싣지 않아 일어나지 않던 일이다. 그래서 상한의 작성자
+  // 갈래는 저장소 소유자 로그인을 공장 작성자로 세지 않는다(gh.js identityOf와 같은 공유 신원 규칙). 마커·라벨 갈래와 앱 작성자는 그대로다.
+  const SHARED = async () => ({ ok: true, logins: ["LeeHyeonKyu", "ktb-factory[bot]"] });
+  const full = {
+    ...busy,
+    80: { number: 80, body: person.body, labels: ["backlog"], author: humanAuthor("LeeHyeonKyu") },
+    81: flakyFrom(81, 7, humanAuthor("LeeHyeonKyu")),
+  };
+  const fiveOpen = [41, 51, 52, 53, 54, 55];
+  for (const k of [53, 54, 55]) full[k] = { ...flakyFrom(k, 7, humanAuthor("LeeHyeonKyu")), labels: ["factory:queue", "factory:flaky"] };
+  full[41] = { ...full[41], labels: ["factory:in-progress", "factory:flaky"] };
+  const sharedAdmit = makeQueueAdmission({ gh: ghOver(full, { lists: { "factory:flaky": fiveOpen.map((number) => ({ number })) } }), charter: { ...charter(), self_generated: { open_max: 5, depth_max: 1 } }, factoryLogins: SHARED });
+  // 소유자의 사람 일은 자기생성 상한에 막히지 않는다
+  expect(await sharedAdmit({ issue: 80 })).toEqual({ ok: true, reasons: [], self_generated: false });
+  // 상한은 풀리지 않았다: 같은 배선에서 공장의 flaky(라벨)는 open_max에 걸린다
+  expect((await sharedAdmit({ issue: 81 })).reasons).toEqual(["self-generated open 6 ≥ 5 (self_generated.open_max)"]);
+  // 앱 작성자의 피처는 공유 계정 저장소에서도 작성자 갈래로 센다
+  const sharedApp = await makeQueueAdmission({ gh: ghOver({ ...full, 90: appFeature[90] }, { lists: { "factory:flaky": fiveOpen.map((number) => ({ number })) } }), charter: { ...charter(), self_generated: { open_max: 5, depth_max: 1 } }, factoryLogins: SHARED })({ issue: 90 });
+  expect(sharedApp).toEqual({ ok: false, reasons: ["self-generated open 6 ≥ 5 (self_generated.open_max)"], self_generated: true });
+  // 소유자 피처에서 수확한 flaky는 1세대다 — 공장 로그인 목록에 소유자가 있든 없든 똑같이 들어간다
+  for (const logins of [SHARED, FACTORY]) {
+    const quiet = makeQueueAdmission({ gh: ghOver({ 7: issues[7], 81: full[81] }), charter: charter(), factoryLogins: logins });
+    expect(await quiet({ issue: 81 })).toEqual({ ok: true, reasons: [], self_generated: true });
+  }
+  // 소유자가 쓴 부모라도 마커를 달았으면 여전히 공장의 세대다(마커 갈래는 소유자 규칙과 무관하다)
+  const markedParent = makeQueueAdmission({ gh: ghOver({ 7: issues[7], 60: { number: 60, body: "Detected while implementing #7. evidence: {}", labels: ["backlog"], author: humanAuthor("LeeHyeonKyu") }, 61: flakyFrom(61, 60, humanAuthor("LeeHyeonKyu")) }), charter: charter(), factoryLogins: SHARED });
+  expect((await markedParent({ issue: 61 })).reasons.join(" ")).toMatch(/generation 2 > 1/);
+});

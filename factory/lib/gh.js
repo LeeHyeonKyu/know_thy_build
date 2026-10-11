@@ -264,6 +264,21 @@ function identityOf(candidates, logins, { owner = null } = {}) {
   return { personal: null, login: candidates[0]?.login ?? logins[0] ?? null };
 }
 
+/**
+ * #231 — `gh issue view --json author`의 작성자를 **`resolveFactoryLogins`가 쓰는 REST 로그인 모양**으로. 출처는 gh CLI 소스
+ * `api/queries_issue.go`의 `Author.MarshalJSON`(v2.102.0): GraphQL `author{login,...on User{id,name}}`에서 id가 비면(= User가 아닌
+ * `Bot`) `{is_bot:true, login:"app/" + login}`을, 아니면 `{is_bot:false, login, id, name}`을 낸다. GraphQL의 Bot login은 `<slug>`
+ * 이고 REST `user.login`(그리고 App 설치 토큰의 `gh api user`)은 `<slug>[bot]`이다 — 둘이 다르면 App이 연 이슈가 전부 사람의
+ * 이슈로 읽힌다. 로그인이 없으면 `null`(지어내지 않는다).
+ */
+function issueAuthorLogin(a) {
+  const login = typeof a?.login === "string" ? a.login.trim() : "";
+  if (!login) return null;
+  if (a.is_bot !== true && !login.startsWith("app/")) return login;
+  const slug = login.replace(/^app\//, "").replace(/\[bot\]$/, "");
+  return slug ? `${slug}[bot]` : null;
+}
+
 export function makeGh({ run, repo, sleep = realSleep }) {
   async function gh(args, opts = {}) {
     const r = await run("gh", args, opts);
@@ -293,9 +308,15 @@ export function makeGh({ run, repo, sleep = realSleep }) {
   return {
     /** #208 dw2 — the `owner/name` every call here targets; the PR evidence builds its fixing-commit links from it. */
     repo,
+    /**
+     * #231 — `author`를 싣는다: 큐 문(`admission.js`)이 "공장 마커가 있는 이 이슈를 공장이 열었는가"를 본문이 아니라 작성 계정으로
+     * 판정하고, `makeQueueAdmission`은 이 함수로 이슈를 다시 읽는다. 예전에는 필드가 없어서 작성자 판정이 프로덕션에서 죽어 있었다.
+     * 모양은 `issueAuthorLogin` 한 곳에서 `resolveFactoryLogins`의 모양으로 맞춘다. 응답에 `author` 키 자체가 없으면(요청하지 않은
+     * 응답) 필드는 `undefined`로 두고, 있는데 비었으면(삭제된 계정) `null`이다 — 둘 다 심사에서는 "작성자를 모른다"다.
+     */
     async issue(n) {
-      const j = JSON.parse(await gh(["issue", "view", String(n), "-R", repo, "--json", "number,title,body,labels"]));
-      return { number: j.number, title: j.title, body: j.body || "", labels: (j.labels || []).map((l) => l.name) };
+      const j = JSON.parse(await gh(["issue", "view", String(n), "-R", repo, "--json", "number,title,body,labels,author"]));
+      return { number: j.number, title: j.title, body: j.body || "", labels: (j.labels || []).map((l) => l.name), author: "author" in j ? issueAuthorLogin(j.author) : undefined };
     },
     /**
      * 이슈가 아직 열려 있는가(ADR-020 KTB-23 fix). `issue()`는 state를 싣지 않는다 — 그 함수는
