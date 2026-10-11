@@ -351,7 +351,12 @@ export function validatePlanHandoff(plan, { maxDoneWhen = 6, issueBody = "", not
     for (const it of issueItems) {
       const id = norm(it.id);
       const covered = byCoversIssue.has(id) || (id.startsWith("test_") && byRef.has(id));
-      if (!covered) reasons.push(`${ISSUE_NOT_COVERED} ${it.id} — "${[...it.text].slice(0, 80).join("")}"`);
+      // 사유가 고칠 길을 말한다 — 수리 턴이 받는 것은 이 문장뿐이고, 계획 프롬프트는 아직 `covers_issue`를 모른다(cf2).
+      // 위치 id(`issue-dw<n>`, 문서 전용 이슈 템플릿의 항목)는 check.ref로는 덮을 수 없으니 covers_issue만 권한다.
+      const remedy = id.startsWith("test_")
+        ? `(cover it: a plan item with check.ref "${it.id}" or covers_issue: ["${it.id}"])`
+        : `(cover it: add covers_issue: ["${it.id}"] to the plan item that checks it)`;
+      if (!covered) reasons.push(`${ISSUE_NOT_COVERED} ${it.id} — "${[...it.text].slice(0, 80).join("")}" ${remedy}`);
     }
   }
 
