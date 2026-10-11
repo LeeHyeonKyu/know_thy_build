@@ -629,3 +629,26 @@ test("test_232_check_ref_covers_only_test_ids_and_ignores_spelling", async () =>
   const r = validatePlanHandoff(planFix({ done_when: [dw232("test_9_other")] }), { issueBody: `## done_when\n- [ ] \`test_9_long\` — ${long}\n` });
   expect(r.filter((x) => x.startsWith(NOT_COVERED))).toEqual([`${NOT_COVERED} test_9_long — "${"x".repeat(79)}가"${FIX_TEST("test_9_long")}`]);
 });
+
+test("test_232_done_when_section_ignores_fenced_code_and_prose_keys", async () => {
+  const { validatePlanHandoff } = await import("../lib/verify-stage.js");
+  const { issueDoneWhenItems } = await import("../lib/context.js");
+  const { queueAdmission } = await import("../lib/admission.js");
+  // a quoted plan handoff in a fence above the section carries a column-0 `done_when:` — it is code, not the section
+  const fenceFirst = "## What\n```yaml\ndone_when:\n  - id: x\n```\n\n## done_when\n- [ ] `test_1_a` — a\n- [ ] `test_1_b` — b\n";
+  expect(queueAdmission({ issue: { number: 1, body: fenceFirst, labels: [] }, charter: {} }).reasons.some((r) => /not an explicit job/.test(r))).toBe(false);
+  expect(issueDoneWhenItems(fenceFirst).map((i) => i.id)).toEqual(["test_1_a", "test_1_b"]);
+  const notes = [];
+  expect(validatePlanHandoff(planFix({ done_when: [dw232("test_1_a")] }), { issueBody: fenceFirst, notes }).filter((x) => x.startsWith(NOT_COVERED)))
+    .toEqual([`${NOT_COVERED} test_1_b — "b"${FIX_TEST("test_1_b")}`]);
+  expect(notes).toEqual([]);
+  // a `# comment` inside a fenced shell block within the section is not the next heading
+  const codeInSection = "## done_when\n- [ ] `test_1_a` — a\n```bash\n# run\n- [ ] `test_1_code` — inside the fence\n```\n- [ ] `test_1_b` — b\n";
+  expect(issueDoneWhenItems(codeInSection).map((i) => i.id)).toEqual(["test_1_a", "test_1_b"]);
+  // a prose `Note:` line is not a machine key like `must_not:` — the items after it still count
+  const noteKey = "## done_when\n- [ ] `test_1_a` — a\nNote:\n- [ ] `test_1_b` — b\n\nmust_not:\n- [ ] `test_1_not_an_item` — after the key\n";
+  expect(issueDoneWhenItems(noteKey).map((i) => i.id)).toEqual(["test_1_a", "test_1_b"]);
+  // an earlier unfenced `done_when:` with no items does not hide the section that has them
+  const emptyFirst = "done_when:\nsee below\n\n## done_when\n- [ ] `test_1_a` — a\n";
+  expect(issueDoneWhenItems(emptyFirst).map((i) => i.id)).toEqual(["test_1_a"]);
+});
