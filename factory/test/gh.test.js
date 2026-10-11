@@ -835,3 +835,29 @@ test("test_201_gh_open_prs_by_head_prefix_filters_prefix_and_forks_with_an_expli
   expect(Number(args[args.indexOf("--limit") + 1])).toBeGreaterThan(30);
   expect(args[args.indexOf("--json") + 1].split(",")).toEqual(expect.arrayContaining(["number", "headRefName", "headRefOid", "isCrossRepository"]));
 });
+
+// ── #231 dw3 — `issue()`는 작성자를 싣는다: 큐 문이 "공장이 연 이슈인가"를 본문이 아니라 작성 계정으로 판정한다.
+// 모양의 출처는 gh CLI 소스 api/queries_issue.go `Author.MarshalJSON`(v2.102.0): 사람은 `{is_bot:false, login, id, name}`,
+// 봇(GraphQL `Bot` — `... on User`가 비어 id가 없다)은 `{is_bot:true, login:"app/<slug>"}`. GraphQL의 Bot login은 `<slug>`이고
+// (gh api graphql로 확인: dependabot → "dependabot"), REST `user.login`은 `<slug>[bot]`이다 — resolveFactoryLogins가 쓰는 쪽.
+test("test_231_gh_issue_carries_author_in_factory_login_form", async () => {
+  const view = (author) => makeFakeRun([{ match: (c, a) => a[0] === "issue" && a[1] === "view", result: { code: 0, stdout: JSON.stringify({ number: 5, title: "T", body: "B", labels: [], ...(author === undefined ? {} : { author }) }), stderr: "" } }]);
+  const read = async (author) => { const run = view(author); const it = await makeGh({ run, repo }).issue(5); return { it, args: run.calls[0].args }; };
+
+  const human = await read({ id: "MDQ6VXNlcjE=", is_bot: false, login: "LeeHyeonKyu", name: "Lee" });
+  expect(human.args.slice(-2)).toEqual(["--json", "number,title,body,labels,author"]);
+  expect(human.it).toEqual({ number: 5, title: "T", body: "B", labels: [], author: "LeeHyeonKyu" });
+  // App 작성자 → resolveFactoryLogins가 내는 바로 그 `<slug>[bot]` 모양
+  const app = await read({ is_bot: true, login: "app/ktb-factory" });
+  expect(app.it.author).toBe("ktb-factory[bot]");
+  const lg = await resolveFactoryLogins({ gh: { repo, viewerLogin: async () => "ktb-factory[bot]", viewerType: async () => "Bot" }, env: { GITHUB_ACTIONS: "true" } });
+  expect(lg.logins).toContain(app.it.author);
+  // is_bot만 있고 접두사가 없는 모양도 같은 곳으로 접힌다(이중 접미사는 붙이지 않는다)
+  expect((await read({ is_bot: true, login: "ktb-factory" })).it.author).toBe("ktb-factory[bot]");
+  expect((await read({ is_bot: true, login: "app/ktb-factory[bot]" })).it.author).toBe("ktb-factory[bot]");
+  // 작성자가 없다(삭제된 계정 — gh가 null을 준다) / login이 비었다 → null. 지어내지 않는다.
+  expect((await read(null)).it.author).toBe(null);
+  expect((await read({ is_bot: false, login: "" })).it.author).toBe(null);
+  expect((await read({ is_bot: false })).it.author).toBe(null);
+  expect(typeof human.it.author).toBe("string");
+});
