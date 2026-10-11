@@ -716,6 +716,11 @@ test("test_249_unresolved_factory_logins_refusal_is_unreadable_at_the_entry_rech
   const stranger = queueAdmission({ issue: { ...markerOnly, author: "mallory" }, charter: charter(), ...base, factoryLoginsResolved: true });
   expect(stranger.codes).toEqual(["no-done-when"]);
   expect(entryRecheck(stranger)).toMatchObject({ verdict: "refuse", to: "factory:needs-info" });
+  // `codes` is a non-enumerable property (the #231/#260 refusal shapes stay as pinned): a spread or a JSON trip drops it, and
+  // the entry re-check then treats the refusal as unreadable — it never demotes on a refusal whose codes it cannot see
+  expect(Object.keys(stranger)).toEqual(["ok", "reasons", "self_generated"]);
+  expect(entryRecheck({ ...stranger })).toMatchObject({ verdict: "unreadable" });
+  expect(entryRecheck(JSON.parse(JSON.stringify(stranger)))).toMatchObject({ verdict: "unreadable" });
   const anonymous = queueAdmission({ issue: { ...markerOnly, author: null }, charter: charter(), ...base, factoryLoginsResolved: true });
   expect(anonymous.codes).toEqual(["no-done-when"]);
 });
