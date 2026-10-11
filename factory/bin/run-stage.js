@@ -3228,12 +3228,6 @@ export async function mirrorMatchesBranchHead({ root, run, importer, match = mir
 }
 
 /**
- * ADR-023 Task 8b — 세션이 끝난 뒤에도 **여전히 그 브랜치 위인가**, 그리고 팩토리 설정은 여전히
- * 스테이지 커밋의 것인가. 훅이 브랜치 이동을 막지만 훅이 못 보는 철자는 언제나 남는다(런타임 조립) —
- * 이것은 그 뒤에 서는 구조적 백스톱이다. `git rev-parse --abbrev-ref HEAD` 자체가 실패하거나 HEAD가
- * detach면(`HEAD`) 증명할 수 없는 것이고, 이 저장소에서 판정 불가의 자리는 `factory:blocked`다.
- */
-/**
  * #253 — 오버레이 드리프트 사유의 **단일 출처**. 두 자리(아래 `assertStageBranch`, 쓰기 금지 스테이지의
  * `assertCleanWorktree`)가 같은 함수로 사유를 만든다 — 한 자리만 고쳐지는 것을 막는다(1.4.22의 전례).
  * 접두 `factory config changed during the stage: <paths>`는 그대로다(하류가 그 접두를 읽는다). 드리프트한 경로에
@@ -3244,6 +3238,12 @@ export const OVERLAY_MIRROR_REMEDY = " — a builder must not write .factory/**;
 export const overlayDriftReason = (drift) =>
   drift.reason || `factory config changed during the stage: ${drift.paths.join(", ")}${drift.paths.some((p) => inMirrorFamily(p)) ? OVERLAY_MIRROR_REMEDY : ""}`;
 
+/**
+ * ADR-023 Task 8b — 세션이 끝난 뒤에도 **여전히 그 브랜치 위인가**, 그리고 팩토리 설정은 여전히
+ * 스테이지 커밋의 것인가. 훅이 브랜치 이동을 막지만 훅이 못 보는 철자는 언제나 남는다(런타임 조립) —
+ * 이것은 그 뒤에 서는 구조적 백스톱이다. `git rev-parse --abbrev-ref HEAD` 자체가 실패하거나 HEAD가
+ * detach면(`HEAD`) 증명할 수 없는 것이고, 이 저장소에서 판정 불가의 자리는 `factory:blocked`다.
+ */
 export async function assertStageBranch({ run, cwd, issue, sha, harnessIssue = false }) {
   const branch = stageBranch(issue);
   const r = await run("git", ["rev-parse", "--abbrev-ref", "HEAD"], { cwd });
