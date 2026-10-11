@@ -23,13 +23,13 @@
 | rounds/issue (plan/impl/review) | 0 / 0 / 0 | 0.9 / 2 / 1.75 |
 | escaped defects | 0 | 25 |
 | revert rate | 없음 | 0.00 (0/20) |
-| needs-human | 0 | 84 |
+| needs-human | 2 | 84 |
 | rejects by role | 없음 | spec-conformance 10, qa 4, correctness 13, architecture 7, security 4 |
 | reviewer overlap | 없음 | 0.50 (21/42, runs 46) |
 | unique findings by role | 없음 | spec-conformance 4, qa 4, correctness 6, architecture 4, security 3 |
-| qa na ratio | 없음 | 0.24 (57/242 claims, na-heavy 8/34 approvals) |
-| cost (usd) | 13.95 | 1271.17 |
-| tokens | input 29407 / output 2940 | input 31252229 / output 2568342 |
+| qa na ratio | 0.33 (4/12 claims, na-heavy 1/2 approvals) | 0.24 (57/242 claims, na-heavy 8/34 approvals) |
+| cost (usd) | 38.57 | 1271.17 |
+| tokens | input 416423 / output 42108 | input 31252229 / output 2568342 |
 | retro cost (usd) | 0.00 | 11.56 |
 | retro tokens | input 0 / output 0 | input 34 / output 29746 |
 | full retros | — | 10 |
@@ -1868,6 +1868,15 @@
           206
         ],
         "source": "dissent"
+      },
+      {
+        "role": "skeptic",
+        "kind": "good",
+        "text": "Do not build this a third time. Everything #249 asks for already exists in PR #250 (branch claude/fq-249, head 3d20e63) ... A new plan → implement → review cycle fixes neither cause ... If the factory must still run the plan, the plan should be \"update PR #250 onto main\" ... Opening a second PR fails this item. (Raised in R1; R2 was empty, so no other role answered it.)",
+        "runs": [
+          249
+        ],
+        "source": "dissent"
       }
     ],
     "flaky": [],
@@ -2039,8 +2048,8 @@
       },
       {
         "issue": 249,
-        "reason": "protected paths changed — human merge required: .factory/bin/retro.js, .factory/bin/run-stage.js, .factory/lib/admission.js, .factory/lib/gates.js, .factory/lib/harness-request.js, .factory/lib/transition.js, factory/bin/retro.js, factory/bin/run-stage.js, factory/lib/admission.js, factory/lib/gates.js, factory/lib/harness-request.js, factory/lib/transition.js, factory/test/admission.test.js, factory/test/gates.test.js, factory/test/retro-bin.test.js, factory/test/run-stage.test.js (see PR #250)",
-        "at": "2026-10-10T23:31:45Z"
+        "reason": "review verification failed — review evidence not bound to a factory run — the factory/records branch could not be fetched — the review evidence is unreachable, and an unverified review is not a passed review",
+        "at": "2026-10-11T18:44:18Z"
       },
       {
         "issue": 247,
@@ -2106,6 +2115,11 @@
         "issue": 206,
         "reason": "stage artifact missing or invalid: no candidate matched the stage schema — transcript: the Workflow tool result is a background receipt, not a return value (1 call(s)) | transcript task-notification #1: head_sha is required; pr is required; verifier is required | transcript file read loaded.json: verifier is required; guarantee is required | transcript tool result #1: verifier is required; guarantee is required | result bare JSON: head_sha is required; pr is required; verifier is required",
         "at": "2026-10-11T14:18:39Z"
+      },
+      {
+        "issue": 212,
+        "reason": "review verification failed — review evidence not bound to a factory run — the factory/records branch could not be fetched — the review evidence is unreachable, and an unverified review is not a passed review",
+        "at": "2026-10-11T18:44:22Z"
       }
     ]
   },
@@ -2126,17 +2140,17 @@
     "overlapping_findings": 0,
     "unique_findings_by_role": {},
     "overlap_ratio": 0,
-    "needs_human": 0,
-    "qa_approvals": 0,
-    "qa_claims_total": 0,
-    "qa_na_total": 0,
-    "qa_na_ratio": 0,
-    "qa_na_heavy_approvals": 0,
+    "needs_human": 2,
+    "qa_approvals": 2,
+    "qa_claims_total": 8,
+    "qa_na_total": 4,
+    "qa_na_ratio": 0.33,
+    "qa_na_heavy_approvals": 1,
     "usage": {
-      "cost_usd": 13.95075,
+      "cost_usd": 38.574308,
       "tokens": {
-        "input": 29407,
-        "output": 2940
+        "input": 416423,
+        "output": 42108
       }
     }
   },
