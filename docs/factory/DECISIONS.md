@@ -4510,3 +4510,46 @@ merge `timeout-minutes: 90`도 템플릿에 처음 반영한다(테스트 표의
 doctor-ci의 토큰 검사는 `continue-on-error`라 잡을 죽이지 않지만 **WARN으로 남는다**(후속: App 토큰이면 그 검사를 "해당 없음"으로).
 `gh pr edit`류의 GraphQL `viewer` 조회가 App 토큰에서 어떻게 되는지는 #217(REST PATCH)이 비켜 간다. own-calendar는 다음 릴리스로
 업그레이드하고 같은 두 시크릿을 넣는다. `bot-hk`가 복구되면 숨겨진 PR·코멘트가 다시 보이고, 그 계정은 PAT 폴백으로만 남는다.
+
+---
+
+## ADR-039 `orchestration = "agent"`는 "단일 에이전트 스테이지는 디스패처 없이 에이전트를 직접 부른다"이다 — 2026-10-11 (#237, 허점 원장 P-11/T-4)
+
+**질문**: triage·retro는 에이전트가 하나뿐이고 토론이 없다. 그런데도 `claude -p "/factory-<stage> <n>"` → 디스패처(LLM) 세션 → Workflow
+런타임 → 에이전트, 세 겹을 지난다. 디스패처가 하는 일은 `loaded.json`을 읽어 Workflow에 넘기고 반환값을 그대로 출력하는 것뿐인데,
+바로 그 전달에서 실패했다 — args를 JSON 문자열로(#170), 잘라서(#195·#201), 출력 파일을 폴링하다 턴 소진(own-calendar #124).
+
+**`agent`의 예전 뜻**: §4.2.4와 위 "후퇴 결정"(ADR-002)의 `agent`는 "Workflow가 무인 실행에서 안 돌 때 물러설 모드, 잃는 것은
+구조적 보장(`structural`) → 사후 감지(`verified`)"였다. 그 모드는 한 번도 구현되지 않았고, 엔진에서 이 값을 읽는 곳은
+`verify-stage`의 대조(`orchestration X != configured Y`)와 doctor의 `workflow|agent` 검사뿐이었다. 그 대조 때문에 키를 `agent`로
+바꾼 저장소는 **모든** 스테이지가 `orchestration workflow != configured agent`로 needs-human에 섰다.
+
+**결정**:
+1. `[factory] orchestration = "agent"`의 뜻은 이제 **"에이전트가 하나뿐인 스테이지(triage·retro)는 디스패처 없이 역할 세션을 직접
+   `claude -p`로 띄운다"**이다. 토론 스테이지(plan·implement·review)는 그 값에서도 `/factory-<stage>` 워크플로를 그대로 탄다.
+   실효값은 스테이지마다 `lib/config.js`의 `orchestrationFor`가 한 번 정하고, `lib/context.js`가 그것을 `context.json`·`loaded.json`에
+   싣는다 — run-stage와 `bin/verify-stage.js`가 같은 값을 읽는다(`test_237_agent_mode_leaves_debate_stages_passing`).
+2. 직접 세션의 모양: 시스템 프롬프트 = 역할 md의 본문(`.claude/agents/factory-triage.md`·`factory-retro.md`), 모델 = 역할의 모델,
+   쓰기 도구(`Edit`·`Write`·`MultiEdit`·`NotebookEdit`·`Bash`)는 argv의 `--disallowedTools`로 거부, 나머지 가드(`dontAsk`·`--settings`·
+   `--max-turns`·예산·`FACTORY_STAGE`)는 디스패처 세션과 같다. `workflow`일 때의 argv·env는 예전과 바이트 단위로 같다
+   (`test_237_triage_runs_the_agent_directly_when_orchestration_is_agent`, `test_237_retro_runs_the_analyst_directly_and_keeps_its_failure_contract`).
+3. 직접 triage의 프롬프트는 워크플로가 주입하던 판정 재료(CHARTER `triage.default`, 러너가 계산한 `explicit_submission`)를 그대로
+   싣고, 컨텍스트가 이 런의 이슈 것이 아니면 세션을 띄우지 않고 fail closed한다(`test_237_direct_triage_prompt_carries_charter_default_and_submission`).
+4. 직접 triage 핸드오프의 `issue`·`orchestration: "agent"`·`guarantee`는 **러너가 찍는다** — 에이전트 답이 다른 값을 주장해도
+   덮는다. 직접 모드의 **`guarantee` 값은 `verified`**다: 워크플로의 구조(스크립트가 역할을 띄우고 반환값을 스키마로 받는다)가 없고,
+   판정은 러너의 사후 검증(`triage.v1` 스키마 검증 + NEVER_AUTOMATE 재확인)이 한다 — §4.2.4가 예고한 그 교환이다. run 기록에는
+   `orchestration=agent` 한 줄이 턴·비용과 함께 남는다(`usage:` 줄은 그대로)(`test_237_direct_triage_leaves_the_same_handoff_and_label`).
+5. 실패는 오늘의 자리로 간다: 빈 결과·JSON 아님·`triage.v1` 불일치는 `stage artifact missing or invalid` → needs-human, 턴 한도는
+   `stage did not finish` → blocked(`test_237_direct_agent_failure_lands_on_the_same_invalid_artifact_path`). retro의 빈 결과·오류 봉투·
+   `retro.v1` 불일치는 `retro: full analysis failed` + `last_full_failed`이고 `merges_since`·커서는 그대로다 — 0건 회고로 읽히지 않는다(dw6 테스트).
+   직접 세션에서는 **세션 트랜스크립트를 산출물 후보로 쓰지 않는다**: 트랜스크립트 구제(KTB-7/17)는 디스패처의 재타이핑을 위한 것이고,
+   직접 세션의 tool_result는 에이전트가 읽은 파일(지난 런의 `triage.json` 등)이지 답이 아니다(같은 두 테스트가 대비로 고정한다).
+
+**바꾸지 않은 것**: KTB의 `.factory/harness.toml`과 템플릿의 기본값은 `workflow` 그대로다 — 이 PR이 머지돼도 KTB에서는 이 경로가 돌지
+않는다. 켜는 것은 사람이 머지하는 `factory:harness` 후속(그 PR이 `harness.toml`의 `# workflow | agent` 주석도 고친다)과 `.factory/bin`
+업그레이드다. 워크플로 스크립트(`.claude/workflows/factory-triage.js`·`factory-retro.js`)는 남는다.
+
+**남는 것(미확인)**: 역할 md frontmatter의 `hooks:`(`deny-all-writes.sh`)와 `agent_type`으로 갈리는 훅(`stop-guard.sh`·`verdict-format.sh`)이
+`--system-prompt` 세션에 걸리는지는 M0에서 증명할 수 없다 — 그래서 쓰기 거부를 argv에 실었다. 판정 프롬프트는 이제 두 벌(보호된 워크플로
+파일과 `factory/bin`)이고, 한쪽만 고치면 판정이 모드에 따라 달라진다. `max_turns`(12)는 디스패처 기준으로 잡힌 값이라 첫 실제 런에서
+`max_turns_by_stage`를 다시 볼 것.

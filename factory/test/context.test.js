@@ -5,6 +5,11 @@ import { tmpdir } from "node:os";
 import { buildContext, roleContextFor, contextManifestsFor, contextManifestLines, CONTEXT_MANIFEST_PREFIX } from "../lib/context.js";
 import { renderHandoff } from "../lib/handoff.js";
 import { validateManifest } from "../lib/qa-evidence.js";
+import { dirname } from "node:path";
+import { fileURLToPath } from "node:url";
+import { orchestrationFor } from "../lib/config.js";
+import { makeStageVerifyDep, DIRECT_GUARANTEE } from "../bin/run-stage.js";
+import { verifyStageCli } from "../bin/verify-stage.js";
 
 function root() {
   const r = mkdtempSync(join(tmpdir(), "ctx-"));
@@ -742,4 +747,73 @@ test("test_174_builder_context_takes_the_brief_bound_to_the_restart_transition",
   const loaded = await loadedFrom();
   expect(loaded.k_restart_brief.findings).toEqual(real);
   expect(loaded.k_restart_brief.paths).toEqual(["factory/lib/self-gate.js"]);
+});
+
+/**
+ * ── #237 (gap ledger P-11, T-4) — `orchestration = "agent"` is resolved PER STAGE ───────────────────────────────
+ *
+ * `agent` now means "the single-agent stages (triage, retro) call their agent directly". The debate stages keep
+ * their `/factory-<stage>` workflows, and their workflow stamps `orchestration: 'workflow'` — so the value the
+ * runner checks that stamp against must be the per-stage one, or every plan/implement/review run of a repo that
+ * flips the key lands on needs-human with `orchestration workflow != configured agent`.
+ */
+test("test_237_agent_mode_leaves_debate_stages_passing", async () => {
+  const r = root();
+  writeFileSync(join(r, ".factory/harness.toml"), readFileSync(join(r, ".factory/harness.toml"), "utf8").replace('orchestration = "workflow"', 'orchestration = "agent"'));
+  const gh = { issue: vi.fn(async () => ({ number: 30, title: "T", body: "", labels: [] })), comments: vi.fn(async () => []) };
+  const effective = {};
+  for (const stage of ["triage", "plan", "implement", "review"]) {
+    const ctx = await buildContext({ root: r, gh, issue: 30, stage });
+    effective[stage] = ctx.orchestration;
+    expect(JSON.parse(readFileSync(join(r, ".factory/out/loaded.json"), "utf8")).orchestration, stage).toBe(ctx.orchestration);
+  }
+  expect(effective).toEqual({ triage: "agent", plan: "workflow", implement: "workflow", review: "workflow" });
+  expect(orchestrationFor({ factory: { orchestration: "agent" } }, "retro")).toBe("agent");
+  expect(orchestrationFor({ factory: { orchestration: "workflow" } }, "retro")).toBe("workflow");
+  expect(orchestrationFor({ factory: { orchestration: "workflow" } }, "triage")).toBe("workflow");
+
+  // a plan run whose workflow handoff is valid reaches factory:planned — through run-stage's verify wiring …
+  const ctx = await buildContext({ root: r, gh, issue: 30, stage: "plan" });
+  mkdirSync(join(r, ".factory/out"), { recursive: true });
+  writeFileSync(join(r, ".factory/out/agents.jsonl"), ctx.roster.flatMap((role, i) => [
+    JSON.stringify({ hook_event_name: "SubagentStart", agent_id: `a${i}`, agent_type: `plan-${role}` }),
+    JSON.stringify({ hook_event_name: "SubagentStop", agent_id: `a${i}`, agent_type: `plan-${role}` }),
+  ]).join("\n") + "\n");
+  const plan = {
+    schema: "factory.plan.v1", issue: 30, tier: "standard", roles: ctx.roster, rounds: ctx.rounds,
+    done_when: [{ id: "dw1", text: "POST /notes returns 201 with the created id", check: { kind: "test", ref: "test_30_create" }, rubric: "the id in the body is the stored row's id", level: "unit" }],
+    files_expected: [], dissent_log: [], non_goals: [], open_risks: [], orchestration: "workflow", guarantee: "structural",
+  };
+  const envelope = { is_error: false, result: JSON.stringify(plan), num_turns: 4, total_cost_usd: 1 };
+  const transitions = [];
+  const deps = {
+    charterReady: async () => true, trustWorkspace: async () => {}, claim: async () => ({ ok: true }),
+    heartbeat: async () => ({ stop() {} }), assertHandoff: async () => ({ ok: true }),
+    buildContext: async () => ctx, resetAgentsLog: async () => {}, claudeP: async () => envelope, gates: async () => null,
+    verifyStage: makeStageVerifyDep({ root: r, stage: "plan", getCtx: () => ctx, getCharter: () => ({ never_automate: [] }), transcriptOf: () => "" }),
+    writeHandoff: async () => {}, transition: async (t) => { transitions.push(t); return { ok: true, to: t.to }; },
+    runRecord: () => {}, release: async () => true,
+  };
+  expect(await runStage({ stage: "plan", issue: 30, deps })).toBe(0);
+  expect(transitions.map((t) => t.to)).toEqual(["factory:planned"]);
+
+  // … and through the standalone diagnostic CLI, which reads the same per-stage value from context.json
+  writeFileSync(join(r, ".factory/out/plan.json"), JSON.stringify(envelope));
+  const cli = verifyStageCli({ root: r, argv: ["plan", "30"], home: r });
+  expect(cli.reasons.filter((x) => /orchestration/.test(x))).toEqual([]);
+  expect(cli.ok).toBe(true);
+
+  // the changed meaning of `agent` and the direct-mode guarantee are written down, not decided silently
+  const decisions = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "../../docs/factory/DECISIONS.md"), "utf8");
+  const at = decisions.indexOf("## ADR-039");
+  expect(at).toBeGreaterThan(-1);
+  const rest = decisions.slice(at);
+  const next = rest.indexOf("\n## ", 5);
+  const section = next === -1 ? rest : rest.slice(0, next);
+  expect(section).toContain("#237");
+  expect(section).toContain(`\`guarantee\``);
+  expect(section).toContain(`\`${DIRECT_GUARANTEE}\``);
+  expect(section).toMatch(/triage/);
+  expect(section).toMatch(/retro/);
+  expect(section).toMatch(/orchestration = "agent"/);
 });

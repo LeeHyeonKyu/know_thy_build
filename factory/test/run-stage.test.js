@@ -17,6 +17,8 @@ import { makeFakeRun } from "../lib/exec.js";
 import { parseProgressMarker } from "../lib/progress.js";
 import { appendRunRecord, appendRunRecordLine } from "../lib/run-record.js";
 import { parseRunRecord } from "../lib/usage.js";
+import { makeStageClaudeP, makeStageVerifyDep, DIRECT_GUARANTEE } from "../bin/run-stage.js";
+import { copyFileSync } from "node:fs";
 
 test("run-stage executes the §4.2.1 skeleton in order and transitions on success", async () => {
   const calls = [];
@@ -6571,4 +6573,183 @@ test("test_200_scope_check_fails_open_visibly_on_git_read_error", async () => {
     expect(r.findings.some((f) => f.check === "pin" && f.blocking && f.ids?.includes("p1")), name).toBe(true);
     expect(r.ok, name).toBe(false);
   }
+});
+
+/**
+ * ── #237 (gap ledger P-11, T-4) — single-agent stages call the agent directly ───────────────────────────────────
+ *
+ * With `[factory] orchestration = "agent"` triage no longer goes `claude -p "/factory-triage <n>"` → dispatcher →
+ * Workflow → agent (three sessions). It launches ONE session whose system prompt is the role md, with the role's
+ * model and the write-capable tools denied in the argv. These tests drive the production wiring (`makeStageClaudeP`,
+ * `makeStageVerifyDep` — the exact deps main() builds) with a fake `run`, so the argv, the stamp and the failure path
+ * are the ones a real run takes.
+ */
+const REPO_237 = join(dirname(fileURLToPath(import.meta.url)), "../..");
+const TRIAGE_MD_237 = ".claude/agents/factory-triage.md";
+function directRoot237() {
+  const r = mkdtempSync(join(tmpdir(), "direct-237-"));
+  mkdirSync(join(r, ".claude/agents"), { recursive: true });
+  copyFileSync(join(REPO_237, TRIAGE_MD_237), join(r, TRIAGE_MD_237));
+  return r;
+}
+const triageLoaded237 = (over = {}) => ({
+  issue: 7, stage: "triage", tier: "standard",
+  roster: [{ name: "triage", agentType: "factory-triage", model: "sonnet", lessons: ".factory/lessons/factory-triage.md" }],
+  triage: { default: "needs-info", never_automate: [], explicit_submission: false, submitted_by: null },
+  orchestration: "agent", ...over,
+});
+const envelope237 = (result, over = {}) => ({ type: "result", is_error: false, result, num_turns: 3, total_cost_usd: 0.42, session_id: "s-237", ...over });
+const claudeRun237 = (env) => makeFakeRun([{ match: (c) => c === "claude", result: { code: 0, stdout: JSON.stringify(env), stderr: "" } }]);
+const argAfter = (args, flag) => args[args.indexOf(flag) + 1];
+
+test("test_237_triage_runs_the_agent_directly_when_orchestration_is_agent", async () => {
+  const root = directRoot237();
+  const md = readFileSync(join(REPO_237, TRIAGE_MD_237), "utf8");
+  const charter = { budget: { usd_per_stage: 5 } };
+  const harness = { factory: { orchestration: "agent", max_turns: 12 } };
+  const run = claudeRun237(envelope237('{"disposition":"ready","tier":"standard"}'));
+  const claudeP = makeStageClaudeP({ root, stage: "triage", issue: 7, run, getHarness: () => harness, getCharter: () => charter });
+  await claudeP({ orchestration: "agent", loaded: triageLoaded237() });
+
+  expect(run.calls).toHaveLength(1);
+  const { cmd, args, opts } = run.calls[0];
+  expect(cmd).toBe("claude");
+  expect(args[0]).toBe("-p");
+  expect(args.filter((x) => /^\/factory-/.test(x))).toEqual([]);     // no dispatcher slash command anywhere in the argv
+  expect(args[1].startsWith("/")).toBe(false);
+  // the system prompt IS the role md (its body — the YAML frontmatter is configuration, not prose)
+  const sys = argAfter(args, "--system-prompt");
+  expect(sys).toContain("## Purpose");
+  expect(sys).toContain("Decide whether the issue is something the factory can and should build");
+  expect(sys.startsWith("---")).toBe(false);
+  expect(md.trimEnd().endsWith(sys.trimEnd())).toBe(true);
+  expect(argAfter(args, "--model")).toBe("sonnet");
+  // read-only like the role: the write-capable tools are denied in the argv, not left to the frontmatter hook
+  expect(argAfter(args, "--disallowedTools").split(",")).toEqual(expect.arrayContaining(["Edit", "Write", "MultiEdit", "NotebookEdit", "Bash"]));
+  expect(argAfter(args, "--allowedTools").split(",")).toEqual(["Read", "Grep", "Glob"]);   // the role's own read tools, pre-approved under dontAsk
+  // the guard flags every stage session carries
+  expect(argAfter(args, "--permission-mode")).toBe("dontAsk");
+  expect(argAfter(args, "--max-turns")).toBe("12");
+  expect(argAfter(args, "--output-format")).toBe("json");
+  expect(argAfter(args, "--settings")).toBe(join(root, ".factory/ci-settings.json"));
+  expect(argAfter(args, "--max-budget-usd")).toBe("5");
+  expect(opts.cwd).toBe(root);
+  expect(opts.env.FACTORY_STAGE).toBe("triage");
+
+  // workflow: byte-identical to today's dispatcher argv and env
+  const wHarness = { factory: { orchestration: "workflow", max_turns: 12 } };
+  const wrun = claudeRun237(envelope237("{}"));
+  await makeStageClaudeP({ root, stage: "triage", issue: 7, run: wrun, getHarness: () => wHarness, getCharter: () => charter })({ orchestration: "workflow", loaded: triageLoaded237({ orchestration: "workflow" }) });
+  expect(wrun.calls[0].args).toEqual(stageClaudeArgs({ root, stage: "triage", issue: 7, harness: wHarness, charter }));
+  expect(wrun.calls[0].args).toEqual(["-p", "/factory-triage 7", "--permission-mode", "dontAsk", "--max-turns", "12", "--output-format", "json", "--settings", join(root, ".factory/ci-settings.json"), "--max-budget-usd", "5"]);
+  expect(wrun.calls[0].opts.env).toEqual(stageClaudeEnv({ root, stage: "triage", harness: wHarness }));
+});
+
+/** One whole triage run through runStage with the production claudeP/verify wiring; only `run` and gh are fakes. */
+async function runTriage237({ mode, result, envOver = {}, loaded = null, transcript = "" }) {
+  const root = directRoot237();
+  const lines = [], handoffs = [], transitions = [], tiers = [];
+  const ctx = { issue: { number: 7, body: "[ready]" }, roster: [], orchestration: mode, limits: { K: 3 }, loaded: loaded ?? triageLoaded237({ orchestration: mode }) };
+  const run = claudeRun237(envelope237(result, envOver));
+  const deps = baseDeps({
+    buildContext: async () => ctx,
+    claudeP: makeStageClaudeP({ root, stage: "triage", issue: 7, run, getHarness: () => ({ factory: { orchestration: mode } }), getCharter: () => ({}), record: (l) => lines.push(l) }),
+    verifyStage: makeStageVerifyDep({ root, stage: "triage", getCtx: () => ctx, getCharter: () => ({ never_automate: [] }), transcriptOf: () => transcript }),
+    writeHandoff: async ({ data }) => { handoffs.push(data); },
+    setTierLabel: async (t) => { tiers.push(t); },
+    transition: async (t) => { transitions.push(t); return { ok: true, to: t.to }; },
+    runRecord: (l) => lines.push(...l),
+  });
+  const code = await runStage({ stage: "triage", issue: 7, deps });
+  return { code, lines, handoffs, transitions, tiers, run };
+}
+const VERDICT_237 = { disposition: "ready", tier: "standard", impact_paths: ["factory/bin/run-stage.js"], reason: "[ready] marker", summary: "s" };
+
+test("test_237_direct_triage_leaves_the_same_handoff_and_label", async () => {
+  // the dispatcher path: the workflow stamps issue/orchestration/guarantee itself
+  const wf = await runTriage237({ mode: "workflow", result: JSON.stringify({ ...VERDICT_237, issue: 7, orchestration: "workflow", guarantee: "structural" }) });
+  // the direct path: the agent's answer CLAIMS another issue and the workflow mode — the runner overrides both
+  const ag = await runTriage237({ mode: "agent", result: JSON.stringify({ ...VERDICT_237, issue: 999, orchestration: "workflow", guarantee: "structural" }) });
+
+  for (const r of [wf, ag]) {
+    expect(r.code).toBe(0);
+    expect(r.transitions.map((t) => t.to)).toEqual(["factory:ready"]);
+    expect(r.tiers).toEqual(["standard"]);
+    expect(r.handoffs).toHaveLength(1);
+    expect(r.handoffs[0]).toEqual(expect.objectContaining({ disposition: "ready", tier: "standard", issue: 7 }));
+  }
+  expect(wf.handoffs[0]).toEqual(expect.objectContaining({ orchestration: "workflow", guarantee: "structural" }));
+  expect(ag.handoffs[0]).toEqual(expect.objectContaining({ issue: 7, orchestration: "agent", guarantee: "verified" }));
+  expect(DIRECT_GUARANTEE).toBe("verified");
+  // an operator reads which path ran — and what it cost — from the run record
+  const agLine = ag.lines.find((l) => /orchestration=agent/.test(l));
+  expect(agLine).toBeDefined();
+  expect(agLine).toMatch(/num_turns: 3/);
+  expect(agLine).toMatch(/cost_usd: 0\.42/);
+  expect(wf.lines.some((l) => /orchestration=agent/.test(l))).toBe(false);
+  // the `usage:` line the cost ledger parses is untouched on both paths
+  for (const r of [wf, ag]) expect(r.lines.some((l) => /^usage: \{.*\} cost_usd: 0\.42 num_turns: 3 /.test(l))).toBe(true);
+});
+
+test("test_237_direct_triage_prompt_carries_charter_default_and_submission", async () => {
+  const root = directRoot237();
+  const promptFor = async (loaded) => {
+    const run = claudeRun237(envelope237("{}"));
+    await makeStageClaudeP({ root, stage: "triage", issue: 7, run, getHarness: () => ({ factory: { orchestration: "agent" } }), getCharter: () => ({}) })({ orchestration: "agent", loaded });
+    return run.calls[0].args[1];
+  };
+  const submitted = await promptFor(triageLoaded237({ triage: { default: "needs-info", never_automate: [], explicit_submission: true, submitted_by: "alice" } }));
+  expect(submitted).toMatch(/#7\b/);
+  expect(submitted).toMatch(/charter default, which is `needs-info`/);
+  expect(submitted).toMatch(/explicitly submitted to the queue by alice/);
+  expect(submitted).toContain(".factory/out/context.json");
+  expect(submitted).toContain(".factory/out/loaded.json");
+  expect(submitted).toContain(".factory/lessons/factory-triage.md");
+  // the values come from the loaded context, not a constant: flip both and the prompt follows
+  const quiet = await promptFor(triageLoaded237({ triage: { default: "ready", never_automate: [], explicit_submission: false, submitted_by: null } }));
+  expect(quiet).toMatch(/charter default, which is `ready`/);
+  expect(quiet).not.toMatch(/explicitly submitted/);
+  // a missing/odd default reads as the narrow one, exactly like the workflow
+  const unset = await promptFor(triageLoaded237({ triage: { never_automate: [] } }));
+  expect(unset).toMatch(/charter default, which is `needs-info`/);
+
+  // a stale context (another issue) spawns nothing and fails closed — the wrong issue never gets labelled
+  const stale = await runTriage237({ mode: "agent", result: JSON.stringify(VERDICT_237), loaded: triageLoaded237({ issue: 8 }) });
+  expect(stale.run.calls).toHaveLength(0);
+  expect(stale.code).toBe(2);
+  expect(stale.transitions.map((t) => t.to)).toEqual(["factory:needs-human"]);
+  expect(stale.transitions[0].reason).toMatch(/^stage artifact missing or invalid: /);
+  expect(stale.handoffs).toEqual([]);
+  expect(stale.tiers).toEqual([]);
+  expect(stale.lines.some((l) => /context issue mismatch/.test(l) && /8/.test(l) && /7/.test(l))).toBe(true);
+});
+
+test("test_237_direct_agent_failure_lands_on_the_same_invalid_artifact_path", async () => {
+  // a valid triage verdict sitting in the session's own tool results (it read an old handoff) is NOT the answer
+  const transcript = [
+    JSON.stringify({ type: "assistant", message: { content: [{ type: "tool_use", name: "Read", id: "tu1", input: { file_path: "/r/.factory/out/triage.json" } }] } }),
+    JSON.stringify({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: "tu1", content: JSON.stringify({ ...VERDICT_237, issue: 7, orchestration: "agent", guarantee: "verified" }) }] } }),
+  ].join("\n");
+  const malformed = {
+    empty: "",
+    "non-JSON": "I think this issue is ready to build.",
+    "schema mismatch": JSON.stringify({ disposition: "maybe", tier: "standard" }),
+    "ready without a tier": JSON.stringify({ disposition: "ready" }),
+  };
+  for (const [name, result] of Object.entries(malformed)) {
+    const r = await runTriage237({ mode: "agent", result, transcript });
+    expect(r.code, name).toBe(2);
+    expect(r.transitions.map((t) => t.to), name).toEqual(["factory:needs-human"]);
+    expect(r.transitions[0].reason, name).toMatch(/^stage artifact missing or invalid: \S/);
+    expect(r.handoffs, name).toEqual([]);
+    expect(r.tiers, name).toEqual([]);
+  }
+  // the turn-limit envelope keeps its own, distinct reason (a retryable blocked, not a bad artifact)
+  const turns = await runTriage237({ mode: "agent", result: "", envOver: { is_error: true, subtype: "error_max_turns", terminal_reason: "max_turns", num_turns: 12 } });
+  expect(turns.transitions.map((t) => t.to)).toEqual(["factory:blocked"]);
+  expect(turns.transitions[0].reason).toMatch(/^stage did not finish: claude -p hit max turns \(12\)/);
+  // a generic is_error envelope stays on today's artifact path with today's wording
+  const err = await runTriage237({ mode: "agent", result: "boom", envOver: { is_error: true } });
+  expect(err.transitions.map((t) => t.to)).toEqual(["factory:needs-human"]);
+  expect(err.transitions[0].reason).toMatch(/^stage artifact missing or invalid: claude -p reported is_error/);
 });
