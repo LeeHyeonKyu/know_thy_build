@@ -401,6 +401,19 @@ test("every agent-token workflow mints a GitHub App token before checkout and ne
     expect(readFileSync(join(W, f), "utf8"), f).not.toMatch(/token: \$\{\{ secrets\.FACTORY_MERGE_TOKEN/);
   }
   expect(merge).toContain("FACTORY_GIT_TOKEN_TTL_MINUTES: ${{ secrets.FACTORY_MERGE_TOKEN == '' && env.FACTORY_APP_CONFIGURED == 'true' && '60' || '0' }}");
+  // ADR-038 보정 2(2026-10-11, #249 머지 런 38172268448) — 설치 토큰은 60분에 만료되는데 후행 스텝(`Aborted cleanup`·`Sweep`)은 그보다
+  // 늦게 돌 수 있다(거부권 창·긴 런·잡 타임아웃): 다섯 스테이지 워크플로는 아티팩트 업로드 **뒤**, 정리 스텝 **앞**에 다시 민팅하고,
+  // 두 후행 스텝은 그 토큰을 먼저 쓴다. 첫 민팅의 `id: factory-token`은 그대로 체크아웃 앞이다(위 핀).
+  for (const f of Object.keys(STAGE)) {
+    const y = readFileSync(join(W, f), "utf8");
+    const late = y.indexOf("- name: Factory token for the trailing steps (re-minted — the first one may have expired)");
+    expect(late, f).toBeGreaterThan(y.indexOf("- name: Upload run outputs"));
+    expect(late, f).toBeLessThan(y.indexOf("- name: Aborted cleanup"));
+    expect(y, f).toMatch(/- name: Factory token for the trailing steps \(re-minted — the first one may have expired\)\n {8}id: factory-token-late\n {8}if: \$\{\{ always\(\) && env\.FACTORY_APP_CONFIGURED == 'true' \}\}\n {8}uses: actions\/create-github-app-token@v3\n/);
+    expect(y, f).toMatch(/- name: Aborted cleanup\n {8}if: always\(\) && job\.status != 'success'\n {8}env:\n {10}GH_TOKEN: \$\{\{ steps\.factory-token-late\.outputs\.token \|\| steps\.factory-token\.outputs\.token \|\| secrets\.FACTORY_BOT_TOKEN \}\}\n/);
+    expect(y, f).toMatch(/- name: Sweep\n {8}if: always\(\)\n {8}env:\n {10}GH_TOKEN: \$\{\{ steps\.factory-token-late\.outputs\.token \|\| steps\.factory-token\.outputs\.token \|\| secrets\.FACTORY_BOT_TOKEN \}\}\n/);
+    expect((y.match(/uses: actions\/create-github-app-token@v3/g) || []).length, f).toBe(2);
+  }
 });
 
 test("sweeper and integrity workflows", () => {

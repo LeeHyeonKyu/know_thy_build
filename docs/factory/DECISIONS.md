@@ -4542,6 +4542,16 @@ not bound to a factory run"으로 읽혔다 — 이슈는 needs-human이 됐고 
 **남는 것**: #249·#212는 재큐로 다시 돈다(그 head에 남은 pending `factory/veto-window`는 새 런이 새 상태를 올리며 덮는다). 운영 door는
 pending 상태가 있는 PR을 머지하지 않으므로(`operator-merge-check`), 죽은 런이 남긴 창은 door로도 못 연다 — 그것이 맞다.
 
+**보정 2 — 후행 스텝은 토큰을 다시 민팅한다(2026-10-11, #249 재큐의 머지 런 38172268448).** 위 보정으로 창 뒤의 머지·records·락은
+살았고 #250이 공장 손으로 머지됐다. 그런데 잡은 `failure`로 끝났다: 마지막 `Sweep` 스텝의 `GH_TOKEN`이 첫 설치 토큰이라 만료돼 `gh`가
+빈 출력을 냈고 `sweep.js:37`의 `JSON.parse`가 죽었다("Token expired, skipping token revocation"이 같은 로그에 있다). `Aborted cleanup`도
+같은 토큰이다 — 90분 타임아웃 뒤의 정리가 만료 토큰으로 돌면 고아 락이 남는다(KTB-24가 막으려던 침묵의 재발). 머지 PAT로 바꾸지 않는
+이유: sweep의 `resolveFactoryLogins`는 Actions 안에서 뷰어를 공장 계정으로 세므로, 소유자의 PAT로 돌면 소유자가 적은 `human-decision`이
+"봇이 쓴 것"으로 기각된다(T5 MF-1). 그래서 다섯 스테이지 워크플로(+템플릿)는 아티팩트 업로드 **뒤**, 정리 스텝 **앞**에
+`actions/create-github-app-token`을 한 번 더 부르고(`id: factory-token-late`, `if: always() && FACTORY_APP_CONFIGURED`), 두 후행 스텝은
+`late || first || PAT` 순으로 쓴다. 업로드 뒤라 그 토큰은 어떤 아티팩트에도 실리지 않는다. `sweep.js`의 빈 `gh` 출력에 대한 명확한
+실패 메시지는 #279와 함께 후속이다.
+
 ## ADR-039 소유자는 거부권이다 — 판정 경로 자동 머지 ON, 운영 세션이 자기 PR을 머지한다 — 2026-10-10 (소유자 결정)
 
 **소유자(원문)**: "이거 사람역할 하는 agent를 하나 띄워서 나한테 pr 검토 받지 않고 merge하도록 해. 이거 때문에 너무 블로커가 심하다."
