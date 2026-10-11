@@ -23,13 +23,13 @@
 | rounds/issue (plan/impl/review) | 0 / 0 / 0 | 1.05 / 2.1 / 1.71 |
 | escaped defects | 0 | 26 |
 | revert rate | 없음 | 0.00 (0/21) |
-| needs-human | 0 | 86 |
+| needs-human | 1 | 86 |
 | rejects by role | 없음 | spec-conformance 10, qa 4, correctness 13, architecture 7, security 5 |
 | reviewer overlap | 없음 | 0.49 (21/43, runs 50) |
 | unique findings by role | 없음 | spec-conformance 4, qa 4, correctness 6, architecture 4, security 4 |
 | qa na ratio | 없음 | 0.23 (61/268 claims, na-heavy 9/38 approvals) |
-| cost (usd) | 0.00 | 1346.15 |
-| tokens | input 0 / output 0 | input 32705479 / output 2694153 |
+| cost (usd) | 2.71 | 1346.15 |
+| tokens | input 161452 / output 12437 | input 32705479 / output 2694153 |
 | retro cost (usd) | 0.00 | 12.90 |
 | retro tokens | input 0 / output 0 | input 38 / output 33581 |
 | full retros | — | 11 |
@@ -2007,6 +2007,15 @@
           249
         ],
         "source": "dissent"
+      },
+      {
+        "role": "skeptic",
+        "kind": "good",
+        "text": "This plan round cannot lead to a merged PR inside the factory: lifetime is $58.68/$60 (docs/factory/runs/212.md:609), budgetCheck (factory/lib/budget.js:65-68) will refuse implement, and the only real paths are the operator session merging origin/main into claude/fq-212 (conflict resolution and ADR renumber only) through the operator door after a stand-in review, or the owner raising [budget].usd_per_issue. Spending more agent rounds is not one of the options.",
+        "runs": [
+          212
+        ],
+        "source": "dissent"
       }
     ],
     "flaky": [],
@@ -2248,8 +2257,8 @@
       },
       {
         "issue": 212,
-        "reason": "review verification failed — review evidence not bound to a factory run — the factory/records branch could not be fetched — the review evidence is unreachable, and an unverified review is not a passed review",
-        "at": "2026-10-11T18:44:22Z"
+        "reason": "lifetime cost $61.21 over 168 run(s) exceeds [budget].usd_per_issue $60 — a person raises the budget (`:proposal`), splits the issue, or closes it (wont-do); the counter spans re-queues and human retries on purpose",
+        "at": "2026-10-11T22:34:41Z"
       }
     ]
   },
@@ -2270,17 +2279,17 @@
     "overlapping_findings": 0,
     "unique_findings_by_role": {},
     "overlap_ratio": 0,
-    "needs_human": 0,
+    "needs_human": 1,
     "qa_approvals": 0,
     "qa_claims_total": 0,
     "qa_na_total": 0,
     "qa_na_ratio": 0,
     "qa_na_heavy_approvals": 0,
     "usage": {
-      "cost_usd": 0,
+      "cost_usd": 2.709569,
       "tokens": {
-        "input": 0,
-        "output": 0
+        "input": 161452,
+        "output": 12437
       }
     }
   },
