@@ -6685,6 +6685,89 @@ test("test_238_plan_repair_records_whether_the_workflow_reused_the_plan", async 
   await runStage({ stage: "plan", issue: 238, deps: filed.deps, runnerId: "r1" });
   expect(costLines238(filed.lines)).toEqual([SYNTH_ONLY_238]);
   expect(turnAgentsLog(root).completed).toEqual(["plan-synthesizer"]);
+
+  // (7) a debate role that STARTED on the repair turn but never stopped (crash / timeout mid-debate) still ran and cost money:
+  // it is a rerun, not "synthesis-only" — whether it shows up only in `starts`/`orphans` or only in `starts`.
+  for (const log of [
+    { starts: [{ agent_type: "plan-skeptic" }, { agent_type: "plan-synthesizer" }], completed: ["plan-synthesizer"], orphans: ["plan-skeptic"] },
+    { starts: [{ agent_type: "plan-architect" }, { agent_type: "plan-synthesizer" }], completed: ["plan-synthesizer"], orphans: [] },
+    { starts: [], completed: ["plan-synthesizer"], orphans: ["plan-operator"] },
+  ]) {
+    const o = repairDeps238({ perTurn: [FULL_238, ["plan-synthesizer"]], over: { agentsLog: () => log } });
+    await runStage({ stage: "plan", issue: 238, deps: o.deps, runnerId: "r1" });
+    expect(costLines238(o.lines), JSON.stringify(log)).toEqual([FULL_RERUN_238]);
+  }
+  // and a started-but-unstopped debate role in the hook's real file reads the same way.
+  const orphanRoot = mkdtempSync(join(tmpdir(), "rs238o-"));
+  mkdirSync(join(orphanRoot, ".factory/out"), { recursive: true });
+  const orphanFile = join(orphanRoot, ".factory/out/agents.jsonl");
+  appendFileSync238(orphanFile, JSON.stringify({ hook_event_name: "SubagentStart", agent_id: "s1", agent_type: "plan-skeptic" }) + "\n");
+  appendFileSync238(orphanFile, JSON.stringify({ hook_event_name: "SubagentStart", agent_id: "y1", agent_type: "plan-synthesizer" }) + "\n");
+  appendFileSync238(orphanFile, JSON.stringify({ hook_event_name: "SubagentStop", agent_id: "y1", agent_type: "plan-synthesizer" }) + "\n");
+  const orphanRun = repairDeps238({ perTurn: [FULL_238, []], over: { agentsLog: () => turnAgentsLog(orphanRoot) } });
+  await runStage({ stage: "plan", issue: 238, deps: orphanRun.deps, runnerId: "r1" });
+  expect(costLines238(orphanRun.lines)).toEqual([FULL_RERUN_238]);
+
+  // (8) a log file that exists but has a line the runner cannot parse is NOT "readable": a truncated/garbled agents.jsonl may
+  // have lost the debate-role lines, so the runner is unsure → full rerun (only the synthesizer's lines survive here).
+  const garbledRoot = mkdtempSync(join(tmpdir(), "rs238g-"));
+  mkdirSync(join(garbledRoot, ".factory/out"), { recursive: true });
+  const garbled = join(garbledRoot, ".factory/out/agents.jsonl");
+  appendFileSync238(garbled, '{"hook_event_name":"SubagentStart","agent_id":"s1","agent_type":"plan-ske\n');
+  appendFileSync238(garbled, JSON.stringify({ hook_event_name: "SubagentStart", agent_id: "y1", agent_type: "plan-synthesizer" }) + "\n");
+  appendFileSync238(garbled, JSON.stringify({ hook_event_name: "SubagentStop", agent_id: "y1", agent_type: "plan-synthesizer" }) + "\n");
+  expect(turnAgentsLog(garbledRoot)).toBeNull();
+  const garbledRun = repairDeps238({ perTurn: [FULL_238, []], over: { agentsLog: () => turnAgentsLog(garbledRoot) } });
+  await runStage({ stage: "plan", issue: 238, deps: garbledRun.deps, runnerId: "r1" });
+  expect(costLines238(garbledRun.lines)).toEqual([FULL_RERUN_238]);
+  // a clean file with the same surviving lines (no garbage) is readable and still reads synthesis-only — the garbage is the cause.
+  rmSync238(garbled, { force: true });
+  appendFileSync238(garbled, JSON.stringify({ hook_event_name: "SubagentStart", agent_id: "y1", agent_type: "plan-synthesizer" }) + "\n");
+  appendFileSync238(garbled, JSON.stringify({ hook_event_name: "SubagentStop", agent_id: "y1", agent_type: "plan-synthesizer" }) + "\n");
+  expect(turnAgentsLog(garbledRoot).completed).toEqual(["plan-synthesizer"]);
+
+  // (9) every value the handoff claims is recorded — including `null` — as its JSON text, which round-trips to the same value.
+  for (const claim of [null, "abc123", 0, false, { head: "abc" }, ["a", "b"], ""]) {
+    const r = repairDeps238({ perTurn: [FULL_238, ["plan-synthesizer"]], repaired: { rounds: 3, repair_of: claim } });
+    await runStage({ stage: "plan", issue: 238, deps: r.deps, runnerId: "r1" });
+    const c = costLines238(r.lines);
+    expect(c, JSON.stringify(claim)).toHaveLength(1);
+    const m = /^plan repair: synthesis-only — handoff claims repair_of=(.*) \(agent's claim, not used to classify\)$/.exec(c[0]);
+    expect(m, c[0]).not.toBeNull();
+    expect(JSON.parse(m[1])).toEqual(claim);
+  }
+  // a handoff with no repair_of key at all carries no claim.
+  const absent = repairDeps238({ perTurn: [FULL_238, ["plan-synthesizer"]], repaired: { rounds: 3 } });
+  await runStage({ stage: "plan", issue: 238, deps: absent.deps, runnerId: "r1" });
+  expect(costLines238(absent.lines)).toEqual([SYNTH_ONLY_238]);
+
+  // (10) a repair turn that RAN but then fails the no-write worktree re-assert still paid for the turn → exactly one cost line,
+  // recorded before the escalation returns.
+  for (const clean of [{ ok: false, dirty: ["src/x.js"] }, { ok: false, reason: "git status failed" }]) {
+    let checks = 0;
+    const w = repairDeps238({ perTurn: [FULL_238, FULL_238], over: {
+      assertCleanWorktree: async () => (++checks === 1 ? { ok: true } : clean),
+    } });
+    expect(await runStage({ stage: "plan", issue: 238, deps: w.deps, runnerId: "r1" })).toBe(2);
+    expect(checks).toBe(2);
+    expect(w.lines.some((l) => l.startsWith("worktree: FAIL"))).toBe(true);
+    expect(costLines238(w.lines), JSON.stringify(clean)).toEqual([FULL_RERUN_238]);
+  }
+  let synChecks = 0;
+  const wSyn = repairDeps238({ perTurn: [FULL_238, ["plan-synthesizer"]], over: {
+    assertCleanWorktree: async () => (++synChecks === 1 ? { ok: true } : { ok: false, dirty: ["a"] }),
+  } });
+  expect(await runStage({ stage: "plan", issue: 238, deps: wSyn.deps, runnerId: "r1" })).toBe(2);
+  expect(costLines238(wSyn.lines)).toEqual([SYNTH_ONLY_238]);
+
+  // (11) …and so does a repair turn whose re-verification throws: the turn ran, its cost is recorded once.
+  const thrower = repairDeps238({ perTurn: [FULL_238, ["plan-synthesizer"]], over: {
+    verifyStage: vi.fn()
+      .mockReturnValueOnce({ ok: false, reasons: [...REASONS_238], planRepair: [...REASONS_238], data: { rounds: 3 } })
+      .mockImplementationOnce(() => { throw new Error("verify exploded"); }),
+  } });
+  await runStage({ stage: "plan", issue: 238, deps: thrower.deps, runnerId: "r1" }).catch(() => {});
+  expect(costLines238(thrower.lines)).toEqual([SYNTH_ONLY_238]);
 });
 
 test("test_238_no_cost_line_or_previous_plan_outside_a_completed_repair_turn", async () => {

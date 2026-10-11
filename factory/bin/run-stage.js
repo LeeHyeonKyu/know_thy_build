@@ -1026,30 +1026,38 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runAt
         // #238 — this turn's agents log, read now (it was reset just before the turn). Unreadable → null → "full rerun".
         let turnLog = null;
         try { turnLog = d.agentsLog ? await d.agentsLog() : null; } catch { turnLog = null; }
-        try { finalProgress = d.progress?.() ?? null; } catch { /* best-effort */ }
-        usage = usageLine(out, finalProgress);
-        // plan is a no-write stage — re-assert the worktree exactly as the first pass did (KTB-14).
-        if (isNoWriteStage(stage)) {
-          const clean = d.assertCleanWorktree ? await d.assertCleanWorktree(overlaidPaths, setupDirty) : { ok: true };
-          if (!clean.ok) {
-            const dirty = Boolean(clean.dirty?.length);
-            const reason = dirty
-              ? `worktree dirty after ${stage} repair (no-write stage): ${clean.dirty.join(", ")}`
-              : `worktree check failed after ${stage} repair (no-write stage): ${clean.reason || "unknown"}`;
-            const t = await d.transition({ to: dirty ? "factory:needs-human" : "factory:blocked", reason });
-            record([`worktree: FAIL — ${reason}`, ...refusal(t), usage]);
-            return 2;
+        // The turn RAN, so it cost something: its one cost line is written on EVERY way out of this block — the worktree
+        // re-assert's early return and a throwing re-verification included — hence `finally`. The `repair_of` claim is only
+        // known once the repaired handoff was parsed; on an earlier exit there is no claim to copy.
+        let repairedHandoff;
+        try {
+          try { finalProgress = d.progress?.() ?? null; } catch { /* best-effort */ }
+          usage = usageLine(out, finalProgress);
+          // plan is a no-write stage — re-assert the worktree exactly as the first pass did (KTB-14).
+          if (isNoWriteStage(stage)) {
+            const clean = d.assertCleanWorktree ? await d.assertCleanWorktree(overlaidPaths, setupDirty) : { ok: true };
+            if (!clean.ok) {
+              const dirty = Boolean(clean.dirty?.length);
+              const reason = dirty
+                ? `worktree dirty after ${stage} repair (no-write stage): ${clean.dirty.join(", ")}`
+                : `worktree check failed after ${stage} repair (no-write stage): ${clean.reason || "unknown"}`;
+              const t = await d.transition({ to: dirty ? "factory:needs-human" : "factory:blocked", reason });
+              record([`worktree: FAIL — ${reason}`, ...refusal(t), usage]);
+              return 2;
+            }
           }
+          // plan has no gates (d.gates returns null for plan) — recompute the verdict on the repaired handoff.
+          gates = null;
+          if (!out?.is_error || hitMaxTurns(out) || hitApiError(out)) {
+            try { gates = await d.gates(ctx); } catch { gates = null; }
+          }
+          v = d.verifyStage({ stage, out, ctx, gates });
+          repairedHandoff = v.data;
+          if (v.source) record([`artifact: ${v.source} (repair)`]);
+          record([`plan repair (KTB-51): ${v.ok ? "resolved → factory:planned" : "still red → escalating unchanged"}`]);
+        } finally {
+          record([planRepairCostLine({ agentsLog: turnLog, roster: repairRoster, rolePrefix: ROLE_PREFIX.plan, repairOf: repairedHandoff?.repair_of })]);
         }
-        // plan has no gates (d.gates returns null for plan) — recompute the verdict on the repaired handoff.
-        gates = null;
-        if (!out?.is_error || hitMaxTurns(out) || hitApiError(out)) {
-          try { gates = await d.gates(ctx); } catch { gates = null; }
-        }
-        v = d.verifyStage({ stage, out, ctx, gates });
-        if (v.source) record([`artifact: ${v.source} (repair)`]);
-        record([`plan repair (KTB-51): ${v.ok ? "resolved → factory:planned" : "still red → escalating unchanged"}`]);
-        record([planRepairCostLine({ agentsLog: turnLog, roster: repairRoster, rolePrefix: ROLE_PREFIX.plan, repairOf: v.data?.repair_of })]);
       }
     }
     if (!v.ok) {
@@ -3090,24 +3098,44 @@ export const PLAN_REPAIR_FULL_RERUN = "plan repair: full rerun (workflow ignored
  * #238 — the one cost line of a plan repair turn that ran. It is decided by what the RUNNER observed: the hook-written agents
  * log of that turn (run-stage resets it just before the turn). No debate roster role (`<prefix><role>`, the synthesizer aside)
  * completed → `synthesis-only`; any did, the log could not be read, or there is no debate role to look for → `full rerun`
- * (unsure is never "cheap"). The handoff's `repair_of` is the agent's claim: it is appended JSON-quoted (one line, verbatim)
- * and never consulted for the classification.
+ * (unsure is never "cheap"). A debate role counts once it STARTED (completed, orphaned or merely started). The handoff's
+ * `repair_of` is the agent's claim: any value it holds (null too) is appended as its JSON text and never consulted for the
+ * classification.
  */
 export function planRepairCostLine({ agentsLog, roster, rolePrefix = "plan-", repairOf } = {}) {
   const completed = Array.isArray(agentsLog?.completed) ? agentsLog.completed : null;
+  // a debate role that STARTED but never stopped (crash/timeout mid-debate) still ran and cost money — it counts as a rerun too.
+  const seen = completed === null ? null : new Set([
+    ...completed,
+    ...(Array.isArray(agentsLog.orphans) ? agentsLog.orphans : []),
+    ...(Array.isArray(agentsLog.starts) ? agentsLog.starts.map((s) => s?.agent_type) : []),
+  ]);
   const debate = (Array.isArray(roster) ? roster : []).filter((r) => typeof r === "string" && r && r !== "synthesizer");
-  const reran = completed === null || debate.length === 0 || debate.some((r) => completed.includes(rolePrefix + r));
+  const reran = seen === null || debate.length === 0 || debate.some((r) => seen.has(rolePrefix + r));
   const head = reran ? PLAN_REPAIR_FULL_RERUN : PLAN_REPAIR_SYNTHESIS_ONLY;
-  if (repairOf === undefined || repairOf === null) return head;
+  if (repairOf === undefined) return head;                        // no `repair_of` key in the handoff → no claim to record
+  // Verbatim = the claimed value's exact JSON text (null included): lossless — `JSON.parse` gives back the same value — and it
+  // keeps the record one line, so a claim carrying "\n" cannot forge a record line of its own.
   let claim;
   try { claim = JSON.stringify(repairOf); } catch { claim = undefined; }
-  return claim === undefined ? head : `${head} — handoff claims repair_of=${claim} (agent's claim, not used to classify)`;
+  if (claim === undefined) claim = JSON.stringify(`<not JSON-representable: ${typeof repairOf}>`);
+  return `${head} — handoff claims repair_of=${claim} (agent's claim, not used to classify)`;
 }
 
-/** #238 — main()'s view of this turn's `.factory/out/agents.jsonl`: `null` when the hook wrote no file (unsure), else the parsed log. */
+/**
+ * #238 — main()'s view of this turn's `.factory/out/agents.jsonl`: `null` (unsure) when the hook wrote no file, when it cannot be
+ * read, or when any non-blank line is not JSON — `readAgentsLog` skips such lines, so a truncated/garbled log could have lost
+ * exactly the debate-role lines and read as "synthesis-only". Else the parsed log (`readAgentsLog`, the roster check's parser).
+ */
 export function turnAgentsLog(root) {
   const p = join(root, ".factory/out/agents.jsonl");
-  return existsSync(p) ? readAgentsLog(p) : null;
+  if (!existsSync(p)) return null;
+  try {
+    for (const line of readFileSync(p, "utf8").split("\n")) {
+      if (line.trim()) JSON.parse(line);
+    }
+  } catch { return null; }
+  return readAgentsLog(p);
 }
 
 /**
