@@ -21,11 +21,11 @@ import { STAGE_OF_TARGET, ENTRY_LABELS, BLOCKED_RETRY, factoryLabelOf, STATES, T
 import { HARNESS_LABEL, VETO_LABEL } from "../lib/label-catalog.js";
 import { harnessNeeded, ensureHarnessIssue, parkedReason, findOpenHarnessIssueFor } from "../lib/harness-request.js";
 import { makeRehearsalChecker } from "../lib/rehearsal.js";
-import { makeQueueAdmission, entryRecheck, admissionRefusedReason, ADMISSION_CODES } from "../lib/admission.js";
+import { makeQueueAdmission } from "../lib/admission.js";
 import { mirrorStep, mirrorMatchesHead, inMirrorFamily, regenerateMirror, mirrorApplicable, isUnionMergePath, MIRROR_FAMILIES } from "../lib/mirror.js";
-import { REHEARSAL_UNWIRED, ADMISSION_UNWIRED } from "../lib/transition.js";
+import { REHEARSAL_UNWIRED } from "../lib/transition.js";
 export { HARNESS_LABEL };   // 재수출 — retro.js와 이 값이 같은 소스에서 왔다는 것을 테스트가 import equality로 확인한다
-import { buildContext, resolveTier, contextManifestLines } from "../lib/context.js";
+import { buildContext, resolveTier, contextManifestLines, loadedJsonLine } from "../lib/context.js";
 import { resolveReviewRoster } from "../lib/review-roster.js";
 import { startHeartbeat } from "../lib/heartbeat.js";
 import { readProgress, progressMarker } from "../lib/progress.js";
@@ -115,13 +115,6 @@ export function stageClaudeEnv({ root, stage, harnessIssue = false, harness = nu
 
 /** 게이트 파일이 판정을 만드는 스테이지. 여기서 gates가 null이면 판정은 워크플로의 자기 신고뿐이다. */
 const GATED_STAGES = new Set(["implement", "review", "merge"]);
-/**
- * #230 — triage 진입 재심사에 심사기(`deps.admission`)가 실리지 않은 런이 남기는 기록 한 줄(조용히 지나가지 않는다). main은 언제나 싣는다.
- * #247 (dw5) — 새 상수가 아니다: "미배선"을 뜻하는 말은 transition.js의 `ADMISSION_UNWIRED` 하나뿐이고, 이 이름은 그 상수의 별칭
- * 재수출이다(같은 값, 자기 문장 없음 — 브랜치의 test_230 테스트가 이 이름으로 import한다). 그 문장의 "`→ factory:queue` is refused"는
- * 이 런에서도 참이다: 심사기가 없는 런의 큐 전이는 `transition()`이 거부한다.
- */
-export { ADMISSION_UNWIRED as TRIAGE_RECHECK_UNWIRED };
 export const GATES_SELF_REPORTED = "gates: self-reported by workflow (no gates.json from this run — unverified)";
 /**
  * 최종 리뷰 A-SF1 — qa 증거 부족을 이 라운드의 판정으로 접을 때 쓰는 **합성 must_fix의 id**.
@@ -522,46 +515,6 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runAt
       }
     }
     /**
-     * #230 (허점 원장 E-1·E-3·E-8) — **큐로 들어오는 문은 하나다: triage 진입이 심사를 한 번 더 돈다.** `transition()`의 큐 문을
-     * 비켜 오는 길이 있었다 — 사람이 UI로 붙인 라벨, 라벨을 달고 태어난 이슈, 문을 지난 뒤 러너 대기(55~90분) 중에 바뀐 본문.
-     * 그래서 에이전트를 띄우기 전, 진입 라벨이 `factory:queue`로 정해진 이 자리(로컬 진입과 blocked 재시도 hop **뒤**)에서 main의
-     * 그 심사기(`deps.admission`, 같은 `makeQueueAdmission`)를 다시 부른다. 판정은 `entryRecheck` 하나가 구조화된 코드로 한다:
-     *   - 이슈 자신의 사실(done_when 없음 → needs-info, NEVER_AUTOMATE → wont-do)이면 `transition()`으로 내보낸다 — 코멘트는 그 전이
-     *     코멘트 하나이고 사유는 큐 문이 같은 본문에 쓰는 문장 그대로다. claim은 finally가 푼다, exit 0.
-     *   - 상한은 다시 보지 않는다(형제를 세는 꽉 찬 큐가 통째로 비워진다 — `entryRecheck` 주석). 그 이슈는 오늘처럼 에이전트로 간다.
-     *     #247 — 예외 하나: 진입은 `queue_max`를 다시 잰다(`entryRecheck(…, { queueMax: true })`).
-     *     심사는 큐에 있는 이슈에게 번호가 앞선 형제만 세므로(`queueAdmission`의 자기 제외 + 순위) 번호 순 첫 N개는 통과하고, 그 뒤에 선
-     *     (구성원 수 − N)개만 `factory:needs-human`으로 간다 — 꽉 찬 큐가 통째로 비워지지 않는다(`test_247_full_queue_triage_never_evicts_its_first_n_members`).
-     *     #249 sec1 — blocked 재시도 hop으로 복구된 진입도 예외가 아니다: 그 hop을 허락하는 blocked-origin 마커는 작성자를 확인하지 않으므로
-     *     (누구나 쓸 수 있다 — ADR-040의 후속 이슈), 복구라는 주장만으로 상한을 건너뛰지 않는다(`test_249_hop_restored_entry_recheck_enforces_queue_max`).
-     *   - 심사가 입력을 읽지 못했으면(gh 장애, CHARTER 미적재, 심사기가 던짐) 판정이 아니다: 진입 상태를 못 읽었을 때와 같은
-     *     `factory:blocked`/`api-error`로 세우고 exit 2 — sweeper의 blocked 재시도가 다시 집고, 그 재시도도 이 자리를 지난다.
-     *   - 심사기 dep 자체가 없는 런(main은 언제나 싣는다 — 테스트가 고정)은 재심사를 건너뛰되 런 기록에 그 사실을 한 줄 남긴다
-     *     (`ADMISSION_UNWIRED` 그대로 — #247: "미배선"을 뜻하는 말은 그 하나뿐이고 `TRIAGE_RECHECK_UNWIRED`는 그 별칭이다). 거부로 하지 않는 이유는 ADR-040 — 기존 triage
-     *     테스트 넷(I2 두 건, KTB-20, KTB-15b)이 심사기 없는 deps로 큐 진입을 돌린다.
-     */
-    if (stage === "triage" && entryLabel === "factory:queue" && typeof d.admission !== "function") {
-      record([ADMISSION_UNWIRED]);
-    }
-    if (stage === "triage" && entryLabel === "factory:queue" && typeof d.admission === "function") {
-      let v;
-      try { v = entryRecheck(await d.admission({ issue }), { queueMax: true }); }
-      catch (e) { v = { verdict: "unreadable", reason: `queue admission threw — ${e?.message || e}` }; }
-      if (v.verdict === "unreadable") {
-        record([`triage entry: queue admission unreadable — ${v.reason}`]);
-        const t = await d.transition({ to: "factory:blocked", reason: `queue admission unreadable at triage entry — ${v.reason} (not a verdict on this issue; retried)`, cause: "api-error" });
-        console.error(`factory: stage triage aborted — queue admission unreadable: ${v.reason}`);
-        record([...refusal(t)]);
-        return 2;
-      }
-      if (v.verdict === "refuse") {
-        const t = await d.transition({ to: v.to, reason: v.reason });
-        console.error(`factory: issue #${issue} — triage entry refused: ${v.reason}`);
-        record([`triage entry: ${v.reason} → ${v.to}`, ...(t.ok ? [`transition: ${t.to}`] : refusal(t))]);
-        return t.ok ? 0 : 2;
-      }
-    }
-    /**
      * ── 리뷰 효율 Task 8 (Structure G) — 막힌 이슈는 리뷰 라운드를 태우지 않는다 ──────────────────
      *
      * 리뷰 패널을 띄우기 **전에**, 이 피처가 미해결 제품/하네스 의존성에 막혀 있으면(이 이슈를 막는
@@ -947,11 +900,43 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runAt
       }
       if (m.applicable) { record([mirrorLine(m)]); if (stage === "implement" && m.changed.length && m.sha) mirrorSha = m.sha; }
     }
+    /**
+     * #207 — **워크플로의 fail-closed 반환은 디스패처 전달 고장이다.** 네 워크플로는 `args.loaded`를 못 받거나 다른 이슈의 것을
+     * 받으면 `{issue, error: "context payload missing" | "context issue mismatch…", orchestration, guarantee}`를 돌려준다. 그것은
+     * 에이전트 산출물의 결함이 아니라 판정 불가다 — 사람이 할 일이 없다(run 37140542370: 잘린 6,604바이트 args → needs-human,
+     * 운영 세션이 재큐). blocked/undecidable로 세워 sweeper의 재시도에 맡긴다. 빌더는 돌지 않았으므로 게이트는 손대지 않은 브랜치
+     * head를 잰 것이다 — 그래서 **게이트가 어떤 상태든**(던짐·BLOCKED·실패 테스트 없는 RED·RED·GREEN) 이 원인이 이긴다. 다만 그
+     * 게이트 상태들이 어차피 실패로 끝나는 자리에서만 끼어든다(GREEN·보통 RED는 verify 실패 뒤 아래 자리) — 성공할 런을 막지 않는다.
+     * selfGateRetry·plan 리페어도 띄우지 않는다(빌더가 고칠 것이 없다). 턴 한도·API 오류는 먼저 자기 자리로 간다. 새 마커 필드는
+     * 없다 — K·R·예산 면제는 ADR-036 개정 이슈의 몫이다(plan non_goals).
+     */
+    let payloadErrorMemo;
+    let payloadCtx = ctx;                                             // 디스패처가 옮겨 쓴 loaded.json을 쓴 ctx — plan 리페어 턴이면 그 턴의 것
+    const payloadError = async () => {
+      if (payloadErrorMemo === undefined) {
+        payloadErrorMemo = hitMaxTurns(out) || hitApiError(out) ? null
+          : ((d.dispatcherPayloadError ? await d.dispatcherPayloadError(out) : dispatcherPayloadErrorOf({ out })) ?? null);
+      }
+      return payloadErrorMemo;
+    };
+    // Known gaps, deferred to #240 (spec2: outside this plan — non_goals "Any design beyond the b881484 port" and "Changing the sweeper's
+    // retry or escalation behaviour"): (1) `error` reaches `reason` verbatim, so a session-produced `context issue mismatch…` tail can carry a
+    // forged `factory-blocked-origin` marker ahead of transition.js's own; (2) a triage retry (blocked → queue) opens a fresh sweeper window, so a
+    // triage run that keeps failing closed is re-blocked each time and only the lifetime budget stops it — dw3's sweeper cap is pinned for implement only.
+    const blockOnPayload = async (error, lines) => {
+      const size = Number.isInteger(payloadCtx?.loaded_json?.bytes) ? `loaded.json ${payloadCtx.loaded_json.bytes} bytes` : "loaded.json size unknown";
+      const reason = `dispatcher payload: ${error} (${size})`;
+      const t = await d.transition({ to: "factory:blocked", reason, cause: "undecidable" });
+      record([...lines, `verify: ${reason} — not an agent artifact defect`, ...refusal(t), usage]);
+      return 2;
+    };
     let gates = null;
     if (!out?.is_error || hitMaxTurns(out) || hitApiError(out)) {
       try { gates = await d.gates(ctx); }                             // 게이트 없는 스테이지(triage/plan)는 null
       catch (e) {
         if (!isMergeBaseError(e) && !isGitDiffError(e)) throw e;
+        const pe = await payloadError();
+        if (pe) return blockOnPayload(pe, [`gates: BLOCKED — ${e.message}`]);
         const reason = isMergeBaseError(e) ? MERGE_BASE_BLOCKED_REASON : GIT_DIFF_BLOCKED_REASON;
         const t = await d.transition({ to: "factory:blocked", reason });
         record([`gates: BLOCKED — ${e.message}`, ...refusal(t), usage]);
@@ -975,6 +960,8 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runAt
       : gates.schema === "factory.gates.v1" ? [verdictLine(gates), ...gatesDetailLines(gates, stamp), ...testEnvNote] : [];
     // BLOCKED은 "판정 불가"다 — GREEN도 RED도 아니므로 needs-human이 아니라 blocked로 세운다.
     if (gates?.status === "BLOCKED") {
+      const pe = await payloadError();
+      if (pe) return blockOnPayload(pe, [`gates: BLOCKED — ${gates.blocked_reason || "unknown"}`, ...gatesNote]);
       const t = await d.transition({ to: "factory:blocked", reason: gates.blocked_reason || "gates could not be decided" });
       record([`gates: BLOCKED — ${gates.blocked_reason || "unknown"}`, ...refusal(t), ...gatesNote, usage]);
       return 2;
@@ -996,6 +983,8 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runAt
      */
     const unhandled = unhandledGateReason(gates);
     if (unhandled) {
+      const pe = await payloadError();
+      if (pe) return blockOnPayload(pe, [`gates: RED (unhandled) — ${unhandled}`, ...gatesNote]);
       const t = await d.transition({ to: "factory:blocked", reason: unhandled, cause: "gates-unhandled" });
       record([`gates: RED (unhandled) — ${unhandled}`, ...refusal(t), ...gatesNote, usage]);
       return 2;
@@ -1040,8 +1029,9 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runAt
       const repairReasons = v.planRepair;
       record([`plan repair (KTB-51): one repair turn — feeding ${repairReasons.length} validator reason(s) back: ${repairReasons.join("; ")}`]);
       let repairOut = null;
+      let repairCtx = null;
       try {
-        const repairCtx = await d.buildContext({ setupDirty, planRepair: repairReasons });
+        repairCtx = await d.buildContext({ setupDirty, planRepair: repairReasons });
         /**
          * Task 1 (리뷰 SF-5) — 이 두 번째 `buildContext`가 `context.<role>.json`을 **다시 쓰고**
          * `plan_repair`를 투영에 더한다. 곧 리페어 턴의 플래너가 실제로 읽은 문맥은 이것인데, 첫
@@ -1059,6 +1049,7 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runAt
       }
       if (repairOut) {
         out = repairOut;
+        payloadCtx = repairCtx ?? ctx;                                // #207 — 이제 실패를 말하는 것은 리페어 턴의 반환과 그 턴의 loaded.json이다(memo는 리페어 전에 계산되지 않는다 — plan엔 게이트가 없다)
         try { finalProgress = d.progress?.() ?? null; } catch { /* best-effort */ }
         usage = usageLine(out, finalProgress);
         // plan is a no-write stage — re-assert the worktree exactly as the first pass did (KTB-14).
@@ -1103,6 +1094,9 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runAt
       const apiError = hitApiError(out);
       const qaPath = qaEvidenceUnusable(v.reasons);
       const blocked = hitMaxTurns(out) || qaPath || (apiError && !isNonTransientApiError(out));
+      // #207 — 디스패처 전달 고장(위 §payloadError). 턴 한도·API 오류·qa 증거 경로는 먼저 자기 자리로 간다.
+      const pe = !blocked && !apiError ? await payloadError() : null;
+      if (pe) return blockOnPayload(pe, ["verify: FAIL", ...v.reasons.map((r) => `- ${r}`), ...gatesNote]);
       /**
        * 1.4.23 (L26, 데모 #7) — **빌더의 커밋 뒤 gates RED는 빌더가 고칠 수 있는 가장 흔한 실패다**(기존 테스트를 깨뜨렸다).
        * 그런데 이 가지는 그것을 "산출물 결함"으로 읽어 곧장 needs-human으로 세웠다 — 검증자 거부(1.4.9)와 self-gate 발견
@@ -2060,6 +2054,37 @@ export function implementHeadShaOf({ out, transcriptText = "" } = {}) {
 }
 
 /**
+ * #207 — 세션 산출물 중 **워크플로의 fail-closed 반환**이 있으면 그 `error` 문구, 없으면 null. 후보 탐색은 `verifyStage`와 같은
+ * 추출기(`extractStageArtifact`)이고, 채점 기준만 다르다: 네 워크플로 템플릿이 돌려주는 모양 그대로 — `issue`가 숫자(implement는
+ * 사건에서 0) 또는 null(triage/plan/review는 `Number(undefined)` = NaN이 JSON에서 null이 된다),
+ * `orchestration: "workflow"`, `guarantee: "structural"`, 그리고 `error`가 정확히 `context payload missing`이거나
+ * `context issue mismatch`로 시작한다. `error` 키 하나뿐인 객체, 다른 에러 문구, `issue: 0`만 있는 객체는 여기 해당하지 않는다 —
+ * 그런 산출물은 예전처럼 needs-human이다(일반 산출물 결함이 이 길로 빠져나가지 못하게).
+ */
+export const DISPATCHER_PAYLOAD_MISSING = "context payload missing";
+export const DISPATCHER_PAYLOAD_MISMATCH = "context issue mismatch";
+// `orchestration: "workflow"`은 아래 후보 검사가 이미 요구한다 — 여기서는 나머지 모양만 본다.
+const isWorkflowFailClosed = (o) => Boolean(o) && typeof o === "object"
+  && (typeof o.issue === "number" || o.issue === null) && o.guarantee === "structural"
+  && typeof o.error === "string" && (o.error === DISPATCHER_PAYLOAD_MISSING || o.error.startsWith(DISPATCHER_PAYLOAD_MISMATCH));
+export function dispatcherPayloadErrorOf({ out, transcriptText = "" } = {}) {
+  // 후보 순서는 **채널 순서**다(완료 알림 → Read/tool_result → 전경 Workflow 결과 → 최종 메시지, §extractStageArtifact) — 시간
+  // 순서가 아니고, "최신이 먼저"는 **한 채널 안에서만** 참이다. 그 순서로 첫 번째 워크플로 반환(`orchestration: "workflow"` + `issue`
+  // 키 + `guarantee: "structural"` — 네 템플릿의 스테이지 산출물과 fail-closed 반환 둘 다 그 모양이다. `guarantee`가 빠지면 디스패처가
+  // 먼저 Read하는 loaded.json(`issue`·`orchestration`은 있고 `guarantee`는 없다)이 후보로 뽑혀 진짜 반환을 가린다 — rework cf1)을
+  // 고르고, 그것이 fail-closed일 때만 답한다. 그래서 재시도가 **같은 채널이나 더 앞선 채널**로 스키마가 틀린 산출물을 냈다면 그것이
+  // 뽑혀 산출물 결함(needs-human)이 된다. 그러나 옛 fail-closed가 완료 알림으로 왔고 재시도의 반환이 더 뒤의 채널(전경 Workflow 결과·
+  // 최종 메시지)로 왔다면 옛 fail-closed가 뽑혀 blocked/undecidable이 된다 — b881484를 그대로 옮긴 동작이다(plan non_goals: "Any design
+  // beyond the b881484 port"; 교차 채널 순서는 이 이슈 밖이다).
+  const a = extractStageArtifact({
+    envelopeResult: out?.result,
+    transcriptText,
+    validate: (o) => (o && o.orchestration === "workflow" && "issue" in o && o.guarantee === "structural" ? { ok: true, errors: [] } : { ok: false, errors: ["not a workflow return"] }),
+  });
+  return a.ok && isWorkflowFailClosed(a.data) ? a.data.error : null;   // verbatim (b881484) — sanitising is #240, see §blockOnPayload
+}
+
+/**
  * 위 §KTB-43의 실행부. 반환은 셋 중 하나다:
  *   `{ok:true, dropped:[]}`           — 되돌릴 것이 없다(브랜치 head가 곧 핸드오프 sha다).
  *   `{ok:true, dropped:[sha…], …}`    — 드리프트만 얹혀 있었다: reset + 리스 push까지 끝났다.
@@ -2809,11 +2834,6 @@ export function makeHarnessIssueDep({ gh, issue, stage, rehearsal, admission, tr
  * Every stage transition funnels through here. `buildExtra(args)` is main's ctxExtra builder (roster, gates file, merge gates).
  */
 export function makeTransitionDep({ gh, issue, stage, rehearsal, admission, buildExtra, transitionFn = transition }) {
-  /**
-   * #249 sec1 — **triage의 blocked 재시도 hop(blocked → factory:queue)도 같은 문을 지난다.** 상한(queue_max·open_max·depth_max)을 포함한
-   * 심사 전부다. 그 hop을 허락하는 것은 작성자를 확인하지 않는 blocked-origin 마커뿐이라(ADR-040의 후속 이슈), hop만의 상한 면제는 그
-   * 마커를 쓸 수 있는 누구에게나 큐 문을 비켜 가는 길이었다. 대가: 꽉 찬 큐에서의 진짜 재시도는 factory:blocked에 남고 exit 2, 기록에 상한이 적힌다.
-   */
   return async (args) => {
     const { to, reason, cause, by = null } = args;
     const ctxExtra = await buildExtra(args);
@@ -3124,6 +3144,10 @@ export const makeBuildContextDep = ({ root, gh, issue, stage, run, mergeBase, re
     catch (e) { if (!isMergeBaseError(e)) throw e; recordLine("tier: merge-base unresolved — tier floor not computed (gates will block)"); }
     const ctx = await produce({ root, gh, issue, stage, run, base, setupDirty, planRepair, mergeConflicts });
     onBuilt(ctx);
+    // #207 — 이 buildContext가 쓴 `loaded.json`의 디스크 위 크기(디스패처가 손으로 옮겨 쓸 파일, 모든 스테이지). 매 호출이 한 줄이다:
+    // plan 리페어 턴의 두 번째 buildContext는 `plan_repair`가 붙어 커진 파일을 다시 쓰므로 그 크기도 따로 선다. 모르면 줄이 없다.
+    const loadedNote = loadedJsonLine(ctx);
+    if (loadedNote) recordLine(loadedNote);
     return ctx;
   };
 
@@ -3280,6 +3304,17 @@ export async function mirrorMatchesBranchHead({ root, run, importer, match = mir
 }
 
 /**
+ * #253 — `assertStageBranch`(아래, 쓰기 스테이지의 세션 뒤 가드)가 돌려주는 오버레이 드리프트 사유. 이 사유는
+ * `undecidable — …`/`branch: FAIL — …`로 운영자와 sweeper의 다음 빌더에게 그대로 간다.
+ * 접두 `factory config changed during the stage: <paths>`는 그대로다(하류가 그 접두를 읽는다). 드리프트한 경로에
+ * mirrorStep의 가족(`inMirrorFamily`)이 하나라도 있으면 처방을 덧붙인다: 미러는 러너가 만들고, self-mirror 테스트는
+ * 빌더 세션 안에서 노트와 함께 통과한다(`factory/test/helpers/builder-session.js`). git diff 실패(`drift.reason`)는 그대로.
+ */
+export const OVERLAY_MIRROR_REMEDY = " — a builder must not write .factory/**; the self-mirror test is the runner's (it passes inside a builder session since #253)";
+export const overlayDriftReason = (drift) =>
+  drift.reason || `factory config changed during the stage: ${drift.paths.join(", ")}${drift.paths.some((p) => inMirrorFamily(p)) ? OVERLAY_MIRROR_REMEDY : ""}`;
+
+/**
  * ADR-023 Task 8b — 세션이 끝난 뒤에도 **여전히 그 브랜치 위인가**, 그리고 팩토리 설정은 여전히
  * 스테이지 커밋의 것인가. 훅이 브랜치 이동을 막지만 훅이 못 보는 철자는 언제나 남는다(런타임 조립) —
  * 이것은 그 뒤에 서는 구조적 백스톱이다. `git rev-parse --abbrev-ref HEAD` 자체가 실패하거나 HEAD가
@@ -3295,7 +3330,7 @@ export async function assertStageBranch({ run, cwd, issue, sha, harnessIssue = f
   // harness 이슈는 overlay가 애초에 덮지 않은 경로(`HARNESS_OPENS`)를 세션 뒤에도 묻지 않는다 —
   // 빌더가 그 파일을 고치는 것이 그 이슈의 일이다(§overlayPathspecs).
   const drift = await overlayDrift({ run, cwd, sha, harnessIssue });
-  if (!drift.ok) return { ok: false, reason: drift.reason || `factory config changed during the stage: ${drift.paths.join(", ")}` };
+  if (!drift.ok) return { ok: false, reason: overlayDriftReason(drift) };
   return { ok: true, branch: at };
 }
 
@@ -3489,7 +3524,7 @@ export const overlayLine = (ov) => {
  * 마커 코멘트를 남긴다 — 락은 이미 이 프로세스가 쥐고 있으므로, 라벨 이벤트로 따라 뜨는 GitHub의
  * triage 잡은 claim에 실패해 exit 0으로 물러난다(의도된 설계, 중복 실행 방지).
  */
-export function makeLocalEntry({ gh, issue, stage, env, rehearsal = null, admission, log = (m) => console.error(m) }) {
+export function makeLocalEntry({ gh, issue, stage, env, rehearsal = null }) {
   return async () => {
     if (!env?.FACTORY_LOCAL_ENTRY || stage !== "triage") return null;
     const it = await gh.issue(issue);
@@ -3510,41 +3545,11 @@ export function makeLocalEntry({ gh, issue, stage, env, rehearsal = null, admiss
        */
       const r = await rehearsal?.();
       if (!r || r.ok !== true) return `local entry refused: ${r?.reason || REHEARSAL_UNWIRED}`;
-      /**
-       * #230 (E-2) — **심사도 같은 문으로.** 리허설만 보던 이 자리는 done_when 없는 이슈·NEVER_AUTOMATE·꽉 찬 큐를 그대로 큐에 썼다.
-       * main의 그 심사기를 부르고, 거부면 라벨을 쓰지 않고 큐 문과 같은 문장을 돌려주고 stderr에도 낸다.
-       * **배선이 비면 거부한다(fail closed)**: `admission`이 함수가 아니면 — 키를 **생략한** 호출이든 `null` 등을 넘긴 호출이든 — 라벨을
-       * 쓰지 않고 `transition()`이 같은 경우에 내는 문장(`ADMISSION_UNWIRED`) 그대로 거부한다 — 리허설의 `REHEARSAL_UNWIRED`와 같은 규칙.
-       * #247 (spec1, dw3) — 생략한 키를 예외로 두지 않는다(`admission !== undefined`로 건너뛰던 #230 브랜치의 모양은 리뷰 두 라운드가 거부했다).
-       */
-      const unwired = typeof admission !== "function";
-      const a = unwired ? null : await admission({ issue });
-      if (unwired || a?.ok !== true) {
-        const line = `local entry refused: ${unwired ? ADMISSION_UNWIRED : admissionRefusedReason(a)}`;
-        log(line);
-        return line;
-      }
       await gh.setFactoryLabel(issue, "factory:queue");
       await gh.comment(issue, "<!-- factory-transition:v1 from=backlog to=factory:queue by=local -->\nbacklog → factory:queue — claimed locally first (§4.2.5)");
       return "local entry: backlog → factory:queue";
     }
     return null;
-  };
-}
-
-/**
- * main()의 큐 진입 심사기(#230에서 추출 — 테스트가 프로덕션 배선을 그대로 부르게). CHARTER는 `charterReady`가 나중에 읽으므로
- * 호출 시점에 `getCharter()`로 늦게 본다. 없으면 거부하되(fail closed) 그 거부는 `unreadable`이다 — 이슈에 대한 판정이 아니다.
- */
-// #249 (dw5) — 두 번째 심사기가 아니다: main()이 이것을 **한 번** 부르고 그 한 심사기를 큐 문·로컬 진입·triage 재심사에 나눠 준다
-// (아래 `const admission = makeStageAdmission(…)`). main() 조립의 추출도 아니다 — main의 `deps`는 여전히 main 안에서 조립된다.
-// 이 함수는 main에 있던 인라인 클로저(`charter ? makeQueueAdmission(…) : 거부`)를 이름만 붙여 옮긴 것이고, 9f6dc7a 브랜치 테스트
-// (test_230_*, test_247_*)가 이 이름으로 import해 프로덕션 심사기를 그대로 부른다(non_goal "no new design" — 브랜치 그대로).
-export function makeStageAdmission({ gh, getCharter, factoryLogins }) {
-  return async (args) => {
-    const charter = getCharter();
-    if (!charter) return { ok: false, reasons: ["CHARTER not loaded — queue admission needs it"], codes: [ADMISSION_CODES.unreadable] };
-    return makeQueueAdmission({ gh, charter, factoryLogins })(args);
   };
 }
 
@@ -3633,8 +3638,9 @@ async function main() {
    */
   const rehearsal = makeRehearsalChecker({ gh, root, branch: () => harness?.project?.default_branch || "main" });   // 지연: harness는 charterReady에서 읽힌다
   // S2 — 큐 진입 심사. charter는 charterReady에서 읽히므로 호출 시점에 늦게 본다; 없으면 심사기가 거부한다(fail closed).
-  // #230 — 이 한 심사기가 큐 문(`deps.transition`)·로컬 진입·triage 진입 재심사에 모두 간다.
-  const admission = makeStageAdmission({ gh, getCharter: () => charter, factoryLogins: () => resolveFactoryLogins({ gh, env: process.env }) });
+  const admission = async (args) => (charter
+    ? makeQueueAdmission({ gh, charter, factoryLogins: () => resolveFactoryLogins({ gh, env: process.env }) })(args)
+    : { ok: false, reasons: ["CHARTER not loaded — queue admission needs it"] });
   const deps = {
     // 잠드는 건 정상 동작이지만 "왜" 잠들었는지는 반드시 말한다(`makeCharterReady`). #179 — 엔진 판정도 거기서, base에서 굳는다.
     charterReady: makeCharterReady({ root, set: (s) => { if ("charter" in s) charter = s.charter; if ("harness" in s) harness = s.harness; if ("engine" in s) engineAtBase = s.engine; } }),
@@ -3647,9 +3653,7 @@ async function main() {
     trustWorkspace: () => trustWorkspace({ root }),
     claim: () => claim({ run, cwd: root, issue, stage, runnerId }),
     // KTB-44 (r2 nf-2): 로컬 진입도 다른 네 생산자와 **같은** 검사기를 지난다.
-    localEntry: makeLocalEntry({ gh, issue, stage, env: process.env, rehearsal, admission }),
-    /** #230 — triage 진입의 재심사(runStage). 위 큐 문과 같은 심사기다. */
-    admission,
+    localEntry: makeLocalEntry({ gh, issue, stage, env: process.env, rehearsal }),
     /** 진입 상태 가드(KTB-10)의 재료 — 지금 이 순간 이슈에 붙어 있는 라벨 이름들. */
     issueLabels: async () => (await gh.issue(issue)).labels,
     /** blocked 재시도 가드 전용(KTB-15b I2) — 지금의 factory:blocked이 마지막으로 어느 스테이지의
@@ -3711,6 +3715,8 @@ async function main() {
      * 않고 같은 추출기를 한 번 더 돌린다(후보 채점은 동일하다 — §implementHeadShaOf).
      */
     handoffHeadSha: (out) => (stage === "implement" ? implementHeadShaOf({ out, transcriptText: transcriptTextFor(root, out) }) : null),
+    /** #207 — 워크플로의 fail-closed 반환(디스패처 전달 고장)을 트랜스크립트까지 훑어 찾는다(§dispatcherPayloadErrorOf). */
+    dispatcherPayloadError: (out) => dispatcherPayloadErrorOf({ out, transcriptText: transcriptTextFor(root, out) }),
     /** KTB-43 — 핸드오프 뒤에 붙은 드리프트 전용 커밋을 떨어뜨린다(리스 없는 force는 없다). */
     dropPostHandoffDrift: async ({ handoffSha, baseline }) => makeDropPostHandoffDrift({ run, root, issue })({
       handoffSha, baseline,

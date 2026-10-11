@@ -155,6 +155,17 @@ Before implementing any feature, check if a design contract exists at `docs/feat
 If one exists: read it, follow the approved structure, do not modify signature contract tests.
 If none exists: run `/know-thy-build:architect` before implementing.
 
+## 운영 머지 — 소유자는 서명 기계가 아니다 (2026-10-10, 소유자 결정, ADR-039)
+
+소유자: "사람 역할 하는 agent를 하나 띄워서 나한테 PR 검토 받지 않고 merge하도록 해." 그래서:
+
+1. **공장이 만든 PR**은 CHARTER `self_change.auto_merge_judge: true` — 만장일치 리뷰 + GREEN + 거부권 창 60분 + 차단기 닫힘이면 공장이 머지한다(ADR-033). 소유자에게 머지를 요청하지 않는다.
+2. **운영 세션이 만든 PR**(`.github/**`·templates·CHARTER·`factory/**` 핫픽스 등 판정 경로 포함)은 운영 세션이 운영 door(`gh pr merge <n> --squash --admin`, CHARTER `operator_merge_judge: true`)로 직접 머지한다. 단, 머지 전에 **반드시**:
+   - 전체 스위트(`GITHUB_ACTIONS=true npx vitest run`)와, 워크플로를 건드렸으면 `actionlint`가 clean이고 PR 체크가 GREEN이다.
+   - **대역 리뷰어 에이전트**를 하나 띄운다(`Agent`, fresh `general-purpose`, 읽기 전용): PR diff·이슈·ADR을 cold read로 보고 `approve | reject(must_fix)`를 낸다. reject면 고치고 다시 띄운다. 이 에이전트는 작성자(운영 세션)와 다른 컨텍스트여야 한다 — 같은 세션의 자기 확인은 리뷰가 아니다.
+   - PR 본문에 그 판정 요지(`Stand-in review: approve — …`)를 남긴다.
+3. 소유자에게 남는 것은 **거부권**(revert·`factory:veto`·차단기 리셋)이다. 사람에게 무언가를 요청하는 것은 토큰·시크릿·계정처럼 **사람만 할 수 있는 것**뿐이다.
+
 ## SDD 비용 정책 (2026-09-21, 소유자 승인)
 
 서브에이전트 주도 개발(SDD)로 이 저장소를 바꿀 때 지키는 규칙. 리뷰 깊이는 줄이지 않는다 — 실제 결함은 적대적 리뷰가 잡았다.
