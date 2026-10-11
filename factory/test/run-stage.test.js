@@ -7736,3 +7736,503 @@ test("test_249_merge_git_auth_survives_the_base_merge", () => {
     expect(apply(stage, { GH_TOKEN: token }), stage).toEqual({ GH_TOKEN: token });
   }
 });
+// ── #212 (ADR-041) — the #196 incident flow, end to end in one run-stage sequence ───────────────────────────────────────────────
+// approve handoff → the REAL runMergeStage on a CONFLICTING PR (real transition() comments) → the implement round: the runner's base
+// merge on a real git repository, the real buildContext (conflict_only), the builder resolving the conflict, the runner mirror commit,
+// the production self-gate dep (conflict-scope on the real merge commit) → the usage record → the real budget check and the real K rule.
+import { buildContext as buildContext212 } from "../lib/context.js";
+import { runMergeStage as runMergeStage212 } from "../lib/merge-stage.js";
+import { makeKRestartDeps as makeKRestartDeps212, makeSelfGateDep as makeSelfGateDep212 } from "../bin/run-stage.js";
+import { budgetCheck as budgetCheck212 } from "../lib/budget.js";
+import { run as realRun212 } from "../lib/exec.js";
+
+const C212 = "factory/lib/conflicted.js";
+const lines212 = (tag) => Array.from({ length: 30 }, (_, i) => `export const ${tag}${i} = ${i};`);
+const approve212 = (role) => ({ role, verdict: "approve", confidence: "high", must_fix: [], should_fix: [], verified: [] });
+const reject212 = (role) => ({ role, verdict: "reject", confidence: "high", must_fix: [{ id: "cf1", where: `${C212}:1`, claim: "c", evidence: "e" }], should_fix: [], verified: [] });
+
+function ctxRoot212() {
+  const r = mkdtempSync(join(tmpdir(), "ctx212-"));
+  mkdirSync(join(r, ".factory"), { recursive: true }); mkdirSync(join(r, "docs/factory"), { recursive: true });
+  writeFileSync(join(r, ".factory/harness.toml"), `schema = 1\n[harness]\nmaturity = "M0"\n[factory]\norchestration = "workflow"\n[commands]\nunit = "npm test"\n[gates]\nrequired = ["unit"]\nfast = ["unit"]\nfull = ["unit"]\ndeep = ["unit"]\n`);
+  writeFileSync(join(r, "docs/factory/CHARTER.md"), `---\nschema: factory.charter.v1\nstatus: ready\ntier_default: standard\nroster:\n  docs: [correctness]\n  standard: [correctness, qa]\nplan_roles:\n  default: [architect]\nplan_rounds: { default: 1 }\n---\n`);
+  writeFileSync(join(r, ".factory/roles.toml"), `[review.correctness]\nagent = "c.md"\nmodel = "opus"\n[review.qa]\nagent = "q.md"\nmodel = "opus"\n[plan.architect]\nagent = "a.md"\nmodel = "opus"\n`);
+  return r;
+}
+function issue212() {
+  const comments = [];
+  let tick = 0;
+  const gh = {
+    label: "factory:awaiting-review",
+    issue: async () => ({ number: 212, title: "T", body: "", labels: [gh.label] }),
+    comments: async (n) => (n === 31 ? [] : comments.slice()),
+    comment: async (_n, body) => { comments.push({ id: comments.length + 1, body, createdAt: new Date(Date.UTC(2026, 9, 4, 0, 0, tick++)).toISOString() }); },
+    setFactoryLabel: async (_n, to) => { gh.label = to; },
+  };
+  return gh;
+}
+const review212 = (gh, head, verdicts, decision) => gh.comment(212, renderHandoff({ stage: "review", issue: 212, summary: "s", data: {
+  schema: "factory.review.v1", issue: 212, pr: 31, head_sha: head, round: 1, orchestration: "workflow", guarantee: "structural", decision, verdicts } }));
+const reviewRework212 = async (gh, head) => {
+  await review212(gh, head, [reject212("correctness"), approve212("qa")], "rework");
+  gh.label = "factory:awaiting-review";
+  await transition({ gh, issue: 212, to: "factory:rework", reason: "review", stage: "review", env: {} });
+  gh.label = "factory:in-progress";
+};
+async function repo212() {
+  const root = mkdtempSync(join(tmpdir(), "fq212rs-"));
+  const git = (...args) => realRun212("git", ["-c", "user.email=t@example.invalid", "-c", "user.name=t", "-c", "commit.gpgsign=false", ...args], { cwd: root });
+  const ok = async (...args) => { const r = await git(...args); expect(r.code, `git ${args.join(" ")}: ${r.stderr}`).toBe(0); return r.stdout.trim(); };
+  const put = (p, s) => { mkdirSync(dirname(join(root, p)), { recursive: true }); writeFileSync(join(root, p), s); };
+  await ok("init", "-q", "-b", "main");
+  put(C212, lines212("c").join("\n") + "\n"); put("factory/lib/base-only.js", lines212("x").join("\n") + "\n"); put("factory/lib/other.js", lines212("o").join("\n") + "\n");
+  await ok("add", "-A"); await ok("commit", "-q", "-m", "base");
+  await ok("checkout", "-q", "-b", "claude/fq-212");
+  const b = lines212("c"); b[15] = "export const c15 = 'branch';"; put(C212, b.join("\n") + "\n");
+  put("docs/factory/DECISIONS.md", "# D\n\n## ADR-1 branch\n");
+  await ok("add", "-A"); await ok("commit", "-q", "-m", "approved change");
+  const approved = await ok("rev-parse", "HEAD");
+  await ok("checkout", "-q", "main");
+  const m = lines212("c"); m[15] = "export const c15 = 'main';"; put(C212, m.join("\n") + "\n");
+  const x = lines212("x"); x[3] = "export const x3 = 'main';"; put("factory/lib/base-only.js", x.join("\n") + "\n");
+  put("docs/factory/DECISIONS.md", "# D\n\n## ADR-1 main\n");
+  await ok("add", "-A"); await ok("commit", "-q", "-m", "main moves on");
+  const base = await ok("rev-parse", "HEAD");
+  await ok("checkout", "-q", "claude/fq-212");
+  return { root, git, ok, put, approved, base };
+}
+
+/** one implement round, wired with the production pieces; `builder` is what the session does after the runner left the merge to it */
+async function implementRound212({ gh, repo, recRoot, runnerId, cost, builder, pending = true, localEntry = null, commentFails = false, transitionRefused = false, checkout = null, runRecordFails = null }) {
+  const ctxRoot = ctxRoot212();
+  let ctxCache = null;
+  const harness = { commands: {}, test: { test_glob: ["nothing/**"], source_glob: [] } };
+  const transitionCalls = [];
+  const code = await runStage({
+    stage: "implement", issue: 212, runnerId, runId: runnerId.replace(/^gha-/, ""),
+    deps: {
+      charterReady: async () => true, trustWorkspace: async () => {}, claim: async () => ({ ok: true }),
+      heartbeat: async () => ({ stop() {} }), assertHandoff: async () => ({ ok: true }), release: async () => true,
+      ...(localEntry ? { localEntry: async () => localEntry } : {}),
+      checkoutBranch: async () => {
+        if (!pending) return { ok: true, branch: "claude/fq-212", existed: true, base: "main" };
+        const m = await repo.git("merge", "--no-edit", repo.base);
+        expect(m.code).not.toBe(0);
+        // the runner union-merges the append-only DECISIONS.md itself (mergeBaseIntoBranch) and hands only the source conflict over
+        repo.put("docs/factory/DECISIONS.md", "# D\n\n## ADR-1 branch\n## ADR-1 main\n");
+        await repo.ok("add", "--", "docs/factory/DECISIONS.md");
+        return { ok: true, branch: "claude/fq-212", existed: true, base: "main", merged: repo.base, conflicts: [C212], partial: { mirror: [], union: ["docs/factory/DECISIONS.md"] } };
+      },
+      ...(checkout ? { checkoutBranch: () => checkout(repo) } : {}),
+      baseMergeComplete: async () => ({ ok: true }),
+      buildContext: async ({ mergeConflicts } = {}) => (ctxCache = await buildContext212({ root: ctxRoot, gh, issue: 212, stage: "implement", mergeConflicts })),
+      resetAgentsLog: async () => {},
+      claudeP: async () => { await builder(repo); return { is_error: false, result: "{}", usage: { input_tokens: 7 }, total_cost_usd: cost, num_turns: 4, terminal_reason: "end_turn" }; },
+      mirror: async () => {
+        repo.put(".factory/lib/mirror.js", `// generated ${runnerId}\n`);
+        await repo.ok("add", "-A");
+        await repo.ok("-c", "user.name=factory-runner", "-c", "user.email=factory-runner@users.noreply.github.com", "commit", "-q", "-m", "mirror");
+        return { ok: true, applicable: true, changed: [".factory/lib/mirror.js"], sha: await repo.ok("rev-parse", "HEAD") };
+      },
+      gates: async () => ({ schema: "factory.gates.v1", status: "GREEN", level: "fast" }),
+      verifyStage: () => ({ ok: true, reasons: [], data: { schema: "factory.implement.build.v1", pr: 31, head_sha: "e".repeat(40) } }),
+      selfGate: makeSelfGateDep212({ root: repo.root, harness, run: realRun212, mergeBase: async () => repo.ok("merge-base", "main", "HEAD"), getCtx: () => ctxCache }),
+      comment: async (n, body) => { if (commentFails) throw new Error("gh: 502 Bad Gateway"); return gh.comment(n, body); },
+      // the implement handoff and the hand-off transition are the real ones (`renderHandoff`, `transition()`): the K marker binds to them
+      writeHandoff: async ({ data } = {}) => data?.head_sha && gh.comment(212, renderHandoff({ stage: "implement", issue: 212, summary: "s", data: {
+        schema: "factory.implement.v1", issue: 212, head_sha: data.head_sha, pr: data.pr, gates: { status: "GREEN" }, verifier: { verdict: "accepted" }, orchestration: "workflow", guarantee: "verified" } })),
+      transition: async ({ to, data }) => {
+        transitionCalls.push(to);
+        if (to !== "factory:awaiting-review") { gh.label = to; return { ok: true, to }; }
+        if (transitionRefused) return { ok: false, from: "factory:in-progress", to, reason: "implement head_sha eeeeeee != branch head 0000000" };
+        gh.label = "factory:in-progress";
+        return transition({ gh, issue: 212, to, stage: "implement", env: {}, ctxExtra: { gatesChecked: true, gatesFile: { status: "GREEN", head_sha: data.head_sha } } });
+      },
+      runRecord: (lines) => {
+        if (runRecordFails?.(lines)) throw new Error("EIO: run record write failed");
+        return appendRunRecord({ root: recRoot, issue: 212, stage: "implement", runnerId, lines });
+      },
+    },
+  });
+  return { code, ctx: ctxCache, transitionCalls };
+}
+const resolveOnly212 = async (repo) => {
+  const r = lines212("c"); r.splice(15, 1, "export const c15 = 'branch';", "export const c15b = 'main';");
+  repo.put(C212, r.join("\n") + "\n");
+  await repo.ok("add", "-A"); await repo.ok("commit", "-q", "--no-edit");
+};
+const resolveThenSelfCritique212 = async (repo) => {
+  await resolveOnly212(repo);
+  repo.put("factory/lib/other.js", lines212("o").join("\n") + "\nexport const selfCritiqueFix = 1;\n");
+  await repo.ok("add", "-A"); await repo.ok("commit", "-q", "-m", "self-critique: fix");
+};
+/** the #196 setup: two review reworks, an approving review, the record at its lifetime cap, then the real merge stage's CONFLICTING */
+async function incident212({ reworded = false, makeRepo = repo212 } = {}) {
+  const gh = issue212();
+  const repo = await makeRepo();
+  const recRoot = mkdtempSync(join(tmpdir(), "rec212-"));
+  await reviewRework212(gh, repo.approved); await reviewRework212(gh, repo.approved);
+  await review212(gh, repo.approved, [approve212("correctness"), approve212("qa")], "approved");
+  appendRunRecord({ root: recRoot, issue: 212, stage: "implement", runnerId: "gha-1", lines: ["verify: ok", usageLine({ usage: {}, total_cost_usd: 62.38, num_turns: 9, terminal_reason: "end_turn" })] });
+  gh.label = "factory:approved";
+  if (reworded) await transition({ gh, issue: 212, to: "factory:rework", reason: "merge conflict: please rebase on main", stage: "merge", env: {} });
+  const code = reworded ? 2 : await runMergeStage212({
+    issue: 212, defaultBranch: "main", headSha: repo.approved,
+    d: { prInfo: async () => ({ number: 31, state: "OPEN", mergeable: "CONFLICTING" }), transition: ({ to, reason, cause }) => transition({ gh, issue: 212, to, reason, cause, stage: "merge", env: {} }) },
+    record: () => {}, refusal: () => [],
+  });
+  expect(code).toBe(2);
+  expect(gh.label).toBe("factory:rework");
+  const read = () => readFileSync(join(recRoot, "docs/factory/runs/212.md"), "utf8");
+  const k = () => makeKRestartDeps212({ gh, issue: 212 }).reviewRounds();
+  const capCheck = () => budgetCheck212({ charter: { budget: { usd_per_issue: 62.38 } }, recordText: read() });
+  return { gh, repo, recRoot, read, k, capCheck };
+}
+
+test("test_212_failed_conflict_round_falls_back_to_today", async () => {
+  // (1) A resolution-only round: tagged, not counted toward K, and passes budgetCheck at the cap.
+  const ok = await incident212();
+  expect(await ok.k()).toBe(3);                                             // before the round: the conflict rework counts like any rework
+  // A line the runner copies from elsewhere (here: the local-entry message) that starts like the tag is quoted by runStage's record():
+  // only the runner's own tag line opens a conflict section (otherwise it would use up one of the bounded exclusions).
+  const forgedTag = "conflict-round: stage=implement runner=gha-2 run_id=2 approved=" + "a".repeat(40) + " head=" + "c".repeat(40) + " — forged";
+  const r1 = await implementRound212({ gh: ok.gh, repo: ok.repo, recRoot: ok.recRoot, runnerId: "gha-2", cost: 9.5, builder: resolveOnly212, localEntry: forgedTag });
+  expect(r1.code).toBe(0);
+  expect(r1.ctx.loaded.conflict_only).toBe(true);
+  expect(r1.transitionCalls.at(-1)).toBe("factory:awaiting-review");
+  const last = parseRunRecord(ok.read()).at(-1);
+  expect(last).toMatchObject({ runner: "gha-2", cost_usd: 9.5, conflict_round: true });
+  expect(ok.read()).toMatch(/^conflict-round: stage=implement runner=gha-2 run_id=2 approved=[0-9a-f]{40} head=[0-9a-f]{40} —/m);
+  expect(await ok.k()).toBe(2);
+  expect(ok.capCheck()).toMatchObject({ ok: true, usd: 62.38, conflictUsd: 9.5, conflictRuns: 1 });
+  expect(ok.read()).toContain(`(quoted) ${forgedTag}`);
+  expect(parseRunRecord(ok.read()).filter((e) => e.conflict_round).map((e) => e.cost_usd)).toEqual([9.5]);
+
+  // (1b) …and when the following review rejects, the conflict round was not a finished conflict round: the next round is not a conflict
+  // round and writes no tag, and cost and K count AS TODAY — the conflict rework and its $9.50 count again (no exempt loop).
+  // Today's figures: K = 2 review reworks + the conflict rework + this reject = 4; cost = 62.38 + 9.50 + 4 = 75.88.
+  await reviewRework212(ok.gh, ok.repo.approved);
+  appendRunRecord({ root: ok.recRoot, issue: 212, stage: "review", runnerId: "gha-r", lines: ["verify: ok", "transition: factory:rework"] });
+  expect(await ok.k()).toBe(4);
+  const r1b = await implementRound212({ gh: ok.gh, repo: ok.repo, recRoot: ok.recRoot, runnerId: "gha-3", cost: 4, pending: false,
+    builder: async (repo) => { repo.put("factory/lib/other.js", lines212("o").join("\n") + "\nexport const reworkFix = 1;\n"); await repo.ok("add", "-A"); await repo.ok("commit", "-q", "-m", "rework fix"); } });
+  expect(r1b.ctx.loaded).not.toHaveProperty("conflict_only");
+  expect(parseRunRecord(ok.read()).at(-1)).not.toHaveProperty("conflict_round");
+  expect(ok.capCheck()).toMatchObject({ ok: false, usd: 75.88, conflictRevokedUsd: 9.5, conflictRevokedRuns: 1 });
+  expect(ok.capCheck()).not.toHaveProperty("conflictUsd");
+  expect(await ok.k()).toBe(4);
+
+  // (2) The same round, but the session adds code outside the merge (a self-critique fix): no tag, K counts, and the cap refuses.
+  const bad = await incident212();
+  const r2 = await implementRound212({ gh: bad.gh, repo: bad.repo, recRoot: bad.recRoot, runnerId: "gha-2", cost: 9.5, builder: resolveThenSelfCritique212 });
+  expect(r2.code).toBe(0);                                                  // not blocked — today's counted pipeline, to full review
+  expect(r2.ctx.loaded.conflict_only).toBe(true);
+  expect(r2.transitionCalls.at(-1)).toBe("factory:awaiting-review");
+  expect(bad.read()).toMatch(/^conflict-scope: RED — conflict round changed factory\/lib\/other\.js outside the merge .*counts as a normal round/m);
+  expect(bad.read()).not.toMatch(/^conflict-round:/m);
+  expect(parseRunRecord(bad.read()).some((e) => e.conflict_round)).toBe(false);
+  expect((await bad.gh.comments()).some((c) => c.body.includes("factory-conflict-round:v1"))).toBe(false);
+  expect(await bad.k()).toBe(3);
+  expect(bad.capCheck()).toMatchObject({ ok: false, usd: 71.88 });
+
+  // (3) The merge stage's reason was reworded: not recognised → not a conflict round, counted, and the implement record says so.
+  const rw = await incident212({ reworded: true });
+  const r3 = await implementRound212({ gh: rw.gh, repo: rw.repo, recRoot: rw.recRoot, runnerId: "gha-2", cost: 9.5, builder: resolveOnly212 });
+  expect(r3.ctx.loaded).not.toHaveProperty("conflict_only");
+  expect(rw.read()).toMatch(/^conflict-only: not applied — the last rework came from factory:approved but its reason does not match/m);
+  expect(rw.read()).not.toMatch(/^conflict-round:/m);
+  expect(await rw.k()).toBe(3);
+  expect(rw.capCheck()).toMatchObject({ ok: false });
+
+  // (4) GREEN, but the runner's K marker cannot be posted: both or neither — no tag either, so cost and K count as today.
+  const nm = await incident212();
+  const r4 = await implementRound212({ gh: nm.gh, repo: nm.repo, recRoot: nm.recRoot, runnerId: "gha-2", cost: 9.5, builder: resolveOnly212, commentFails: true });
+  expect(r4.code).toBe(0);
+  expect(nm.read()).toMatch(/^conflict-scope: GREEN, but the conflict-round marker was not written — gh: 502 Bad Gateway; this round counts as a normal round/m);
+  expect(parseRunRecord(nm.read()).some((e) => e.conflict_round)).toBe(false);
+  expect(await nm.k()).toBe(3);
+  expect(nm.capCheck()).toMatchObject({ ok: false });
+
+  // (5) GREEN, but the hand-off transition is REFUSED (skeptic f3): the round did not hand off — no K marker, no tag, cost and K as today.
+  const rf = await incident212();
+  const r5 = await implementRound212({ gh: rf.gh, repo: rf.repo, recRoot: rf.recRoot, runnerId: "gha-2", cost: 9.5, builder: resolveOnly212, transitionRefused: true });
+  expect(r5.code).toBe(2);
+  expect(rf.read()).toMatch(/^conflict-scope: GREEN, but the round did not hand off to factory:awaiting-review \(transition refused: implement head_sha .*\) — no conflict-round marker or tag/m);
+  expect(rf.read()).not.toMatch(/^conflict-round:/m);
+  expect(parseRunRecord(rf.read()).some((e) => e.conflict_round)).toBe(false);
+  expect((await rf.gh.comments()).some((c) => c.body.includes("factory-conflict-round:v1"))).toBe(false);
+  expect(await rf.k()).toBe(3);
+  expect(rf.capCheck()).toMatchObject({ ok: false, usd: 71.88 });
+});
+
+// ── #212 skeptic findings: the runner's mirror resolution inside the same merge, and the K marker and the cost tag as both or neither ────
+const MIR212 = ".factory/lib/conflicted.js";
+/** repo212 where the conflicted source carries its mirror (every factory/** PR here does): the branch also has a clean hunk in both copies */
+async function repoMirror212() {
+  const root = mkdtempSync(join(tmpdir(), "fq212mir-"));
+  const git = (...args) => realRun212("git", ["-c", "user.email=t@example.invalid", "-c", "user.name=t", "-c", "commit.gpgsign=false", ...args], { cwd: root });
+  const ok = async (...args) => { const r = await git(...args); expect(r.code, `git ${args.join(" ")}: ${r.stderr}`).toBe(0); return r.stdout.trim(); };
+  const put = (p, s) => { mkdirSync(dirname(join(root, p)), { recursive: true }); writeFileSync(join(root, p), s); };
+  const both = (ls) => { put(C212, ls.join("\n") + "\n"); put(MIR212, ls.join("\n") + "\n"); };
+  await ok("init", "-q", "-b", "main");
+  both(lines212("c")); put("factory/lib/other.js", lines212("o").join("\n") + "\n");
+  await ok("add", "-A"); await ok("commit", "-q", "-m", "base");
+  await ok("checkout", "-q", "-b", "claude/fq-212");
+  const b = lines212("c"); b[15] = "export const c15 = 'branch';"; b[28] = "export const c28 = 'branch, clean hunk';"; both(b);
+  await ok("add", "-A"); await ok("commit", "-q", "-m", "approved change + its mirror");
+  const approved = await ok("rev-parse", "HEAD");
+  await ok("checkout", "-q", "main");
+  const m = lines212("c"); m[15] = "export const c15 = 'main';"; both(m);
+  await ok("add", "-A"); await ok("commit", "-q", "-m", "main moves on (source + mirror)");
+  const base = await ok("rev-parse", "HEAD");
+  await ok("checkout", "-q", "claude/fq-212");
+  return { root, git, ok, put, approved, base, read: (p) => readFileSync(join(root, p), "utf8") };
+}
+/** what mergeBaseIntoBranch → resolveMirrorConflicts leaves: the mirror path given base's copy, only the source conflict handed over */
+const mirrorCheckout212 = async (repo) => {
+  expect((await repo.git("merge", "--no-edit", repo.base)).code).not.toBe(0);
+  expect(await repo.ok("diff", "--name-only", "--diff-filter=U")).toBe([MIR212, C212].join("\n"));
+  await repo.ok("checkout", repo.base, "--", MIR212);
+  return { ok: true, branch: "claude/fq-212", existed: true, base: "main", merged: repo.base, conflicts: [C212], partial: { mirror: [MIR212], union: [] } };
+};
+const resolveOnlyMirror212 = async (repo) => {
+  const r = lines212("c"); r[28] = "export const c28 = 'branch, clean hunk';"; r.splice(15, 1, "export const c15 = 'branch';", "export const c15b = 'main';");
+  repo.put(C212, r.join("\n") + "\n");
+  await repo.ok("add", "-A"); await repo.ok("commit", "-q", "--no-edit");
+};
+
+test("test_212_conflict_round_with_a_runner_mirror_path_is_green_end_to_end", async () => {
+  // The #196 incident class in this repo: factory/lib/X.js conflicts and so does its .factory/lib/X.js mirror. The runner resolves the mirror
+  // with base's whole copy (dropping the branch's clean hunk in it); the builder resolves only the source. That round is resolution-only.
+  const inc = await incident212({ makeRepo: repoMirror212 });
+  const r = await implementRound212({ gh: inc.gh, repo: inc.repo, recRoot: inc.recRoot, runnerId: "gha-2", cost: 9.5, builder: resolveOnlyMirror212, checkout: mirrorCheckout212 });
+  expect(r.code).toBe(0);
+  expect(r.ctx.loaded.conflict_only).toBe(true);
+  expect(await inc.repo.ok("rev-parse", "HEAD~1^1")).toBe(inc.repo.approved);       // HEAD = mirror commit, HEAD~1 = the merge commit
+  expect(await inc.repo.ok("rev-parse", "HEAD~1^2")).toBe(inc.repo.base);
+  expect(await inc.repo.ok("show", `HEAD~1:${MIR212}`)).not.toContain("clean hunk");    // base's copy really dropped the branch's other hunk
+  expect(inc.read()).not.toMatch(/^conflict-scope: RED/m);
+  expect(inc.read()).toMatch(/^conflict-round: stage=implement runner=gha-2 /m);
+  expect(parseRunRecord(inc.read()).at(-1)).toMatchObject({ runner: "gha-2", cost_usd: 9.5, conflict_round: true });
+  expect(await inc.k()).toBe(2);
+  expect(inc.capCheck()).toMatchObject({ ok: true, usd: 62.38, conflictUsd: 9.5, conflictRuns: 1 });
+});
+
+test("test_212_tag_and_marker_are_both_or_neither", async () => {
+  const markers = async (gh) => (await gh.comments()).filter((c) => c.body.startsWith("<!-- factory-conflict-round:v1"));
+  // (a) GREEN and handed off, but the run-record write of the section that carries the tag FAILS: the marker must not go out either —
+  // otherwise K is exempt while the cost is not (the half state ADR-041 4 rules out). The round counts as today, and says so.
+  const wf = await incident212();
+  let tagWriteFailed = false;
+  const r = await implementRound212({ gh: wf.gh, repo: wf.repo, recRoot: wf.recRoot, runnerId: "gha-2", cost: 9.5, builder: resolveOnly212,
+    runRecordFails: (lines) => (lines.some((l) => l.startsWith("conflict-round: ")) ? (tagWriteFailed = true) : false) });
+  expect(tagWriteFailed).toBe(true);
+  expect(r.code).toBe(0);
+  expect(await markers(wf.gh)).toEqual([]);
+  expect(wf.read()).toMatch(/^conflict-scope: GREEN, but the conflict-round tag could not be written to the run record — EIO: run record write failed; no marker either — this round counts as a normal round \(cost and K\)/m);
+  expect(parseRunRecord(wf.read()).at(-1)).toMatchObject({ runner: "gha-2", cost_usd: 9.5 });
+  expect(parseRunRecord(wf.read()).some((e) => e.conflict_round)).toBe(false);
+  expect(await wf.k()).toBe(3);
+  expect(wf.capCheck()).toMatchObject({ ok: false, usd: 71.88 });
+
+  // (b) The tag was written, then the marker post fails: the tag is revoked by the runner's own line in the next section — the cost counts
+  // again (K never had a marker). A forged revocation could only count MORE, never less.
+  const mf = await incident212();
+  const r2 = await implementRound212({ gh: mf.gh, repo: mf.repo, recRoot: mf.recRoot, runnerId: "gha-2", cost: 9.5, builder: resolveOnly212, commentFails: true });
+  expect(r2.code).toBe(0);
+  expect(mf.read()).toMatch(/^conflict-round: stage=implement runner=gha-2 /m);
+  expect(mf.read()).toMatch(/^conflict-round-revoked: stage=implement runner=gha-2 run_id=2 — the conflict-round marker was not posted/m);
+  expect(parseRunRecord(mf.read()).some((e) => e.conflict_round)).toBe(false);
+  expect(await markers(mf.gh)).toEqual([]);
+  expect(await mf.k()).toBe(3);
+  expect(mf.capCheck()).toMatchObject({ ok: false, usd: 71.88 });
+  expect(mf.capCheck()).not.toHaveProperty("conflictUsd");
+
+  // (c) The success path still writes both, tag BEFORE marker: the record already holds the tag when the marker comment goes out.
+  const both = await incident212();
+  let tagAtMarker = null;
+  const origComment = both.gh.comment;
+  both.gh.comment = async (n, body) => { if (body.startsWith("<!-- factory-conflict-round:v1")) tagAtMarker = /^conflict-round: /m.test(both.read()); return origComment(n, body); };
+  const r3 = await implementRound212({ gh: both.gh, repo: both.repo, recRoot: both.recRoot, runnerId: "gha-2", cost: 9.5, builder: resolveOnly212 });
+  expect(r3.code).toBe(0);
+  expect(tagAtMarker).toBe(true);
+  expect((await markers(both.gh)).length).toBe(1);
+  expect(parseRunRecord(both.read()).filter((e) => e.conflict_round).length).toBe(1);
+  expect(await both.k()).toBe(2);
+  expect(both.capCheck()).toMatchObject({ ok: true, conflictUsd: 9.5 });
+});
+
+test("test_212_conflict_round_rejected_at_round_k_counts_as_today", async () => {
+  // The #196 flow puts the re-review after a GREEN conflict round at round K (2 review reworks + the exempt conflict rework → round 3,
+  // K=3). A rejection there does not go to factory:rework: the REAL review stage (runStage → nextState → reviewRoundsExhausted) sends it
+  // to factory:needs-human — or, with the one #174 self-restart unused, to a restart rework. Either way the review rejected the conflict
+  // round, so its cost counts AS TODAY (no exempt cost behind a human hand-off).
+  const reviewAtK = async (inc, { restart }) => {
+    const transitions = [];
+    const kDeps = makeKRestartDeps212({ gh: inc.gh, issue: 212 });
+    inc.gh.label = "factory:awaiting-review";
+    const code = await runStage({
+      stage: "review", issue: 212, runnerId: "gha-r", runId: "r",
+      deps: {
+        charterReady: async () => true, trustWorkspace: async () => {}, claim: async () => ({ ok: true }), assertHandoff: async () => ({ ok: true }),
+        heartbeat: async () => ({ stop() {} }), release: async () => true, gates: async () => null,
+        buildContext: async () => ({ roster: ["correctness", "qa"], orchestration: "workflow", limits: { K: 3 } }),
+        claudeP: async () => ({ is_error: false, result: "{}", usage: { input_tokens: 3 }, total_cost_usd: 1, num_turns: 2, terminal_reason: "end_turn" }),
+        verifyStage: () => ({ ok: true, reasons: [], data: { schema: "factory.review.v1", issue: 212, pr: 31, head_sha: inc.repo.approved, round: 1, orchestration: "workflow", verdicts: [reject212("correctness"), approve212("qa")] } }),
+        writeHandoff: async () => {},
+        reviewRounds: kDeps.reviewRounds,
+        ...(restart ? { kRestartState: kDeps.kRestartState, postKRestartBrief: kDeps.postKRestartBrief } : {}),
+        transition: async ({ to, reason, by }) => { transitions.push(to); return transition({ gh: inc.gh, issue: 212, to, reason, by, stage: "review", env: {} }); },
+        runRecord: (lines) => appendRunRecord({ root: inc.recRoot, issue: 212, stage: "review", runnerId: "gha-r", lines }),
+      },
+    });
+    return { code, transitions };
+  };
+  for (const restart of [false, true]) {
+    const inc = await incident212();
+    const r1 = await implementRound212({ gh: inc.gh, repo: inc.repo, recRoot: inc.recRoot, runnerId: "gha-2", cost: 9.5, builder: resolveOnly212 });
+    expect(r1.code).toBe(0);
+    expect(parseRunRecord(inc.read()).at(-1)).toMatchObject({ conflict_round: true });
+    expect(await inc.k()).toBe(2);
+    expect(inc.capCheck()).toMatchObject({ ok: true, usd: 62.38, conflictUsd: 9.5, conflictRuns: 1 });
+    const rv = await reviewAtK(inc, { restart });
+    expect(rv.transitions, `restart=${restart}`).toEqual([restart ? "factory:rework" : "factory:needs-human"]);
+    expect(inc.gh.label).toBe(restart ? "factory:rework" : "factory:needs-human");
+    // today's cost: 62.38 + the conflict round 9.50 + this review 1 = 72.88 — the conflict round is counted and named as revoked
+    expect(inc.capCheck(), `restart=${restart}`).toMatchObject({ ok: false, usd: 72.88, conflictRevokedUsd: 9.5, conflictRevokedRuns: 1 });
+    expect(inc.capCheck(), `restart=${restart}`).not.toHaveProperty("conflictUsd");
+  }
+});
+
+// ── #212 self-critique (skeptic, round 3) — the review that DECIDES on a conflict round decides on today's round; a crashed or parked
+// re-review is not a rejection. Fixtures: the real merge stage, the real implement round (incident212's pieces), and the REAL review stage
+// (runStage → reviewRounds from the production K deps → nextState → transition()), so the round the deciding review uses is observed.
+import { reviewRoundOf } from "../bin/run-stage.js";
+/** incident212 with `reworks` review reworks before the approval (the #196 flow with a different round count) */
+async function incidentN212(reworks) {
+  const gh = issue212();
+  const repo = await repo212();
+  const recRoot = mkdtempSync(join(tmpdir(), "rec212n-"));
+  for (let i = 0; i < reworks; i++) await reviewRework212(gh, repo.approved);
+  await review212(gh, repo.approved, [approve212("correctness"), approve212("qa")], "approved");
+  appendRunRecord({ root: recRoot, issue: 212, stage: "implement", runnerId: "gha-1", lines: ["verify: ok", usageLine({ usage: {}, total_cost_usd: 62.38, num_turns: 9, terminal_reason: "end_turn" })] });
+  gh.label = "factory:approved";
+  expect(await runMergeStage212({
+    issue: 212, defaultBranch: "main", headSha: repo.approved,
+    d: { prInfo: async () => ({ number: 31, state: "OPEN", mergeable: "CONFLICTING" }), transition: ({ to, reason, cause }) => transition({ gh, issue: 212, to, reason, cause, stage: "merge", env: {} }) },
+    record: () => {}, refusal: () => [],
+  })).toBe(2);
+  const read = () => readFileSync(join(recRoot, "docs/factory/runs/212.md"), "utf8");
+  const k = () => makeKRestartDeps212({ gh, issue: 212 }).reviewRounds();
+  const capCheck = () => budgetCheck212({ charter: { budget: { usd_per_issue: 62.38 } }, recordText: read() });
+  return { gh, repo, recRoot, read, k, capCheck };
+}
+/** the real review stage on `inc`; only the approved/blocked/needs-info transitions are faked (its merge-side requirements are not this test's subject) */
+async function reviewStage212(inc, { K = 3, verdicts, decision, runnerId = "gha-r", throwAt = null, dependencyBlock = null, budget = false }) {
+  const transitions = [], handoffRounds = [];
+  const kDeps = makeKRestartDeps212({ gh: inc.gh, issue: 212 });
+  inc.gh.label = "factory:awaiting-review";
+  const code = await runStage({
+    stage: "review", issue: 212, runnerId, runId: runnerId.replace(/^gha-/, ""),
+    deps: {
+      charterReady: async () => true, trustWorkspace: async () => {}, claim: async () => ({ ok: true }), assertHandoff: async () => ({ ok: true }),
+      heartbeat: async () => ({ stop() {} }), release: async () => true, gates: async () => null,
+      ...(budget ? { lifetimeBudget: async () => inc.capCheck() } : {}),
+      ...(dependencyBlock ? { dependencyBlock } : {}),
+      buildContext: async () => ({ roster: ["correctness", "qa"], orchestration: "workflow", limits: { K } }),
+      claudeP: async () => ({ is_error: false, result: "{}", usage: { input_tokens: 3 }, total_cost_usd: 1, num_turns: 2, terminal_reason: "end_turn" }),
+      verifyStage: () => {
+        if (throwAt === "verify") throw new TypeError("Cannot read properties of undefined (reading 'verdicts')");
+        return { ok: true, reasons: [], data: { schema: "factory.review.v1", issue: 212, pr: 31, head_sha: inc.repo.approved, round: 1, orchestration: "workflow", verdicts, ...(decision ? { decision } : {}) } };
+      },
+      writeHandoff: async ({ data } = {}) => { handoffRounds.push(data?.round); },
+      reviewRounds: kDeps.reviewRounds,
+      transition: async ({ to, reason, by, cause }) => {
+        transitions.push(to);
+        if (to === "factory:approved" || to === "factory:blocked" || to === "factory:needs-info") { inc.gh.label = to; return { ok: true, to }; }
+        return transition({ gh: inc.gh, issue: 212, to, reason, by, cause, stage: "review", env: {} });
+      },
+      runRecord: (lines) => appendRunRecord({ root: inc.recRoot, issue: 212, stage: "review", runnerId, lines }),
+    },
+  });
+  const evidence = [...inc.read().matchAll(new RegExp(`^review-evidence: run_id=${runnerId.replace(/^gha-/, "")} .* round=(\\S+) decision=(\\S+)`, "gm"))].map((m) => [m[1], m[2]]);
+  return { code, transitions, handoffRounds, evidence };
+}
+
+test("test_212_rejecting_rereview_decides_on_todays_round", async () => {
+  // One review rework, approval at round 2, the real merge-stage CONFLICTING, then a GREEN conflict round. Today (no exemption) the re-review
+  // is round 3 = 1 review rework + the conflict rework + 1. A REJECTING re-review must decide on that round — dw6 "counts K as today":
+  // with K=3 it goes to factory:needs-human (not one extra exempt factory:rework round), and its handoff and evidence line say round 3.
+  const atK = await incidentN212(1);
+  expect((await implementRound212({ gh: atK.gh, repo: atK.repo, recRoot: atK.recRoot, runnerId: "gha-2", cost: 9.5, builder: resolveOnly212 })).code).toBe(0);
+  expect(await atK.k()).toBe(1);                                           // the finished-looking conflict round is exempt while undecided…
+  const rj = await reviewStage212(atK, { K: 3, verdicts: [reject212("correctness"), approve212("qa")] });
+  expect(rj.transitions).toEqual(["factory:needs-human"]);                 // …but the rejection is decided at today's round 3 = K
+  expect(atK.gh.label).toBe("factory:needs-human");
+  expect(rj.handoffRounds).toEqual([3]);
+  expect(rj.evidence).toEqual([["3", "rework"]]);
+  // …and the same when the review handoff carries its own decision (the aggregation is skipped; the round is still today's).
+  const carried = await incidentN212(1);
+  expect((await implementRound212({ gh: carried.gh, repo: carried.repo, recRoot: carried.recRoot, runnerId: "gha-2", cost: 9.5, builder: resolveOnly212 })).code).toBe(0);
+  const rc = await reviewStage212(carried, { K: 3, verdicts: [reject212("correctness"), approve212("qa")], decision: "rework" });
+  expect(rc.transitions).toEqual(["factory:needs-human"]);
+  expect(rc.handoffRounds).toEqual([3]);
+
+  // K=4: the same rejection is today's round 3 → factory:rework, and the next review is round 4 — consecutive, no gap in the issue's rounds.
+  const below = await incidentN212(1);
+  expect((await implementRound212({ gh: below.gh, repo: below.repo, recRoot: below.recRoot, runnerId: "gha-2", cost: 9.5, builder: resolveOnly212 })).code).toBe(0);
+  const rj4 = await reviewStage212(below, { K: 4, verdicts: [reject212("correctness"), approve212("qa")] });
+  expect(rj4.transitions).toEqual(["factory:rework"]);
+  expect(rj4.handoffRounds).toEqual([3]);
+  expect(await below.k()).toBe(3);                                          // 1 review rework + the (revoked) conflict rework + this reject
+  expect(reviewRoundOf(await below.k(), null).round).toBe(4);
+
+  // Control (dw5 unchanged): an APPROVING re-review keeps the exemption — after 2 review reworks it is round 3 = K, not 4, so merge's `round > K` quorum check never trips on it.
+  const ok = await incidentN212(2);
+  expect((await implementRound212({ gh: ok.gh, repo: ok.repo, recRoot: ok.recRoot, runnerId: "gha-2", cost: 9.5, builder: resolveOnly212 })).code).toBe(0);
+  const ap = await reviewStage212(ok, { K: 3, verdicts: [approve212("correctness"), approve212("qa")] });
+  expect(ap.transitions).toEqual(["factory:approved"]);
+  expect(ap.handoffRounds).toEqual([3]);                                    // 2 review reworks + 1: the conflict rework is not a round
+  expect(ap.evidence).toEqual([["3", "approved"]]);
+  expect(await ok.k()).toBe(2);
+});
+
+test("test_212_crashed_or_parked_rereview_keeps_the_conflict_exemption", async () => {
+  // The #196 cap scenario: the record is AT the lifetime cap and the GREEN conflict round's $9.50 is excluded. The re-review first crashes
+  // (the real runStage catch: engine-crash block, `transition: factory:blocked (cause=engine-crash)`), then is parked on a harness issue
+  // (`transition: factory:needs-info`). Neither ended the review — the sweeper/unpark retries it — so neither revokes the exclusion, and the
+  // retried review passes the budget gate at entry and approves. dw6 revokes only on a review that ends anywhere other than factory:approved.
+  const inc = await incident212();
+  expect((await implementRound212({ gh: inc.gh, repo: inc.repo, recRoot: inc.recRoot, runnerId: "gha-2", cost: 9.5, builder: resolveOnly212 })).code).toBe(0);
+  expect(inc.capCheck()).toMatchObject({ ok: true, usd: 62.38, conflictUsd: 9.5, conflictRuns: 1 });
+
+  const crash = await reviewStage212(inc, { runnerId: "gha-r1", verdicts: [], throwAt: "verify", budget: true });
+  expect(crash.code).toBe(1);
+  expect(crash.transitions).toEqual(["factory:blocked"]);
+  expect(inc.read()).toMatch(/^engine-crash: stage=review runner=gha-r1 /m);
+  expect(inc.read()).toMatch(/^transition: factory:blocked \(cause=engine-crash\)$/m);
+  expect(inc.capCheck()).toMatchObject({ ok: true, usd: 62.38, conflictUsd: 9.5, conflictRuns: 1 });
+  expect(inc.capCheck()).not.toHaveProperty("conflictRevokedRuns");
+
+  const park = await reviewStage212(inc, { runnerId: "gha-r2", verdicts: [], dependencyBlock: async () => 300, budget: true });
+  expect(park.code).toBe(0);
+  expect(park.transitions).toEqual(["factory:needs-info"]);
+  expect(inc.read()).toMatch(/^transition: factory:needs-info$/m);
+  expect(inc.capCheck()).toMatchObject({ ok: true, usd: 62.38, conflictUsd: 9.5 });
+  expect(inc.capCheck()).not.toHaveProperty("conflictRevokedRuns");
+
+  const retry = await reviewStage212(inc, { runnerId: "gha-r3", verdicts: [approve212("correctness"), approve212("qa")], budget: true });
+  expect(inc.read()).not.toMatch(/REFUSED/);
+  expect(retry.transitions).toEqual(["factory:approved"]);
+  expect(inc.gh.label).toBe("factory:approved");
+  // after it: 62.38 + this review's own $1 (the crashed run's $1 is the engine-crash exclusion); the conflict round's $9.50 stays excluded
+  expect(inc.capCheck()).toMatchObject({ usd: 63.38, conflictUsd: 9.5, conflictRuns: 1, engineRuns: 1 });
+  expect(inc.capCheck()).not.toHaveProperty("conflictRevokedRuns");
+
+  // Control: a re-review that really rejects still revokes (the crash/park carve-out is not a blanket pass).
+  const rej = await incident212();
+  expect((await implementRound212({ gh: rej.gh, repo: rej.repo, recRoot: rej.recRoot, runnerId: "gha-2", cost: 9.5, builder: resolveOnly212 })).code).toBe(0);
+  await reviewStage212(rej, { runnerId: "gha-r1", verdicts: [], throwAt: "verify" });
+  await reviewStage212(rej, { runnerId: "gha-r2", verdicts: [reject212("correctness"), approve212("qa")] });
+  expect(rej.capCheck()).toMatchObject({ ok: false, conflictRevokedUsd: 9.5, conflictRevokedRuns: 1 });
+});
