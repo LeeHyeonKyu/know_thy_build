@@ -124,14 +124,32 @@ export function stageClaudeEnv({ root, stage, harnessIssue = false, harness = nu
  *
  * 세션의 모양(ADR-039):
  *   - 시스템 프롬프트 = 역할 md의 본문(`.claude/agents/factory-<stage>.md`, frontmatter는 설정이지 지시가 아니라 뺀다).
- *   - 모델 = 역할의 모델(`loaded`의 roster가 실은 roles.toml 값, 없으면 md frontmatter의 `model`) — 워크플로의 `agent()`와 같다.
+ *   - 역할 md 경로와 모델 = roles.toml(`directRoleSpec` — `[triage]`·`[retro.analyst]`의 `agent`·`model`), 모델이 없으면
+ *     `loaded`의 roster, 그것도 없으면 md frontmatter의 `model` — 워크플로의 `agent()`와 같은 출처다.
  *   - 쓰기 도구는 **argv에서** 거부한다(`--disallowedTools`, `DENY_WRITES_TOOLS`) — frontmatter의 `deny-all-writes.sh` 훅이
  *     `--system-prompt` 세션에도 걸리는지는 M0에서 확인할 수 없으므로 그것에 기대지 않는다(plan d1).
+ *   - 쓸 수 있는 도구 집합 자체를 역할의 `tools:`로 **좁힌다**(`--tools`). 워크플로 경로에서 그 목록은 화이트리스트이고,
+ *     `--allowedTools`는 사전 승인일 뿐 제한이 아니다 — 좁히지 않으면 `.claude/settings.json`이 여는 `Agent`·`Workflow`로
+ *     세션이 쓰기 가능한 자식을 띄울 수 있다(자식에게 부모의 거부 목록이 이어지는지는 확인되지 않았다). 그래서 띄우는
+ *     도구(`Agent`·`Task`·`Workflow`)는 거부 목록에도 넣는다(`DIRECT_DENY_TOOLS`) — `--tools`가 무시되는 CLI에서도 닫히게.
  *   - 나머지 가드(`dontAsk`·`--settings`·`--max-turns`·예산·`FACTORY_STAGE`)는 디스패처 세션과 같다.
  * 스테이지 산출물은 그 세션의 **최종 메시지**다. `issue`·`orchestration`·`guarantee`는 에이전트가 아니라 러너가 찍는다.
  */
 export const DIRECT_GUARANTEE = "verified";
 export const DIRECT_AGENT_MD = Object.freeze({ triage: ".claude/agents/factory-triage.md", retro: ".claude/agents/factory-retro.md" });
+/** 직접 세션이 거부하는 도구: 쓰기 도구 + 다른 세션을 띄우는 도구(읽기 전용 역할이 쓰기 가능한 자식에게 일을 넘기지 못하게). */
+export const DIRECT_DENY_TOOLS = Object.freeze([...DENY_WRITES_TOOLS, "Agent", "Task", "Workflow"]);
+/**
+ * 이 직접 스테이지의 역할 정의 — roles.toml(`[triage]`, `[retro.analyst]`)의 `agent`(md 경로)·`model`. 워크플로의 `agent()`가
+ * 읽는 곳과 같은 출처라, 운영자가 roles.toml을 바꾸면 두 경로가 같이 바뀐다. 이름이 없으면 기본 md·모델 없음(frontmatter가 정한다).
+ */
+export function directRoleSpec(roles, stage) {
+  const def = stage === "retro" ? roles?.retro?.analyst : roles?.[stage];
+  return {
+    md: typeof def?.agent === "string" && def.agent ? def.agent : DIRECT_AGENT_MD[stage],
+    model: typeof def?.model === "string" && def.model ? def.model : null,
+  };
+}
 /** 이 런이 직접 경로인가 — 실효 orchestration(컨텍스트가 실은 값)이 `agent`이고 스테이지가 단일 에이전트 스테이지일 때만. */
 export const isDirectAgentRun = ({ stage, orchestration }) => orchestration === "agent" && DIRECT_AGENT_STAGES.includes(stage);
 
@@ -142,7 +160,7 @@ export const isDirectAgentRun = ({ stage, orchestration }) => orchestration === 
 export function directAgentRole(mdText, { model = null } = {}) {
   const { data, body } = parseFrontmatter(String(mdText ?? ""));
   const tools = (typeof data.tools === "string" ? data.tools.split(",") : Array.isArray(data.tools) ? data.tools : [])
-    .map((t) => String(t).trim()).filter((t) => t && !DENY_WRITES_TOOLS.includes(t));
+    .map((t) => String(t).trim()).filter((t) => t && !DIRECT_DENY_TOOLS.includes(t));
   return { systemPrompt: body.trim(), model: model || (typeof data.model === "string" && data.model ? data.model : null), tools };
 }
 
@@ -152,12 +170,14 @@ export function directAgentRole(mdText, { model = null } = {}) {
  */
 export function directAgentClaudeArgs({ prompt, systemPrompt, model = null, tools = [], maxTurns, settingsPath, charter }) {
   if (!systemPrompt) throw new Error("direct agent: the role md has no body to use as the system prompt");
+  const allowed = tools.filter((t) => !DIRECT_DENY_TOOLS.includes(t));
+  // 도구 집합을 역할의 목록으로 좁힌다 — 목록이 비면 "기본 도구 전부"로 떨어지지 않게 띄우지 않는다(fail closed).
+  if (!allowed.length) throw new Error("direct agent: the role md names no read tools (`tools:`) to restrict the session to");
   const args = ["-p", prompt, "--system-prompt", systemPrompt];
   if (model) args.push("--model", model);
-  // 디스패처는 자기 커맨드 md의 `allowed-tools`로 Read를 받았다 — 직접 세션에는 그 파일이 없으므로 역할의 읽기 도구를 여기서 연다(`dontAsk`가 묻지 않고 거부하지 않게).
-  const allowed = tools.filter((t) => !DENY_WRITES_TOOLS.includes(t));
-  if (allowed.length) args.push("--allowedTools", allowed.join(","));
-  args.push("--disallowedTools", DENY_WRITES_TOOLS.join(","), "--permission-mode", "dontAsk", "--max-turns", String(maxTurns), "--output-format", "json", "--settings", settingsPath);
+  // `--tools`는 쓸 수 있는 도구 자체를 정하고, `--allowedTools`는 그것을 `dontAsk` 아래서 묻지 않고 승인한다(디스패처는 자기 커맨드 md의 `allowed-tools`로 받았다).
+  args.push("--tools", allowed.join(","), "--allowedTools", allowed.join(","));
+  args.push("--disallowedTools", DIRECT_DENY_TOOLS.join(","), "--permission-mode", "dontAsk", "--max-turns", String(maxTurns), "--output-format", "json", "--settings", settingsPath);
   if (charter?.budget?.usd_per_stage) args.push("--max-budget-usd", String(charter.budget.usd_per_stage));
   return args;
 }
@@ -214,17 +234,48 @@ export const directAgentLine = ({ stage, out }) =>
  *   ② 역할 md를 못 읽거나 비었어도 같은 자리로 간다(역할 없는 세션을 띄우지 않는다).
  *   ③ 봉투가 정상이면 러너의 도장을 찍는다(`stampDirectArtifact`).
  */
-export function makeStageClaudeP({ root, stage, issue, run: runner = run, getHarness, getCharter, readFile = (p) => readFileSync(p, "utf8"), record = () => {} }) {
-  const refuse = (reason) => { try { record(`direct agent: refused before spawning — ${reason}`); } catch { /* 기록 실패가 거부를 막지 않는다 */ } return { is_error: true, subtype: "factory_refused", result: reason, num_turns: 0 }; };
+export function makeStageClaudeP({ root, stage, issue, run: runner = run, getHarness, getCharter, getRoles = () => loadRoles(root), readFile = (p) => readFileSync(p, "utf8"), record = () => {} }) {
+  const outDir = join(root, ".factory/out");
+  /*
+   * 거부도 이 런의 산출물을 **남긴다**: 거부 봉투로 `<stage>.json`·`<stage>.envelope.json`을 덮는다. 그러지 않으면 지난 런의
+   * 파일(다른 이슈의 유효한 판정일 수도 있다)이 이 런의 needs-human 옆에 그대로 남아, 사람과 `bin/verify-stage.js`가
+   * 그것을 이 런의 출력으로 읽는다.
+   */
+  const refuse = (reason) => {
+    try { record(`direct agent: refused before spawning — ${reason}`); } catch { /* 기록 실패가 거부를 막지 않는다 */ }
+    const out = { is_error: true, subtype: "factory_refused", result: reason, num_turns: 0 };
+    try { mkdirSync(outDir, { recursive: true }); for (const f of [`${stage}.json`, `${stage}.envelope.json`]) writeFileSync(join(outDir, f), JSON.stringify(out)); } catch { /* 기록 실패가 거부를 막지 않는다 */ }
+    return out;
+  };
+  /**
+   * 세션이 **실제로 읽는** 파일(`context.json`·`loaded.json`)이 이 런의 이슈 것인가 — 메모리의 페이로드가 맞아도 디스크가 지난
+   * 런의 것이면 에이전트는 그것으로 판정한다. 파일이 없으면 판정할 재료가 없을 뿐 다른 이슈로 판정하지는 않으므로 통과,
+   * 있는데 못 읽거나 이슈가 다르면 거부 사유를 돌려준다.
+   */
+  const staleOnDisk = () => {
+    for (const [f, issueOf] of [["context.json", (o) => o?.issue?.number], ["loaded.json", (o) => o?.issue]]) {
+      const p = join(outDir, f);
+      if (!existsSync(p)) continue;
+      let o;
+      try { o = JSON.parse(readFileSync(p, "utf8")); } catch (e) { return `.factory/out/${f} unreadable — ${e?.message || e}`; }
+      if (Number(issueOf(o)) !== Number(issue)) return `context issue mismatch: .factory/out/${f} is for issue ${issueOf(o)}, this run is for ${issue}`;
+    }
+    return null;
+  };
   return async (ctx, { harnessIssue = false } = {}) => {
     const harness = getHarness(), charter = getCharter();
     const direct = isDirectAgentRun({ stage, orchestration: ctx?.orchestration });
     let args;
     if (direct) {
       if (Number(ctx?.loaded?.issue) !== Number(issue)) return refuse(`context issue mismatch: the context payload says ${ctx?.loaded?.issue}, this run is for ${issue}`);
+      const stale = staleOnDisk();
+      if (stale) return refuse(stale);
+      let roles = {};
+      try { roles = getRoles() || {}; } catch { roles = {}; }   // roles.toml이 없으면 기본 md와 roster/frontmatter의 모델로 간다
+      const spec = directRoleSpec(roles, stage);
       let role;
-      try { role = directAgentRole(readFile(join(root, DIRECT_AGENT_MD[stage])), { model: (ctx.loaded.roster || []).find((r) => r?.name === stage)?.model ?? null }); }
-      catch (e) { return refuse(`${DIRECT_AGENT_MD[stage]} unreadable — ${e?.message || e}`); }
+      try { role = directAgentRole(readFile(join(root, spec.md)), { model: spec.model ?? (ctx.loaded.roster || []).find((r) => r?.name === stage)?.model ?? null }); }
+      catch (e) { return refuse(`${spec.md} unreadable — ${e?.message || e}`); }
       try {
         args = directAgentClaudeArgs({ prompt: directTriagePrompt({ issue, loaded: ctx.loaded }), systemPrompt: role.systemPrompt, model: role.model, tools: role.tools, maxTurns: stageMaxTurns(harness, stage), settingsPath: join(root, ciSettingsFile(harnessIssue)), charter });
       } catch (e) { return refuse(e?.message || String(e)); }

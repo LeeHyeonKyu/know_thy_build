@@ -803,6 +803,53 @@ test("test_237_agent_mode_leaves_debate_stages_passing", async () => {
   expect(cli.reasons.filter((x) => /orchestration/.test(x))).toEqual([]);
   expect(cli.ok).toBe(true);
 
+  // implement and review — the GATED debate stages: a valid workflow handoff (stamped 'workflow') under the key
+  // `agent` goes through the real verify wiring (gates file, roster, agents log) to its normal end label, not needs-human.
+  const SHA = "c".repeat(40);
+  const GREEN = { schema: "factory.gates.v1", status: "GREEN", level: "unit", head_sha: SHA };
+  const debateRun = async (stage, handoff, { agentsLog = "", over = {} } = {}) => {
+    const c = await buildContext({ root: r, gh, issue: 30, stage });
+    expect(c.orchestration, stage).toBe("workflow");
+    writeFileSync(join(r, ".factory/out/agents.jsonl"), agentsLog);
+    const env = { is_error: false, result: JSON.stringify(handoff), num_turns: 4, total_cost_usd: 1 };
+    const moved = [], lines = [];
+    const d = {
+      charterReady: async () => true, trustWorkspace: async () => {}, claim: async () => ({ ok: true }),
+      heartbeat: async () => ({ stop() {} }), assertHandoff: async () => ({ ok: true }),
+      buildContext: async () => c, resetAgentsLog: async () => {}, claudeP: async () => env, gates: async () => GREEN,
+      verifyStage: makeStageVerifyDep({ root: r, stage, getCtx: () => c, getCharter: () => ({ never_automate: [] }), transcriptOf: () => "" }),
+      writeHandoff: async () => {}, transition: async (t) => { moved.push(t); return { ok: true, to: t.to }; },
+      runRecord: (l) => lines.push(...l), release: async () => true, ...over,
+    };
+    const code = await runStage({ stage, issue: 30, deps: d });
+    return { code, to: moved.map((t) => t.to), reasons: moved.map((t) => t.reason).filter(Boolean), lines, ctx: c };
+  };
+  const impl = await debateRun("implement", {
+    issue: 30, head_sha: SHA, pr: 31, gates: { status: "GREEN", level: "unit" }, verifier: { verdict: "accepted" },
+    orchestration: "workflow", guarantee: "structural",
+  }, { over: { selfGate: async () => ({ ok: true, ranChecks: ["gates"], findings: [] }), syncStageArtifact: () => {} } });
+  expect(impl.reasons.join(" | ")).not.toMatch(/orchestration/);
+  expect(impl.to).toEqual(["factory:in-progress", "factory:awaiting-review"]);   // the claim, then the hand-off
+  expect(impl.code).toBe(0);
+
+  const reviewCtx = await buildContext({ root: r, gh, issue: 30, stage: "review" });
+  expect(reviewCtx.roster.length).toBeGreaterThan(0);
+  const approve = (role) => ({ role, verdict: "approve", confidence: "high", must_fix: [], should_fix: [], verified: [] });
+  const rev = await debateRun("review", {
+    issue: 30, pr: 31, head_sha: SHA, round: 1, verdicts: reviewCtx.roster.map(approve), orchestration: "workflow", guarantee: "structural",
+  }, { agentsLog: reviewCtx.roster.flatMap((role, i) => [
+    JSON.stringify({ hook_event_name: "SubagentStart", agent_id: `r${i}`, agent_type: `reviewer-${role}` }),
+    JSON.stringify({ hook_event_name: "SubagentStop", agent_id: `r${i}`, agent_type: `reviewer-${role}` }),
+  ]).join("\n") + "\n" });
+  expect(rev.reasons.join(" | ")).not.toMatch(/orchestration/);
+  expect(rev.to).toEqual(["factory:approved"]);
+  expect(rev.code).toBe(0);
+  // the contrast that makes this bite: the SAME handoffs checked against the configured value (the pre-#237 wiring) fail
+  for (const [stage, h] of [["implement", { issue: 30, head_sha: SHA, pr: 31, verifier: { verdict: "accepted" }, orchestration: "workflow", guarantee: "structural" }]]) {
+    const v = makeStageVerifyDep({ root: r, stage, getCtx: () => ({ ...impl.ctx, orchestration: "agent" }), getCharter: () => ({ never_automate: [] }), transcriptOf: () => "" })({ out: { is_error: false, result: JSON.stringify(h) }, gates: GREEN });
+    expect(v.reasons).toContain("orchestration workflow != configured agent");
+  }
+
   // the changed meaning of `agent` and the direct-mode guarantee are written down, not decided silently
   const decisions = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "../../docs/factory/DECISIONS.md"), "utf8");
   const at = decisions.indexOf("## ADR-039");
