@@ -141,6 +141,8 @@ export function unhandledGateReason(gates) {
  * 브리프를 유계로 두는 이 자리만의 관례다.
  */
 export const GATE_LOG_FINDING_MAX = 300;
+/** sec1 — gates.js의 명령 게이트 `log` 꼬리 자르기 길이(`.slice(-2000)`). 이 길이의 log는 머리가 스크럽 전에 잘린 자리다. */
+const GATE_LOG_TAIL_CUT = 2000;
 
 /**
  * 1.4.23 (L26) gates-RED 가지의 finding들 — RED 게이트마다 `{check: "gate:<name>", blocking, detail}`.
@@ -150,13 +152,20 @@ export const GATE_LOG_FINDING_MAX = 300;
  * ① `scrubText` + `SECRET_ENV`(gates.js의 gates-detail과 같은 규칙 원천 — 새 정규식이 아니다)로 스크럽,
  * ② 개행 → 공백, ③ 코드펜스(```)를 깨뜨린다 — 코멘트의 JSON 블록은 `}` 뒤 첫 ```에서 끝나는 lazy 정규식으로 읽히므로
  * (issue-comments.js SELF_GATE_FINDINGS_JSON) 로그 속 `} ```` 하나가 블록을 잘라 findings 전체를 잃게 한다,
+ * ⓪ 생산자가 스크럽 전에 꼬리를 자른 log(`GATE_LOG_TAIL_CUT`자)는 잘린 첫 줄을 버린다(sec1),
  * ④ 앞 `GATE_LOG_FINDING_MAX`자. 스크럽이 자르기보다 먼저여야 경계에 걸친 비밀이 반쪽으로 새지 않는다.
  * log가 비어 있으면 예전 문구다. ` — ${reason}` 접미 규칙은 바뀌지 않는다.
  */
 export function gateRedFindings(gates, { env = process.env } = {}) {
   const secrets = SECRET_ENV.map((k) => env?.[k]).filter((v) => typeof v === "string" && v);
-  const logReason = (log) => {
-    if (typeof log !== "string" || !log.trim()) return "";
+  const logReason = (raw) => {
+    if (typeof raw !== "string") return "";
+    // sec1: a command gate's log is the RAW tail `(stderr + stdout).slice(-GATE_LOG_TAIL_CUT)` (gates.js), cut before any
+    // scrub — its head is that cut, and a secret split there is a remnant no scrub rule recognises. Such a log drops its
+    // partial first line; with no line break there is no safe head at all (→ the old wording).
+    const nl = raw.length >= GATE_LOG_TAIL_CUT ? raw.indexOf("\n") : -1;
+    const log = raw.length < GATE_LOG_TAIL_CUT ? raw : nl < 0 ? "" : raw.slice(nl + 1);
+    if (!log.trim()) return "";
     const one = scrubText(log, { secrets }).text.replace(/\s*[\r\n]+\s*/g, " ").replace(/`{3,}/g, (m) => "'".repeat(m.length)).trim();
     return one.slice(0, GATE_LOG_FINDING_MAX);
   };

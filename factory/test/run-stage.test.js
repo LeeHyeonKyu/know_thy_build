@@ -6754,3 +6754,40 @@ test("test_206_gate_with_ids_or_without_log_keeps_the_existing_detail", async ()
   // a whitespace-only log is no reason either
   expect(gateRedFindings(redGates({ x: { status: "RED", log: " \n\t\n" } }), { env: {} })[0].detail).toBe("gate x RED — failing: (no test names; see the gate log)");
 });
+
+// sec1 (#206 rework): a command gate's `log` is the RAW tail `(stderr + stdout).slice(-2000)` (gates.js:384) — cut BEFORE
+// any scrub. Its head is that cut, so a token split there is a remnant no scrub rule can recognise. Produced here by the
+// REAL runGates over a fake command, at every cut offset across a line holding a ghp_ token and an env secret.
+test("test_206_gate_red_finding_drops_the_unscrubbable_head_of_a_tail_cut_command_log", async () => {
+  const secret = "s3cr3t-Value-0123456789-abcdefXYZ";
+  const ghp = "ghp_" + "Ab3dE6gH9jK2mN5pQ8sT1vW4yZ7bC0eF3hJ6";
+  const env = { FACTORY_BOT_TOKEN: secret };
+  const h = { harness: { maturity: "M1" }, commands: { lint: "lint" }, gates: { required: ["lint"], fast: ["lint"], thresholds: {} }, test: {} };
+  const viaRunGates = async (stderr) => {
+    const run = makeFakeRun([{ match: (c, a) => c === "bash" && a[1] === "lint", result: { code: 1, stdout: "", stderr } }]);
+    return runGates({ run, cwd: "/repo", harness: h, level: "fast", quarantine: { quarantined: [] }, readFile: () => null, now: "2026-10-11T00:00:00Z" });
+  };
+  const tokenLine = `Error: remote rejected https://x-access-token:${ghp}@github.com auth=${secret}`;
+  const reason = "src/a.js:3:1 error no-unused-vars 'x' is defined but never used\n";
+  const leaks = [], lost = [];
+  for (let k = 1; k < tokenLine.length; k++) {
+    const pad = 2000 - (tokenLine.length - k) - 1 - reason.length;
+    const out = `${"old output\n".repeat(30)}${tokenLine}\n${reason}${"y".repeat(pad - 1)}\n`;
+    const gates = await viaRunGates(out);
+    const log = gates.gates.lint.log;
+    expect(log.length).toBe(2000);
+    expect(log.startsWith(tokenLine.slice(k)), `k=${k}`).toBe(true); // the producer's cut really lands inside the line
+    const [f] = gateRedFindings(gates, { env });
+    const body = selfGateRetryComment({ issue: 206, head: "d".repeat(40), attempt: 1, findings: [f] });
+    for (const o of [f.detail, body]) if (o.includes(ghp.slice(-8)) || o.includes(secret.slice(-8))) leaks.push(k);
+    if (!f.detail.startsWith("gate lint RED — src/a.js:3:1 error no-unused-vars")) lost.push(k);
+  }
+  expect(leaks).toEqual([]); // no cut offset publishes any remnant of either secret
+  expect(lost).toEqual([]); // and the reason after the cut line still reaches the builder
+  // a tail-cut log with no line break at all has no safe head: the old wording, not a remnant
+  const [flat] = gateRedFindings(await viaRunGates(`${tokenLine} ${"z".repeat(3000)}`.slice(0, 2500).replace(/\n/g, " ")), { env });
+  expect(flat.detail).toBe("gate lint RED — failing: (no test names; see the gate log)");
+  // a short log (not cut by the producer) keeps its first line — the must-not reason is never dropped
+  const [short] = gateRedFindings(redGates({ "must-not": { status: "RED", code: null, log: mustNotLog195() } }), { env });
+  expect(short.detail).toContain("factory/test/evidence.test.js");
+});
