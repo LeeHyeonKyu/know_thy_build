@@ -6631,6 +6631,49 @@ test("test_254_raised_tier_reaches_the_triage_handoff_and_label", async () => {
   expect(miss.labels).toEqual(["standard"]);
 });
 
+// #254 skeptic f1 — the test above hands makeVerifyStageDep its OWN getHarness, so main() could pass `() => null` (or go back to
+// an inline closure with no loadBearing) and production would silently never raise. This one closes the chain main() actually
+// runs: the dep is built BEFORE the harness exists (main builds deps first), main's own `makeCharterReady` then reads THIS repo's
+// real `.factory/harness.toml` through its `set`, and the same lazy getter must see it. The source pin then holds main()'s deps
+// object to exactly that getter over that variable — replace it with `() => null`, drop the dep, or stop assigning `harness`
+// from charterReady's `set`, and this fails.
+test("test_254_main_wires_the_charter_ready_harness_into_triage_verify", async () => {
+  const repoRoot = new URL("../..", import.meta.url).pathname;
+  const outRoot = mkdtempSync(join(tmpdir(), "rs-254-main-"));
+  const ctx = { roster: [], orchestration: "workflow", tier: "standard" };
+  const triageOut = (impact_paths) => ({ is_error: false, result: JSON.stringify({ schema: "factory.triage.v1", issue: 7, disposition: "ready", tier: "standard", impact_paths, reason: "r", orchestration: "workflow" }) });
+  let charter, harness;                                                    // main()'s two `let`s, filled only by charterReady
+  const verify = rs233.makeVerifyStageDep({ root: outRoot, stage: "triage", getCtx: () => ctx, getCharter: () => charter, getHarness: () => harness });
+
+  // before charterReady: no harness yet → the declared tier stands (the getter is lazy, not a snapshot)
+  const early = verify({ out: triageOut(["factory/bin/run-stage.js"]), gates: null });
+  expect([early.data.tier, early.data.load_bearing_hit]).toEqual(["standard", undefined]);
+
+  const ready = rs233.makeCharterReady({ root: repoRoot, set: (s) => { if ("charter" in s) charter = s.charter; if ("harness" in s) harness = s.harness; }, engineAt: () => false, log: () => {} });
+  await ready();
+  expect(harness?.load_bearing?.paths).toContain("factory/bin/run-stage.js");   // the real harness, read by the real reader
+
+  const hit = verify({ out: triageOut(["factory/lib/context.js", "factory/bin/run-stage.js"]), gates: null });
+  expect(hit.ok).toBe(true);
+  expect([hit.data.tier, hit.data.tier_declared]).toEqual(["load-bearing", "standard"]);
+  expect(hit.data.load_bearing_hit).toEqual([{ path: "factory/bin/run-stage.js", glob: "factory/bin/run-stage.js" }]);
+  const miss = verify({ out: triageOut(["factory/lib/context.js"]), gates: null });
+  expect([miss.data.tier, miss.data.load_bearing_hit]).toEqual(["standard", undefined]);
+
+  // main()'s own wiring: the deps object takes verifyStage from makeVerifyStageDep with exactly these getters, and
+  // charterReady's `set` is what fills the `harness` those getters close over.
+  const src = readFileSync(new URL("../bin/run-stage.js", import.meta.url), "utf8");
+  const mainSrc = src.slice(src.indexOf("async function main()"));
+  const depsBlock = mainSrc.slice(mainSrc.indexOf("const deps = {"), mainSrc.indexOf("\n  };\n", mainSrc.indexOf("const deps = {")));
+  const wired = depsBlock.match(/\n {4}verifyStage:\s*makeVerifyStageDep\(\{([^}]*)\}\)/);
+  expect(wired, "main() must build verifyStage from makeVerifyStageDep").not.toBeNull();
+  expect(wired[1]).toMatch(/getHarness:\s*\(\)\s*=>\s*harness\s*[,}]?/);
+  expect(wired[1]).toMatch(/getCharter:\s*\(\)\s*=>\s*charter\s*[,}]?/);
+  expect(depsBlock.match(/\n {4}verifyStage\s*:/g)).toHaveLength(1);            // no second, inline key overriding it
+  expect(depsBlock).toMatch(/charterReady:\s*makeCharterReady\(\{\s*root,\s*set:\s*\(s\)\s*=>\s*\{[^}]*if \("harness" in s\) harness = s\.harness;/);
+  expect(mainSrc.slice(0, mainSrc.indexOf("const deps = {"))).toMatch(/\blet\b[^;]*\bharness\b/);
+});
+
 // ── #230 — one door into the queue: the triage entry re-runs admission; local entry admits ───────────────────────
 // Every test here drives the real door: real transition(), real makeQueueAdmission (through main's `makeStageAdmission`
 // where the wiring is the point), a fake gh that keeps labels and comments. Verdicts come from the fake gh's state —
