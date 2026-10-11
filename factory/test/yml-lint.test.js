@@ -409,7 +409,7 @@ test("every agent-token workflow mints a GitHub App token before checkout and ne
     const late = y.indexOf("- name: Factory token for the trailing steps (re-minted — the first one may have expired)");
     expect(late, f).toBeGreaterThan(y.indexOf("- name: Upload run outputs"));
     expect(late, f).toBeLessThan(y.indexOf("- name: Aborted cleanup"));
-    expect(y, f).toMatch(/- name: Factory token for the trailing steps \(re-minted — the first one may have expired\)\n {8}id: factory-token-late\n {8}if: \$\{\{ always\(\) && env\.FACTORY_APP_CONFIGURED == 'true' \}\}\n {8}uses: actions\/create-github-app-token@v3\n/);
+    expect(y, f).toMatch(/- name: Factory token for the trailing steps \(re-minted — the first one may have expired\)\n {8}id: factory-token-late\n {8}if: \$\{\{ always\(\) && env\.FACTORY_APP_CONFIGURED == 'true' \}\}\n {8}uses: actions\/create-github-app-token@v3\n {8}with:\n {10}app-id: [^\n]*\n {10}private-key: [^\n]*\n(?: {8}#[^\n]*\n)* {8}continue-on-error: true\n/);
     expect(y, f).toMatch(/- name: Aborted cleanup\n {8}if: always\(\) && job\.status != 'success'\n {8}env:\n {10}GH_TOKEN: \$\{\{ steps\.factory-token-late\.outputs\.token \|\| steps\.factory-token\.outputs\.token \|\| secrets\.FACTORY_BOT_TOKEN \}\}\n/);
     expect(y, f).toMatch(/- name: Sweep\n {8}if: always\(\)\n {8}env:\n {10}GH_TOKEN: \$\{\{ steps\.factory-token-late\.outputs\.token \|\| steps\.factory-token\.outputs\.token \|\| secrets\.FACTORY_BOT_TOKEN \}\}\n/);
     expect((y.match(/uses: actions\/create-github-app-token@v3/g) || []).length, f).toBe(2);

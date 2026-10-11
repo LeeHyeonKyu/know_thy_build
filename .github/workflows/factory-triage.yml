@@ -171,6 +171,8 @@ jobs:
         with:
           app-id: ${{ secrets.FACTORY_APP_ID }}
           private-key: ${{ secrets.FACTORY_APP_PRIVATE_KEY }}
+        # 일시적 민팅 실패가 정착된 스테이지를 failure로 만들고 `Aborted cleanup`을 쏘면 안 된다 — 그때는 첫 토큰·PAT 폴백으로 간다.
+        continue-on-error: true
       - name: Aborted cleanup
         if: always() && job.status != 'success'
         env:
