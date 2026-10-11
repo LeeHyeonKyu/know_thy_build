@@ -225,13 +225,68 @@ export function deriveReworkPins({ mustFix = [], doneWhen = [] } = {}) {
 }
 
 /**
+ * #239 (M-7, gap P-13) — a dissent entry is a **sign-off objection** when its id is exactly `signoff-<its own role>`
+ * (case-insensitive, role non-empty) — the id the plan workflow injects for an objection that survived sign-off. A bare
+ * `signoff-` prefix is not enough: any synthesized medium risk could otherwise escape rule (a) by its name (plan d4).
+ */
+const isSignoffObjection = (d) => {
+  const role = typeof d?.role === "string" ? d.role.trim() : "";
+  return !!role && typeof d?.id === "string" && d.id.trim().toLowerCase() === `signoff-${role.toLowerCase()}`;
+};
+const SIGNOFF_TEXT_MAX = 120;
+
+/**
+ * #239 — what the plan verifier does to a plan **before** it checks it, computed in one place so the validator and
+ * `verifyStage` (which writes it back into the handoff) can never disagree.
+ *
+ * (M-9, gap P-15) When `done_when` is over `maxDoneWhen` and the items the planner wrote itself (everything not marked
+ * `source: "skeptic"`) fit under it, the overflowing skeptic-marked items — the trailing ones — are dropped. Unmarked
+ * overflow is never truncated (the issue's positional fallback contradicts its own "planner 7 is rejected"; plan non_goal).
+ * Truncation runs before rule (a), so a dissent covered only by a dropped item is still reported as uncovered.
+ *
+ * (M-7) Sign-off objections that no kept done_when covers are listed as `signoffObjections` — rule (a) does not demand a
+ * cover for them; they stay in `dissent_log` and are surfaced as `signoff_objections[]` plus a record line instead
+ * (supersedes the second half of 1.4.43 — see DECISIONS.md #239).
+ *
+ * `notes` are run-record lines, never reasons: run-stage repairs only when every reason is a validator reason.
+ */
+export function normalizePlanHandoff(plan, { maxDoneWhen = 6 } = {}) {
+  const all = Array.isArray(plan?.done_when) ? plan.done_when : [];
+  const dissent = Array.isArray(plan?.dissent_log) ? plan.dissent_log : [];
+  let doneWhen = all;
+  const dropped = [];
+  const isSkeptic = (d) => d?.source === "skeptic";
+  if (all.length > maxDoneWhen && all.filter((d) => !isSkeptic(d)).length <= maxDoneWhen) {
+    let excess = all.length - maxDoneWhen;
+    const drop = new Set();
+    for (let i = all.length - 1; i >= 0 && excess > 0; i--) if (isSkeptic(all[i])) { drop.add(i); excess--; }
+    doneWhen = all.filter((_, i) => !drop.has(i));
+    all.forEach((d, i) => { if (drop.has(i)) dropped.push(typeof d?.id === "string" && d.id ? d.id : `dw${i + 1}`); });
+  }
+  const covered = new Set();
+  for (const d of doneWhen) if (Array.isArray(d?.covers)) for (const c of d.covers) covered.add(String(c).trim().toLowerCase());
+  const signoffObjections = dissent
+    .filter((d) => isSignoffObjection(d) && !covered.has(d.id.trim().toLowerCase()))
+    .map((d) => {
+      const raw = typeof d.objection === "string" ? d.objection : typeof d.text === "string" ? d.text : "";
+      return { id: d.id, role: d.role.trim(), text: raw.replace(/\s+/g, " ").trim().slice(0, SIGNOFF_TEXT_MAX) };
+    });
+  const notes = [
+    ...signoffObjections.map((o) => `plan: unresolved sign-off objection from ${o.role}: ${o.text}`),
+    ...(dropped.length ? [`plan: skeptic items beyond max_done_when dropped: ${dropped.join(", ")}`] : []),
+  ];
+  return { doneWhen, dropped, signoffObjections, notes };
+}
+
+/**
  * `plan.v1` 핸드오프를 CHARTER의 plan 규칙으로 검사한다. 반환은 사유 문자열 배열(빈 배열 = 유효).
  * 스키마 검사와 별개다 — 스키마는 "모양", 이것은 "계약".
+ * #239 — 검사 대상은 `normalizePlanHandoff`가 잘라 낸 뒤의 done_when이다(skeptic 표시 초과분 제외).
  */
 export function validatePlanHandoff(plan, { maxDoneWhen = 6, issueBody = "" } = {}) {
   const reasons = [];
   if (!plan || typeof plan !== "object") return reasons;
-  const doneWhen = Array.isArray(plan.done_when) ? plan.done_when : [];
+  const { doneWhen, dropped } = normalizePlanHandoff(plan, { maxDoneWhen });
   const dissent = Array.isArray(plan.dissent_log) ? plan.dissent_log : [];
 
   // (a) 위험은 risks가 아니라 done_when으로 나온다.
@@ -241,8 +296,10 @@ export function validatePlanHandoff(plan, { maxDoneWhen = 6, issueBody = "" } = 
   for (const d of doneWhen) if (Array.isArray(d?.covers)) for (const c of d.covers) covered.add(String(c).trim().toLowerCase());
   const uncoveredEntries = dissent
     // id가 없는 항목은 위치로 부른다 — 검증기가 id를 발명하는 게 아니라, 사람이 셀 수 있는 이름을 준다.
-    .map((d, i) => ({ id: typeof d?.id === "string" && d.id ? d.id : `d${i + 1}`, severity: d?.severity, hasId: typeof d?.id === "string" && !!d.id }))
+    .map((d, i) => ({ index: i, id: typeof d?.id === "string" && d.id ? d.id : `d${i + 1}`, severity: d?.severity, hasId: typeof d?.id === "string" && !!d.id }))
     .filter(({ severity }) => !(typeof severity === "string" && SEVERITY_RANK[severity] < SEVERITY_RANK.medium))
+    // #239 (M-7) — a sign-off objection needs no cover; it is surfaced by normalizePlanHandoff instead.
+    .filter(({ index }) => !isSignoffObjection(dissent[index]))
     .filter(({ id }) => !covered.has(String(id).trim().toLowerCase()));
   const uncovered = uncoveredEntries.map(({ id }) => id);
   // 1.4.30 (L37, own-calendar #90) — 되먹임에 **검증기가 본 사실**을 싣는다: 항목의 id 유무·severity와 done_when이 실제로 덮은 id
@@ -250,12 +307,16 @@ export function validatePlanHandoff(plan, { maxDoneWhen = 6, issueBody = "" } = 
   // 볼 길이 없었다(id 없는 항목은 위치 이름 `d2`로 불린다).
   const seen = uncoveredEntries.map((e) => `${e.id}${e.hasId ? "" : " (no id — named by position)"}: severity ${e.severity ? JSON.stringify(e.severity) : "missing"}`).join("; ");
   const coveredList = covered.size ? [...covered].join(", ") : "none";
+  // #239 (M-9) — say when a cover went away with a dropped skeptic item, so the repair turn knows why it no longer counts.
+  const droppedNote = dropped.length ? `; dropped skeptic items beyond max_done_when (their covers do not count): ${dropped.join(", ")}` : "";
   // 1.4.26 (L29, own-calendar #46) — 수리 턴에 되먹이는 문장은 **무엇을 쓰라는지**까지 말한다: 계획이 두 번 연속 같은 이유로
   // 죽었다(첫 판 `dissent-1`, 수리 판 `d1, d2` — id도 severity도 없는 dissent 항목, 그것을 짚는 done_when 없음). "덮이지 않았다"만
   // 들은 계획자는 항목을 고쳐 쓰는 대신 이름만 바꿨다.
-  if (uncovered.length) reasons.push(`dissent without done_when: ${uncovered.join(", ")} — give every dissent_log entry an "id" and a "severity"; for each medium/high (or severity-less) entry either add its id to the "covers" of the done_when that mitigates it, or set "severity": "low" if it is not a risk worth pinning [validator saw — uncovered: ${seen}; done_when.covers: ${coveredList}]`);
+  if (uncovered.length) reasons.push(`dissent without done_when: ${uncovered.join(", ")} — give every dissent_log entry an "id" and a "severity"; for each medium/high (or severity-less) entry either add its id to the "covers" of the done_when that mitigates it, or set "severity": "low" if it is not a risk worth pinning [validator saw — uncovered: ${seen}; done_when.covers: ${coveredList}${droppedNote}]`);
 
   // (b) 계획이 만드는 결함 표면의 상한.
+  // #239 — counted after skeptic truncation; truncation only happens when the planner's own items fit, so unmarked
+  // overflow is reported here exactly as before (with the full count).
   if (doneWhen.length > maxDoneWhen) reasons.push(`done_when has ${doneWhen.length} items (max ${maxDoneWhen})`);
 
   // (c) 가드의 가드 금지 — 이슈가 가드를 요구했으면 통과.
@@ -406,9 +467,19 @@ export function verifyStage({ stage, out, transcriptText, agentsLog, roster = []
   // CHARTER의 plan 규칙(감사 Task 9). 상한이 안 넘어오면 기본 6 — 규칙이 조용히 꺼지지는 않는다.
   // Task 9(KTB-51): 이 검증기의 사유는 결정적·기계 판정이라 한 번의 수리 턴으로 되먹일 수 있다 —
   // `planRepair`로 따로 실어 run-stage가 "순수 계획-계약 결함"만 골라 수리하게 한다.
+  /**
+   * #239 — the normalization the validator checked is written back into the handoff (run-stage posts `data`), and its
+   * notes go out as `planNotes` for the run record — never into `reasons`.
+   */
+  let planNotes = [];
   if (stage === "plan" && data) {
-    const pr = validatePlanHandoff(data, { maxDoneWhen: planLimits?.max_done_when ?? 6, issueBody });
+    const maxDoneWhen = planLimits?.max_done_when ?? 6;
+    const pr = validatePlanHandoff(data, { maxDoneWhen, issueBody });
     if (pr.length) { reasons.push(...pr); planRepair = pr; }
+    const norm = normalizePlanHandoff(data, { maxDoneWhen });
+    if (norm.dropped.length) data.done_when = norm.doneWhen;
+    if (norm.signoffObjections.length) data.signoff_objections = norm.signoffObjections;
+    planNotes = norm.notes;
   }
   for (const role of roster) {
     if (!agentsLog.completed.includes(rolePrefix + role)) reasons.push(`roster role not completed: ${role}`);
@@ -471,5 +542,5 @@ export function verifyStage({ stage, out, transcriptText, agentsLog, roster = []
   // KTB-15b M1: 어느 후보가 이겼는지(트랜스크립트 파일 읽기냐, task-notification이냐, envelope 펜스냐)는
   // 사후 감사의 provenance다 — `extractStageArtifact`는 이미 계산해 뒀는데(ok일 때만 `source`가 있다)
   // 지금까지 여기서 버려졌다. run-stage가 이 값을 run 기록 한 줄로 남긴다(§run-stage.js `artifact:`).
-  return { ok: reasons.length === 0, reasons, data, source: artifact.source ?? null, qaShortfall, planRepair };
+  return { ok: reasons.length === 0, reasons, data, source: artifact.source ?? null, qaShortfall, planRepair, planNotes };
 }

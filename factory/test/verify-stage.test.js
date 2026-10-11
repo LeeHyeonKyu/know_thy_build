@@ -462,3 +462,88 @@ test("validatePlanHandoff: the uncovered-dissent reason lists what the validator
   expect(r).toMatch(/uncovered: d1 \(no id — named by position\): severity "medium"; D3: severity missing/);
   expect(r).toMatch(/done_when\.covers: dissent-1/);
 });
+
+/**
+ * #239 (M-7, gap P-13) — a surviving sign-off objection (`signoff-<role>`, injected by the plan workflow) is not a risk a
+ * done_when can cover: demanding one only sent the plan to a repair turn and then a person. It passes, and stays visible
+ * three ways — the dissent_log entry (rendered in the plan body), `signoff_objections[]` on the handoff, and one record
+ * line. Only an id that names its own role is exempt; ordinary and role-mismatched medium dissents are rejected as before.
+ */
+test("test_239_signoff_objections_do_not_require_a_covering_done_when", async () => {
+  const { validatePlanHandoff } = await import("../lib/verify-stage.js");
+  const { renderHandoff } = await import("../lib/handoff.js");
+  const objection = "the cap belongs at the workflow merge site, not in the verifier — verifier truncation is inert until the template emits the marker, and a dead branch on a load-bearing path";
+  expect(objection.length).toBeGreaterThan(120);
+  const signoff = { id: "signoff-skeptic", role: "skeptic", severity: "medium", objection, resolution: "unresolved — proceeding" };
+
+  const plan = planFix({ dissent_log: [signoff] });
+  expect(validatePlanHandoff(plan)).toEqual([]);
+  const r = verifyPlan(plan);
+  expect(r.ok).toBe(true);
+  expect(r.planRepair).toBe(null);
+  expect(r.reasons).toEqual([]);
+  expect(r.data.dissent_log).toEqual([signoff]);                                   // still in the plan, not swallowed
+  expect(renderHandoff({ stage: "plan", issue: 7, summary: "s", data: r.data })).toContain(`skeptic: ${objection}`);
+  expect(r.data.signoff_objections).toEqual([{ id: "signoff-skeptic", role: "skeptic", text: objection.slice(0, 120) }]);
+  expect(r.planNotes).toEqual([`plan: unresolved sign-off objection from skeptic: ${objection.slice(0, 120)}`]);
+
+  // The same fixture with an ordinary medium dissent and a signoff-* id that does not name its role: both rejected.
+  const mixed = planFix({ dissent_log: [signoff, { id: "d1", role: "operator", severity: "medium", objection: "x" }, { id: "signoff-foo", role: "skeptic", severity: "medium", objection: "y" }] });
+  const bad = verifyPlan(mixed);
+  expect(bad.ok).toBe(false);
+  const uncovered = bad.reasons.find((x) => x.startsWith("dissent without done_when"));
+  expect(uncovered).toMatch(/^dissent without done_when: d1, signoff-foo — /);
+  expect(bad.planRepair).toEqual(bad.reasons);
+  // A role-less signoff-* is not exempt either (the id must equal "signoff-" + its own non-empty role).
+  expect(validatePlanHandoff(planFix({ dissent_log: [{ id: "signoff-", severity: "medium", objection: "z" }] })).join()).toMatch(/dissent without done_when: signoff-/);
+  // No sign-off entry → no new handoff field and no note (existing handoffs stay byte-identical).
+  const plain = verifyPlan(planFix());
+  expect(plain.ok).toBe(true);
+  expect("signoff_objections" in plain.data).toBe(false);
+  expect(plain.planNotes).toEqual([]);
+});
+
+/**
+ * #239 (M-9, gap P-15) — planner 6 + skeptic 1 = 7 > 6 was rejected though the planner stayed inside the cap. Only items
+ * marked `source:"skeptic"` are cut, before the coverage check; unmarked overflow is rejected exactly as today, and a
+ * dissent whose only cover was a dropped item is rejected by name.
+ */
+const dw239 = (n, over = {}) => ({ id: `dw${n}`, text: `behaviour ${n} is observable`, rubric: `r${n}`, check: { kind: "test", ref: `test_239_item_${n}` }, level: "unit", ...over });
+test("test_239_skeptic_items_beyond_max_done_when_are_dropped_not_rejected", async () => {
+  const { validatePlanHandoff } = await import("../lib/verify-stage.js");
+  const six = [1, 2, 3, 4, 5, 6].map((n) => dw239(n));
+  const limits = { planLimits: { max_done_when: 6 } };
+
+  const plan = planFix({ done_when: [...six, dw239(7, { source: "skeptic" })] });
+  expect(validatePlanHandoff(plan, { maxDoneWhen: 6 })).toEqual([]);
+  const r = verifyPlan(plan, limits);
+  expect(r.ok).toBe(true);
+  expect(r.data.done_when.map((d) => d.id)).toEqual(["dw1", "dw2", "dw3", "dw4", "dw5", "dw6"]);
+  expect(r.planNotes).toEqual(["plan: skeptic items beyond max_done_when dropped: dw7"]);
+
+  // A skeptic item that fits under the cap is kept — nothing is dropped that did not overflow.
+  const fits = verifyPlan(planFix({ done_when: [...six.slice(0, 5), dw239(7, { source: "skeptic" })] }), limits);
+  expect(fits.ok).toBe(true);
+  expect(fits.data.done_when.map((d) => d.id)).toEqual(["dw1", "dw2", "dw3", "dw4", "dw5", "dw7"]);
+  expect(fits.planNotes).toEqual([]);
+
+  // Planner 7, unmarked: rejected as today, nothing truncated.
+  const seven = planFix({ done_when: [...six, dw239(7)] });
+  const bad = verifyPlan(seven, limits);
+  expect(bad.ok).toBe(false);
+  expect(bad.reasons).toContain("done_when has 7 items (max 6)");
+  expect(bad.data.done_when).toHaveLength(7);
+  expect(validatePlanHandoff(seven, { maxDoneWhen: 6 })).toContain("done_when has 7 items (max 6)");
+  // Planner 7 + skeptic 1: the planner alone is over the cap — still rejected.
+  expect(verifyPlan(planFix({ done_when: [...six, dw239(7), dw239(8, { source: "skeptic" })] }), limits).reasons.join()).toMatch(/done_when has 8 items \(max 6\)/);
+
+  // The dropped skeptic item was the only cover for a medium dissent → rejected, naming that dissent.
+  const orphan = planFix({
+    dissent_log: [{ id: "d9", role: "skeptic", severity: "medium", objection: "o" }],
+    done_when: [...six, dw239(7, { source: "skeptic", covers: ["d9"] })],
+  });
+  const o = verifyPlan(orphan, limits);
+  expect(o.ok).toBe(false);
+  expect(o.reasons.join("; ")).toMatch(/dissent without done_when: d9/);
+  expect(validatePlanHandoff(orphan, { maxDoneWhen: 6 }).join()).toMatch(/dissent without done_when: d9/);
+});
