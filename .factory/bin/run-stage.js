@@ -2297,6 +2297,39 @@ export async function scopeInput({ run, cwd, base, issue, plan, maxBytes = SCOPE
 }
 
 /**
+ * #254 — 러너의 `verifyStage` dep (production = what the test drives). main()의 인라인 클로저였던 것을 꺼냈다:
+ * 그래야 "러너가 verifyStage에 무엇을 넘기는가"(NEVER_AUTOMATE, `[load_bearing].paths`)를 테스트가 실제 배선으로 핀한다.
+ * 게터인 이유 — charter·harness는 `charterReady` 뒤에, ctx는 `buildContext` 뒤에 생긴다.
+ */
+export function makeVerifyStageDep({ root, stage, getCtx, getCharter, getHarness, qaEvidenceSummary = () => null }) {
+  return ({ out, gates }) => {
+    const ctx = getCtx();
+    // 감사 M1 — NEVER_AUTOMATE의 글롭 항목은 CHARTER에서 그대로 온다(컨텍스트를 거치지 않는다:
+    // 이 재확인의 요점은 에이전트가 본 것과 **독립적인** 출처라는 데 있다). #254 — `[load_bearing].paths`도
+    // 같은 이유로 harness에서 그대로 온다(`tierFloor`가 읽는 바로 그 목록): triage의 tier 재확인 재료다.
+    const v = verifyStage({ stage, out, transcriptText: transcriptTextFor(root, out), agentsLog: readAgentsLog(join(root, ".factory/out/agents.jsonl")), roster: ctx.roster, rolePrefix: ROLE_PREFIX[stage] || "", expectedRounds: ctx.rounds, orchestration: ctx.orchestration, gates, planLimits: ctx.plan, issueBody: ctx.issue?.body, neverAutomate: getCharter()?.never_automate, loadBearing: getHarness()?.load_bearing?.paths ?? [], qaManifest: stage === "review" ? qaEvidenceSummary() : null });
+    // 추출에 성공했으면 `<stage>.json`을 **산출물**로 덮는다 — 사람과 다음 도구가 여는 파일이
+    // 디스패처의 산문 섞인 envelope이 아니라 스테이지가 실제로 쓴 객체이도록(envelope은 옆에 남아 있다).
+    if (v.ok && v.data) { try { writeFileSync(join(root, ".factory/out", `${stage}.json`), JSON.stringify(v.data, null, 2)); } catch { /* 기록 실패가 스테이지를 죽이지 않는다 */ } }
+    return v;
+  };
+}
+
+/**
+ * 감사 H3 — handoff에는 **러너가 계산한** 실효 tier를 함께 싣는다(`tier_effective`/`tier_source`).
+ * 에이전트가 적는 `tier`는 자기 신고이고, 이 둘은 diff에서 나온 사실이다: 다음 스테이지와 사람이
+ * 같은 코멘트에서 "무엇으로 채점됐는가"를 읽을 수 있어야 한다. 스키마는 추가 필드를 막지 않는다.
+ * (#254 — main()의 인라인 클로저를 꺼냈을 뿐 동작은 같다: 테스트가 "실제 handoff writer"를 몰 수 있게.)
+ */
+export function makeWriteHandoffDep({ gh, issue, stage, getCtx }) {
+  return async ({ data }) => {
+    const ctx = getCtx();
+    const d2 = ctx?.tier_effective ? { ...data, tier_effective: ctx.tier_effective, tier_source: ctx.tier_source } : data;
+    await gh.comment(issue, renderHandoff({ stage, issue, summary: d2.summary || `### ${stage} 완료`, data: d2 }));
+  };
+}
+
+/**
  * The implement self-gate dep (production = what the test drives). Inputs are what main() already holds; `getCtx` returns
  * the context built for this run (`ctxCache`). `run-stage` computes every list here (git), `runSelfGate` only judges them.
  */
@@ -2505,6 +2538,24 @@ export function makePrEvidenceDeps({ gh, issue, repo = null, readRecord = null, 
       }
       return { ok: true, posted: false, updated };
     },
+  };
+}
+
+/**
+ * 감사 H3 / KTB-46 r3 — merge 스테이지의 `reviewRoster` dep(정족수의 로스터). main()의 인라인 클로저였던 것을 꺼냈다(#254):
+ * 그래야 "merge 정족수가 review 스테이지의 `context.json`과 같은 tier 규칙에서 나오는가"를 테스트가 실제 배선으로 핀한다.
+ * 해석은 `lib/review-roster.js` 하나다 — sweeper의 사람-머지 반영 팔이 같은 함수를 부른다(판정이 두 벌이면 한쪽 문이 조용히 싸진다).
+ * 여기만이 diff로 tier를 올릴 수 있다. 코멘트 조회의 실패도 예전과 같은 문장으로 접는다(그 조회는 helper 밖에서 일어난다).
+ * 게터인 이유 — charter·harness는 `charterReady` 뒤에 생긴다.
+ */
+export function makeMergeReviewRosterDep({ run, root, gh, issue, getCharter, getHarness, mergeBase }) {
+  return async () => {
+    try {
+      return await resolveReviewRoster({
+        charter: getCharter(), roles: () => loadRoles(root), comments: await gh.comments(issue),
+        effectiveTier: async (tier) => resolveTier({ run, cwd: root, base: await mergeBase(), harness: getHarness(), tier }),
+      });
+    } catch (e) { return { ok: false, reason: `review roster for this tier could not be resolved — ${e?.message || e}` }; }
   };
 }
 
@@ -3799,24 +3850,9 @@ async function main() {
      * 붙인 뒤 그 파일을 다시 써 온디스크 산출물과 handoff 코멘트가 갈리지 않게 한다.
      */
     syncStageArtifact: (data) => { try { writeFileSync(join(root, ".factory/out", `${stage}.json`), JSON.stringify(data, null, 2)); } catch { /* 기록 실패는 스테이지를 죽이지 않는다 */ } },
-    verifyStage: ({ out, gates }) => {
-      // 감사 M1 — NEVER_AUTOMATE의 글롭 항목은 CHARTER에서 그대로 온다(컨텍스트를 거치지 않는다:
-      // 이 재확인의 요점은 에이전트가 본 것과 **독립적인** 출처라는 데 있다).
-      const v = verifyStage({ stage, out, transcriptText: transcriptTextFor(root, out), agentsLog: readAgentsLog(join(root, ".factory/out/agents.jsonl")), roster: ctxCache.roster, rolePrefix: ROLE_PREFIX[stage] || "", expectedRounds: ctxCache.rounds, orchestration: ctxCache.orchestration, gates, planLimits: ctxCache.plan, issueBody: ctxCache.issue?.body, neverAutomate: charter.never_automate, qaManifest: stage === "review" ? qaEvidenceSummary() : null });
-      // 추출에 성공했으면 `<stage>.json`을 **산출물**로 덮는다 — 사람과 다음 도구가 여는 파일이
-      // 디스패처의 산문 섞인 envelope이 아니라 스테이지가 실제로 쓴 객체이도록(envelope은 옆에 남아 있다).
-      if (v.ok && v.data) { try { writeFileSync(join(root, ".factory/out", `${stage}.json`), JSON.stringify(v.data, null, 2)); } catch { /* 기록 실패가 스테이지를 죽이지 않는다 */ } }
-      return v;
-    },
-    /**
-     * 감사 H3 — handoff에는 **러너가 계산한** 실효 tier를 함께 싣는다(`tier_effective`/`tier_source`).
-     * 에이전트가 적는 `tier`는 자기 신고이고, 이 둘은 diff에서 나온 사실이다: 다음 스테이지와 사람이
-     * 같은 코멘트에서 "무엇으로 채점됐는가"를 읽을 수 있어야 한다. 스키마는 추가 필드를 막지 않는다.
-     */
-    writeHandoff: async ({ data }) => {
-      const d2 = ctxCache?.tier_effective ? { ...data, tier_effective: ctxCache.tier_effective, tier_source: ctxCache.tier_source } : data;
-      await gh.comment(issue, renderHandoff({ stage, issue, summary: d2.summary || `### ${stage} 완료`, data: d2 }));
-    },
+    // #254 — 두 dep의 본문은 `makeVerifyStageDep`·`makeWriteHandoffDep`(위)에 있다: 테스트가 같은 배선을 몬다.
+    verifyStage: makeVerifyStageDep({ root, stage, getCtx: () => ctxCache, getCharter: () => charter, getHarness: () => harness, qaEvidenceSummary }),
+    writeHandoff: makeWriteHandoffDep({ gh, issue, stage, getCtx: () => ctxCache }),
     /** triage 전용(KTB-9): 판정된 tier를 라벨로 내보낸다 — 다른 `factory:tier-*`는 같은 호출에서 떨어진다. */
     setTierLabel: (tier) => gh.setTierLabel(issue, tierLabel(tier)),
     /** merge stage 전용: PR이 열려 있는지, 충돌은 없는지 — implement handoff에 적힌 PR을 조회한다. */
@@ -3928,17 +3964,7 @@ async function main() {
      * 한 규칙에서 나온다. (리뷰 batch-1의 잠정 `reviewTier(claimed, gates.json)` 바닥은 이 canonical
      * 계산으로 대체됐다 — gates.json은 PR head에서 쓰이지만 이것은 base + diff에서 도출된다.)
      */
-    reviewRoster: async () => {
-      // KTB-46 r3: 해석은 `lib/review-roster.js` 하나다 — sweeper의 사람-머지 반영 팔이 같은 함수를
-      // 부른다(판정이 두 벌이면 한쪽 문이 조용히 싸진다). 여기만이 diff로 tier를 올릴 수 있다.
-      // 코멘트 조회의 실패도 예전과 같은 문장으로 접는다(그 조회는 helper 밖에서 일어난다).
-      try {
-        return await resolveReviewRoster({
-          charter, roles: () => loadRoles(root), comments: await gh.comments(issue),
-          effectiveTier: async (tier) => resolveTier({ run, cwd: root, base: await mergeBase(), harness, tier }),
-        });
-      } catch (e) { return { ok: false, reason: `review roster for this tier could not be resolved — ${e?.message || e}` }; }
-    },
+    reviewRoster: makeMergeReviewRosterDep({ run, root, gh, issue, getCharter: () => charter, getHarness: () => harness, mergeBase }),
     /**
      * 리뷰 batch-1 MF-2 — 머지 직전 §(6b2)의 재료: `factory/records` 브랜치의 run 기록에 **러너가**
      * 쓴 `review-evidence:` 줄. 브랜치를 읽지 못하는 것은 "기록이 없다"가 아니라 **판정 불가**이므로
