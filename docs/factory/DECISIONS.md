@@ -4560,7 +4560,9 @@ doctor-ci의 토큰 검사는 `continue-on-error`라 잡을 죽이지 않지만 
    푼 충돌 경로도 병합의 일부다: union 경로(DECISIONS.md)는 같은 충돌 블록 규칙을, 미러 경로는 러너가 쓴 그대로 **base의 사본과 바이트까지
    같을 때**만 안이다(`resolveMirrorConflicts`는 base의 사본을 통째로 받아 브랜치의 다른 hunk를 의도적으로 버리고, 세션 뒤 미러 커밋이
    다시 만든다 — 블록 규칙을 대면 올바른 라운드가 RED가 된다; `test_212_runner_mirror_copy_in_the_merge_is_not_outside_it`,
-   `test_212_conflict_round_with_a_runner_mirror_path_is_green_end_to_end`).
+   `test_212_conflict_round_with_a_runner_mirror_path_is_green_end_to_end`). 파일 통째의 해소는 modify/delete — 두 **편**(M^1·M^2)의 트리 중
+   하나에 그 경로가 없을 때 — 뿐이다. 두 편이 다 가진 경로(내용 충돌)를 M이 지우면 밖이고, git이 표지를 쓰지 않은 내용 충돌(바이너리)은
+   M이 한 편의 blob과 object id까지 같을 때만 안이다(`test_212_conflict_scope_deleting_or_rewriting_a_content_conflict_is_outside_the_merge`).
 3. **RED는 막지 않는다**(plan d3): 워크플로가 아직 self-critique를 돌리므로, 막으면 충돌을 만난 승인 PR이 오늘보다 나빠진다. RED 라운드는 그냥
    충돌 라운드가 아니다 — 비용도 K도 오늘처럼 세고 리뷰도 오늘의 전체 리뷰다(`test_212_failed_conflict_round_falls_back_to_today`).
 4. **GREEN일 때만 둘을 쓴다, 둘 다 아니면 하나도 아니다**(`test_212_failed_conflict_round_falls_back_to_today`): 이슈 코멘트에 러너 마커
@@ -4568,8 +4570,10 @@ doctor-ci의 토큰 검사는 `continue-on-error`라 잡을 죽이지 않지만 
    (`lib/usage.js` `conflictRoundLine`). 둘 다 **awaiting-review로의 전이가 성공한 뒤에만** 나간다 — 거부된 전이·사람에게 간 라운드는 끝난
    충돌 라운드가 아니다(같은 테스트의 (5)). 순서는 **태그 먼저**다: 태그가 든 섹션은 실패를 삼키지 않는 쓰기로 나가고, 실패하면 마커도
    나가지 않는다(섹션은 태그 없이 다시 쓴다). 그다음 마커를 게시하고, 그 게시가 실패하면 러너가 다음 섹션 첫 줄에
-   `conflict-round-revoked: stage=implement runner=… run_id=… —`(`conflictRoundRevokedLine`)를 써서 같은 러너의 태그를 거둔다 — 비용은 다시
-   센다. 취소 줄은 면제를 없앨 뿐 만들지 못하므로 위조는 세는 쪽으로만 간다(`test_212_tag_and_marker_are_both_or_neither`,
+   `conflict-round-revoked: stage=implement runner=… run_id=… —`(`conflictRoundRevokedLine`)를 써서 **자기 런의** 태그를 거둔다 — 비용은 다시
+   센다. 거두는 것은 같은 러너·같은 `run_id`의 가장 최근 태그 하나다(CI 밖의 모든 런은 `local/<host>`·`run_id=n/a`이고 GHA 재실행은
+   `GITHUB_RUN_ID`를 공유한다 — 러너 문자열만 맞추면 앞선 정당한 태그까지 거둬 budget 줄이 빠진 돈을 틀리게 말한다;
+   `test_212_tag_revocation_withdraws_only_the_latest_tag_of_its_run`). 취소 줄은 면제를 없앨 뿐 만들지 못하므로 위조는 세는 쪽으로만 간다(`test_212_tag_and_marker_are_both_or_neither`,
    `test_212_tag_revocation_only_withdraws_its_own_runners_tag`). 남는 반쪽은 태그와 마커 사이의 프로세스 죽음(또는 취소 줄 쓰기의 두 번째
    실패) 하나다: 태그만 있고 마커가 없다 — K는 오늘처럼 세고, 비용 면제는 6의 상수 안에 묶인다. usage 줄에 `conflict=true` 키를 붙이지 않는다 — 그 줄의 모양은 `USAGE_RE`가 소유하고, 키 하나는 ADR-036 2의
    위조 방어를 다시 연다.
@@ -4583,7 +4587,9 @@ doctor-ci의 토큰 검사는 `continue-on-error`라 잡을 죽이지 않지만 
    않는다 — 그 라운드는 마커도 태그도 없는 보통 라운드이고 기록에 `conflict-only: not applied — this issue already used …`가 남는다
    (`test_212_conflict_round_bound_is_lifetime_across_a_requeue`). 거부로 취소된 라운드도 그 칸을 쓴다(보수적: 면제가 상한을 넘지 않는다).
 6b. **뒤따른 리뷰가 거부하면 면제는 취소된다**(dw6, 면제의 고리가 없다): 충돌 라운드 다음의 리뷰가 rework을 내면 그 라운드는 끝난 충돌
-   라운드가 아니다 — 비용은 그 섹션 뒤 다음 implement 섹션 전의 review 섹션에 러너의 `transition: factory:rework` 줄이 있으면 다시 세고
+   라운드가 아니다 — 비용은 그 섹션 뒤 다음 implement 섹션 전의 review 섹션에 러너의 `transition:` 줄이 `factory:approved` 아닌 곳으로 가면
+   (`factory:rework`, 그리고 #196 흐름의 재리뷰가 서는 라운드 K에서의 거부 — `reviewRoundsExhausted`가 보내는 `factory:needs-human` — 또는
+   #174 재시작 rework; `test_212_conflict_round_rejected_at_round_k_counts_as_today`) 다시 세고
    (`budgetLine`: `conflict round run(s) … counted in the cap (the review that followed rejected it)`; `test_212_conflict_round_cost_is_revoked_when_the_next_review_rejects`),
    K는 그 충돌 rework 다음의 rework 전이가 머지 스테이지의 것이 아니면 다시 센다(`test_212_conflict_marker_binds_to_its_round_and_a_rejecting_review_revokes_it`).
    위조된 줄은 거부를 더할 수만 있고(세는 쪽) 숨길 수는 없다. #196 흐름 전체는 `test_212_failed_conflict_round_falls_back_to_today` (1b)가 오늘의

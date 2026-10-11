@@ -7304,3 +7304,45 @@ test("test_212_tag_and_marker_are_both_or_neither", async () => {
   expect(await both.k()).toBe(2);
   expect(both.capCheck()).toMatchObject({ ok: true, conflictUsd: 9.5 });
 });
+
+test("test_212_conflict_round_rejected_at_round_k_counts_as_today", async () => {
+  // The #196 flow puts the re-review after a GREEN conflict round at round K (2 review reworks + the exempt conflict rework → round 3,
+  // K=3). A rejection there does not go to factory:rework: the REAL review stage (runStage → nextState → reviewRoundsExhausted) sends it
+  // to factory:needs-human — or, with the one #174 self-restart unused, to a restart rework. Either way the review rejected the conflict
+  // round, so its cost counts AS TODAY (no exempt cost behind a human hand-off).
+  const reviewAtK = async (inc, { restart }) => {
+    const transitions = [];
+    const kDeps = makeKRestartDeps212({ gh: inc.gh, issue: 212 });
+    inc.gh.label = "factory:awaiting-review";
+    const code = await runStage({
+      stage: "review", issue: 212, runnerId: "gha-r", runId: "r",
+      deps: {
+        charterReady: async () => true, trustWorkspace: async () => {}, claim: async () => ({ ok: true }), assertHandoff: async () => ({ ok: true }),
+        heartbeat: async () => ({ stop() {} }), release: async () => true, gates: async () => null,
+        buildContext: async () => ({ roster: ["correctness", "qa"], orchestration: "workflow", limits: { K: 3 } }),
+        claudeP: async () => ({ is_error: false, result: "{}", usage: { input_tokens: 3 }, total_cost_usd: 1, num_turns: 2, terminal_reason: "end_turn" }),
+        verifyStage: () => ({ ok: true, reasons: [], data: { schema: "factory.review.v1", issue: 212, pr: 31, head_sha: inc.repo.approved, round: 1, orchestration: "workflow", verdicts: [reject212("correctness"), approve212("qa")] } }),
+        writeHandoff: async () => {},
+        reviewRounds: kDeps.reviewRounds,
+        ...(restart ? { kRestartState: kDeps.kRestartState, postKRestartBrief: kDeps.postKRestartBrief } : {}),
+        transition: async ({ to, reason, by }) => { transitions.push(to); return transition({ gh: inc.gh, issue: 212, to, reason, by, stage: "review", env: {} }); },
+        runRecord: (lines) => appendRunRecord({ root: inc.recRoot, issue: 212, stage: "review", runnerId: "gha-r", lines }),
+      },
+    });
+    return { code, transitions };
+  };
+  for (const restart of [false, true]) {
+    const inc = await incident212();
+    const r1 = await implementRound212({ gh: inc.gh, repo: inc.repo, recRoot: inc.recRoot, runnerId: "gha-2", cost: 9.5, builder: resolveOnly212 });
+    expect(r1.code).toBe(0);
+    expect(parseRunRecord(inc.read()).at(-1)).toMatchObject({ conflict_round: true });
+    expect(await inc.k()).toBe(2);
+    expect(inc.capCheck()).toMatchObject({ ok: true, usd: 62.38, conflictUsd: 9.5, conflictRuns: 1 });
+    const rv = await reviewAtK(inc, { restart });
+    expect(rv.transitions, `restart=${restart}`).toEqual([restart ? "factory:rework" : "factory:needs-human"]);
+    expect(inc.gh.label).toBe(restart ? "factory:rework" : "factory:needs-human");
+    // today's cost: 62.38 + the conflict round 9.50 + this review 1 = 72.88 — the conflict round is counted and named as revoked
+    expect(inc.capCheck(), `restart=${restart}`).toMatchObject({ ok: false, usd: 72.88, conflictRevokedUsd: 9.5, conflictRevokedRuns: 1 });
+    expect(inc.capCheck(), `restart=${restart}`).not.toHaveProperty("conflictUsd");
+  }
+});

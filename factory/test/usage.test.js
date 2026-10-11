@@ -207,3 +207,35 @@ test("test_212_tag_revocation_only_withdraws_its_own_runners_tag", () => {
   expect(lifetimeCostOf212(read())).toMatchObject({ usd: 7, conflictUsd: 5, conflictRuns: 1 });
   expect(read()).toMatch(/^conflict-round-revoked: stage=implement runner=gha-2 run_id=2 — the conflict-round marker was not posted \(gh: 502 Bad Gateway\)/m);
 });
+
+test("test_212_tag_revocation_withdraws_only_the_latest_tag_of_its_run", () => {
+  // Outside CI every run shares `local/<hostname>` and run_id n/a; GHA re-runs share GITHUB_RUN_ID. A revocation is written right after
+  // its own run's tag, so it withdraws THAT tag — the latest earlier one of the same runner AND run_id — never every tag of the runner.
+  const tag = (runnerId, runId) => conflictRoundLine212({ stage: "implement", runnerId, runId, approvedHead: "a".repeat(40), head: "c".repeat(40) });
+  const revoke = (runnerId, runId) => conflictRoundRevokedLine212({ stage: "implement", runnerId, runId, error: "gh: 502" });
+  const use = (cost) => usageLine({ usage: {}, total_cost_usd: cost, num_turns: 1, terminal_reason: "end_turn" });
+  const record = () => {
+    const root = mkdtempSync(join(tmpdir(), "usage212rv2-"));
+    const write = (runnerId, lines) => appendRunRecord({ root, issue: 212, stage: "implement", runnerId, lines });
+    return { write, read: () => readFileSync(join(root, "docs/factory/runs/212.md"), "utf8") };
+  };
+  // (a) two local runs, same runner string, run_id n/a: the second run's revocation withdraws only the second tag
+  const a = record();
+  a.write("local/box", [tag("local/box", null), "verify: ok", use(3)]);
+  a.write("local/box", [tag("local/box", null), "verify: ok", use(6)]);
+  expect(lifetimeCostOf212(a.read())).toMatchObject({ usd: 0, conflictUsd: 9, conflictRuns: 2 });
+  a.write("local/box", [revoke("local/box", null)]);
+  expect(parseRunRecord(a.read()).map((e) => Boolean(e.conflict_round))).toEqual([true, false, false]);
+  expect(lifetimeCostOf212(a.read())).toMatchObject({ usd: 6, conflictUsd: 3, conflictRuns: 1 });
+  // (b) a revocation naming another run_id of the same runner withdraws nothing
+  const b = record();
+  b.write("gha-9", [tag("gha-9", "5"), "verify: ok", use(2)]);
+  b.write("gha-9", [revoke("gha-9", "6")]);
+  expect(lifetimeCostOf212(b.read())).toMatchObject({ usd: 0, conflictUsd: 2, conflictRuns: 1 });
+  // (c) same runner AND run_id (a GHA re-run attempt): only the latest of the two tags is withdrawn
+  const c = record();
+  c.write("gha-9", [tag("gha-9", "5"), "verify: ok", use(2)]);
+  c.write("gha-9", [tag("gha-9", "5"), "verify: ok", use(10)]);
+  c.write("gha-9", [revoke("gha-9", "5")]);
+  expect(lifetimeCostOf212(c.read())).toMatchObject({ usd: 10, conflictUsd: 2, conflictRuns: 1 });
+});

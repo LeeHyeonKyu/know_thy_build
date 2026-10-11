@@ -69,14 +69,15 @@ export function lifetimeCostOf(recordText) {
 
 /**
  * #212 dw6 — did a review REJECT the conflict round at `i`? Its review is any `review` section after it and before the next `implement`
- * section (the next round). Only rejections are read (`review_rework`, the runner's `transition: factory:rework` line): forged text can add
+ * section (the next round). Only rejections are read (`review_rejected`, a runner `transition:` line to anything but factory:approved —
+ * factory:rework, or factory:needs-human when the rejection lands at round K): forged text can add
  * a rejection — the round then counts, as today — but cannot hide one. The K side reads the same event from the issue comments
  * (`lib/retro/issue-comments.js` `conflictExemptIndices`: the next rework after the round is not the merge stage's).
  */
 function reviewRejectedAfter(entries, i) {
   for (let j = i + 1; j < entries.length; j++) {
     if (entries[j].stage === "implement") return false;
-    if (entries[j].review_rework) return true;
+    if (entries[j].review_rejected) return true;
   }
   return false;
 }
