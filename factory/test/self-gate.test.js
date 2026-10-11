@@ -638,3 +638,165 @@ test("test_200_scope_check_fails_open_on_a_malformed_files_expected_entry", asyn
   const red = await scopeRun({ issue: 200, plan: true, filesExpected: ["factory/test/*.{js,mjs}"], changes: [outside] });
   expect(scopeBlocking(red).map((f) => f.detail.split(" ")[0])).toEqual([outside.path]);
 });
+
+// ── #212 (ADR-040) — `conflict-scope`: a conflict-only round may change nothing but the conflicted hunks of the base merge ─────────
+// Observed on a REAL merge commit (HEAD^1 = the approved head, HEAD^2 = the base the runner merged), measured by the production
+// call site (`makeSelfGateDep` → `conflictScopeInput`, run-stage.js) and judged by `runSelfGate`. The RED is recorded, never blocking.
+// "No input" is compared with the pre-change self-gate dep, read from git at the commit this change was built on.
+import { mkdtempSync as mkdtempSync212, mkdirSync as mkdirSync212, writeFileSync as writeFileSync212, symlinkSync as symlinkSync212, readFileSync as readFileSync212 } from "node:fs";
+import { execFileSync as execFileSync212 } from "node:child_process";
+import { tmpdir as tmpdir212 } from "node:os";
+import { join as join212, dirname as dirname212 } from "node:path";
+import { fileURLToPath as fileURLToPath212, pathToFileURL as pathToFileURL212 } from "node:url";
+import { run as realRun212 } from "../lib/exec.js";
+import { makeSelfGateDep as makeSelfGateDep212, conflictScopeInput as conflictScopeInput212 } from "../bin/run-stage.js";
+import { conflictScopeGreen as conflictScopeGreen212 } from "../lib/self-gate.js";
+
+const C212 = "factory/lib/conflicted.js";
+const X212 = "factory/lib/base-only.js";
+const lines212 = (tag, n = 30) => Array.from({ length: n }, (_, i) => `export const ${tag}${i} = ${i};`);
+/**
+ * main: C and X. Branch (the approved head A): C line 15 changed. main then moves (B): C line 15 changed differently (the conflict)
+ * and X line 3 changed (git auto-merges it). The runner merges B into the branch and leaves the conflict to the builder.
+ */
+async function conflictRepo212() {
+  const root = mkdtempSync212(join212(tmpdir212(), "fq212-"));
+  const git = async (...args) => {
+    const r = await realRun212("git", ["-c", "user.email=t@example.invalid", "-c", "user.name=t", "-c", "commit.gpgsign=false", ...args], { cwd: root });
+    return r;
+  };
+  const ok = async (...args) => { const r = await git(...args); expect(r.code, `git ${args.join(" ")}: ${r.stderr}`).toBe(0); return r.stdout.trim(); };
+  const put = (p, s) => { mkdirSync212(dirname212(join212(root, p)), { recursive: true }); writeFileSync212(join212(root, p), s); };
+  const read = (p) => readFileSync212(join212(root, p), "utf8");
+  await ok("init", "-q", "-b", "main");
+  put(C212, lines212("c").join("\n") + "\n"); put(X212, lines212("x").join("\n") + "\n"); put("factory/lib/other.js", lines212("o").join("\n") + "\n");
+  await ok("add", "-A"); await ok("commit", "-q", "-m", "base");
+  await ok("checkout", "-q", "-b", "claude/fq-212");
+  const branchC = lines212("c"); branchC[15] = "export const c15 = 'branch';";
+  put(C212, branchC.join("\n") + "\n");
+  await ok("add", "-A"); await ok("commit", "-q", "-m", "the approved change");
+  const approved = await ok("rev-parse", "HEAD");
+  await ok("checkout", "-q", "main");
+  const mainC = lines212("c"); mainC[15] = "export const c15 = 'main';";
+  const mainX = lines212("x"); mainX[3] = "export const x3 = 'moved on main';";
+  put(C212, mainC.join("\n") + "\n"); put(X212, mainX.join("\n") + "\n");
+  await ok("add", "-A"); await ok("commit", "-q", "-m", "main moves on");
+  const base = await ok("rev-parse", "HEAD");
+  await ok("checkout", "-q", "claude/fq-212");
+  const m = await git("merge", "--no-edit", base);
+  expect(m.code).not.toBe(0);                                          // C conflicts; X is auto-merged
+  expect(read(C212)).toMatch(/^<{7} /m);
+  /** the builder's resolution of C: the conflicting region becomes both values */
+  const resolveC = () => { const r = lines212("c"); r.splice(15, 1, "export const c15 = 'branch';", "export const c15b = 'main';"); return r; };
+  const mirrorCommit = async () => {
+    put(".factory/lib/mirror.js", "// generated\n");
+    await ok("add", "-A");
+    await ok("-c", "user.name=factory-runner", "-c", "user.email=factory-runner@users.noreply.github.com", "commit", "-q", "-m", "mirror: regenerate");
+    return ok("rev-parse", "HEAD");
+  };
+  return { root, git, ok, put, read, approved, base, resolveC, mirrorCommit };
+}
+const HARNESS212 = { commands: {}, test: { test_glob: ["nothing/**"], source_glob: [] } };
+const GREEN212 = { schema: "factory.gates.v1", status: "GREEN" };
+const conflictCtx212 = (approved) => ({ issue: { number: 212 }, loaded: { conflict_only: true, approved_head: approved, merge_conflicts: [C212] } });
+const dep212 = (r, ctx, run = realRun212) => makeSelfGateDep212({ root: r.root, harness: HARNESS212, run, mergeBase: async () => r.ok("merge-base", "main", "HEAD"), getCtx: () => ctx });
+const conflictFindings212 = (sg) => sg.findings.filter((f) => f.check === "conflict-scope");
+
+test("test_212_conflict_scope_against_a_real_merge", async () => {
+  // GREEN: the merge commit only resolves C's conflict, a runner mirror commit follows — X differs from A (git's auto-merge), still GREEN.
+  const g = await conflictRepo212();
+  g.put(C212, g.resolveC().join("\n") + "\n");
+  await g.ok("add", "-A"); await g.ok("commit", "-q", "--no-edit");
+  expect(await g.ok("rev-parse", "HEAD^1")).toBe(g.approved);
+  expect(await g.ok("rev-parse", "HEAD^2")).toBe(g.base);
+  const mirrorSha = await g.mirrorCommit();
+  expect(await g.ok("diff", "--name-only", g.approved, "HEAD")).toContain(X212);
+  const green = await dep212(g, conflictCtx212(g.approved))({ gates: GREEN212, mirrorSha, mergedBase: g.base });
+  expect(green.ranChecks).toContain("conflict-scope");
+  expect(conflictFindings212(green)).toEqual([]);
+  expect(conflictScopeGreen212(green)).toBe(true);
+  expect(green.ok).toBe(true);
+
+  // RED cases, each naming the exact path — and never blocking (the round falls back to today's counted pipeline).
+  const red = async (name, mutate, expected) => {
+    const r = await conflictRepo212();
+    const extra = await mutate(r);
+    const sg = await dep212(r, conflictCtx212(r.approved))({ gates: GREEN212, mirrorSha: extra?.mirrorSha ?? null, mergedBase: r.base });
+    expect(conflictFindings212(sg).map((f) => f.detail), name).toEqual(expected.map((p) => `conflict round changed ${p} outside the merge`));
+    expect(conflictFindings212(sg).every((f) => f.blocking === false), name).toBe(true);
+    expect(conflictScopeGreen212(sg), name).toBe(false);
+    expect(sg.ok, name).toBe(true);
+  };
+  const commitMerge = async (r) => { await r.ok("add", "-A"); await r.ok("commit", "-q", "--no-edit"); };
+  await red("X changed away from git's auto-merge result", async (r) => {
+    r.put(C212, r.resolveC().join("\n") + "\n");
+    r.put(X212, r.read(X212).replace("export const x9 = 9;", "export const x9 = 'self-critique fix';"));
+    await commitMerge(r);
+    return { mirrorSha: await r.mirrorCommit() };
+  }, [X212]);
+  await red("a new file Y in the merge commit", async (r) => {
+    r.put(C212, r.resolveC().join("\n") + "\n"); r.put("factory/lib/new-y.js", "export const y = 1;\n");
+    await commitMerge(r);
+  }, ["factory/lib/new-y.js"]);
+  await red("new lines in C outside the conflicting region", async (r) => {
+    r.put(C212, ["// a new header line far from the conflict", ...r.resolveC()].join("\n") + "\n");
+    await commitMerge(r);
+  }, [C212]);
+  await red("a builder commit after the merge", async (r) => {
+    r.put(C212, r.resolveC().join("\n") + "\n"); await commitMerge(r);
+    r.put("factory/lib/other.js", r.read("factory/lib/other.js") + "export const later = 1;\n");
+    await r.ok("add", "-A"); await r.ok("commit", "-q", "-m", "self-critique: fix");
+    return { mirrorSha: await r.mirrorCommit() };
+  }, ["factory/lib/other.js"]);
+  await red("a builder commit before the merge", async (r) => {
+    await r.ok("merge", "--abort");
+    r.put("factory/lib/other.js", r.read("factory/lib/other.js") + "export const before = 1;\n");
+    await r.ok("add", "-A"); await r.ok("commit", "-q", "-m", "builder: before the merge");
+    expect((await r.git("merge", "--no-edit", r.base)).code).not.toBe(0);
+    r.put(C212, r.resolveC().join("\n") + "\n"); await commitMerge(r);
+  }, ["factory/lib/other.js"]);
+
+  // A path the RUNNER resolved inside the same merge (#143 `partial`: an append-only file union-merged, a mirror path given base's copy)
+  // is part of the merge, not the builder's change: GREEN when the runner names it, and only then.
+  const u = await conflictRepo212();
+  await u.ok("merge", "--abort");
+  await u.ok("checkout", "-q", "main");
+  u.put("docs/factory/DECISIONS.md", "# D\n\n## ADR-1 main\n"); await u.ok("add", "-A"); await u.ok("commit", "-q", "-m", "main adr");
+  const base2 = await u.ok("rev-parse", "HEAD");
+  await u.ok("checkout", "-q", "claude/fq-212");
+  u.put("docs/factory/DECISIONS.md", "# D\n\n## ADR-1 branch\n"); await u.ok("add", "-A"); await u.ok("commit", "-q", "-m", "branch adr");
+  const approved2 = await u.ok("rev-parse", "HEAD");
+  expect((await u.git("merge", "--no-edit", base2)).code).not.toBe(0);
+  u.put("docs/factory/DECISIONS.md", "# D\n\n## ADR-1 branch\n## ADR-1 main\n");    // what the runner's `merge-file --union` writes
+  u.put(C212, u.resolveC().join("\n") + "\n");
+  await u.ok("add", "-A"); await u.ok("commit", "-q", "--no-edit");
+  const ctxU = conflictCtx212(approved2);
+  const named = await dep212(u, ctxU)({ gates: GREEN212, mergedBase: base2, runnerResolved: ["docs/factory/DECISIONS.md"] });
+  expect(conflictFindings212(named)).toEqual([]);
+  expect(conflictScopeGreen212(named)).toBe(true);
+  const unnamed = await dep212(u, ctxU)({ gates: GREEN212, mergedBase: base2 });
+  expect(conflictFindings212(unnamed).map((f) => f.detail)).toEqual(["conflict round changed docs/factory/DECISIONS.md outside the merge"]);
+
+  // A git measurement failure fails closed: RED (not GREEN), visible, still non-blocking.
+  const broken = (cmd, args, opts) => (cmd === "git" && args[0] === "merge-tree" ? Promise.resolve({ code: 128, stdout: "", stderr: "fatal: merge-tree exploded" }) : realRun212(cmd, args, opts));
+  const closed = await dep212(g, conflictCtx212(g.approved), broken)({ gates: GREEN212, mirrorSha, mergedBase: g.base });
+  expect(conflictScopeGreen212(closed)).toBe(false);
+  expect(conflictFindings212(closed).map((f) => f.detail).join("\n")).toMatch(/conflict scope could not be measured — .*merge-tree exploded/);
+  expect(closed.ok).toBe(true);
+  // A merge of some other base than the one the runner merged is not this round's merge.
+  const other = await dep212(g, conflictCtx212(g.approved))({ gates: GREEN212, mirrorSha, mergedBase: "f".repeat(40) });
+  expect(conflictScopeGreen212(other)).toBe(false);
+
+  // No conflict-scope input (no `conflict_only` in loaded) → the self-gate result is byte-identical to the pre-change dep, no skip entry.
+  const repo = fileURLToPath212(new URL("../..", import.meta.url));
+  const dir = mkdtempSync212(join212(tmpdir212(), "sg212-pre-"));
+  execFileSync212("tar", ["-x", "-C", dir], { input: execFileSync212("git", ["archive", "ade82ed51725e79fa414e18533147aeeceee1fc9", "factory/lib", "factory/bin"], { cwd: repo, maxBuffer: 1 << 28 }) });
+  symlinkSync212(join212(repo, "node_modules"), join212(dir, "node_modules"));
+  const pre = await import(pathToFileURL212(join212(dir, "factory/bin/run-stage.js")).href);
+  for (const ctx of [{ issue: { number: 212 }, loaded: {} }, { issue: { number: 212 }, loaded: { merge_conflicts: [C212] } }]) {
+    const now = await dep212(g, ctx)({ gates: GREEN212, mirrorSha, mergedBase: g.base });
+    const then = await pre.makeSelfGateDep({ root: g.root, harness: HARNESS212, run: realRun212, mergeBase: async () => g.ok("merge-base", "main", "HEAD"), getCtx: () => ctx })({ gates: GREEN212 });
+    expect(JSON.stringify(now)).toBe(JSON.stringify(then));
+    expect(JSON.stringify(now)).not.toContain("conflict-scope");
+  }
+});
