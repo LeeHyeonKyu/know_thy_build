@@ -242,6 +242,10 @@ import { fileURLToPath as fileURLToPath231 } from "node:url";
 import { makeGh as makeGh231 } from "../lib/gh.js";
 import { makeFakeRun as makeFakeRun231 } from "../lib/exec.js";
 import { loadCharter as loadCharter231 } from "../lib/config.js";
+import { mkdtempSync as mkdtempSync231, rmSync as rmSync231 } from "node:fs";
+import { tmpdir as tmpdir231 } from "node:os";
+import { join as joinPath231 } from "node:path";
+import { runStageGates as runStageGates231 } from "../lib/gates.js";
 import { renderUpstreamIssue as renderUpstreamIssue231, UPSTREAM_LABELS as UPSTREAM_LABELS231 } from "../lib/feedback/upstream-issue.js";
 
 const ROOT231 = fileURLToPath231(new URL("../..", import.meta.url));
@@ -276,6 +280,19 @@ test("test_231_impact_paths_reads_backticked_and_plain_list_items", () => {
   // 백틱 없는 금지 경로도 문에서 걸린다(예전에는 빈 배열이라 통과했다)
   const plainForbidden = queueAdmission({ issue: { ...person, body: "## Impact paths\n- templates/factory/harness.toml (게이트)\n\n## done_when\n- [ ] `test_1_a`" }, charter: charter({ never_automate: ["templates/factory/**"] }), ...base });
   expect(plainForbidden.reasons.join(" ")).toContain("NEVER_AUTOMATE: templates/factory/harness.toml (glob templates/factory/**)");
+  // ASCII 산문 항목도 경로가 아니다 — 경로 모양 검사(`/`·`.`)가 이것을 막는다(한글 산문은 문자 검사가 먼저 막으므로 따로 핀)
+  expect(impactPathsOf("## Impact paths\n- none\n- TBD\n- see below\n- e.g.\n- i.e. the parser\n")).toEqual([]);
+  // 백틱 없는 경로 뒤에 백틱 설명이 붙어도 그 경로를 읽는다(백틱 토큰도 함께 읽는다 — 넓게 읽는 쪽이 fail closed)
+  expect(impactPathsOf("## Impact paths\n- templates/factory/harness.toml (see `ci.yml`)\n")).toEqual(["ci.yml", "templates/factory/harness.toml"]);
+  expect(impactPathsOf("## Impact paths\n- templates/factory/harness.toml — guarded by `test_1_a`\n")).toContain("templates/factory/harness.toml");
+  // 백틱 없는 쉼표 목록: 두 번째 자리의 금지 경로도 읽힌다
+  expect(impactPathsOf("## Impact paths\n- factory/lib/a.js, templates/factory/harness.toml\n")).toEqual(["factory/lib/a.js", "templates/factory/harness.toml"]);
+  // 번호 목록도 목록이다
+  expect(impactPathsOf("## Impact paths\n1. templates/factory/harness.toml\n2) factory/lib/a.js\n")).toEqual(["templates/factory/harness.toml", "factory/lib/a.js"]);
+  for (const body of ["- factory/lib/a.js, templates/factory/harness.toml", "1. templates/factory/harness.toml", "- templates/factory/harness.toml (see `ci.yml`)"]) {
+    const refused = queueAdmission({ issue: { ...person, body: `## Impact paths\n${body}\n\n## done_when\n- [ ] \`test_1_a\`` }, charter: charter({ never_automate: ["templates/factory/**"] }), ...base });
+    expect(refused.reasons.join(" "), body).toContain("NEVER_AUTOMATE: templates/factory/harness.toml (glob templates/factory/**)");
+  }
 });
 
 /** 진짜 `:issue` 템플릿의 첫 마크다운 블록(Impact paths가 든 것)을 그대로 꺼내고, 자리표시자를 실제 값으로 채운다. */
@@ -312,6 +329,38 @@ test("test_231_issue_template_impact_paths_are_backticked", () => {
 const ghIssueJson = (it) => JSON.stringify({ number: it.number, title: it.title ?? `#${it.number}`, body: it.body, labels: (it.labels || []).map((name) => ({ name })), ...("author" in it ? { author: it.author } : {}) });
 const humanAuthor = (login) => ({ id: "MDQ6VXNlcjE=", is_bot: false, login, name: login });
 const appAuthor = (slug) => ({ is_bot: true, login: `app/${slug}` });
+/**
+ * 진짜 flaky 생산자(gates.js의 runStageGates, review 단계의 수확 경로)를 fake exec로 돌려, 그것이 gh.createIssue에 넘긴
+ * {body, labels}를 돌려준다 — gates.test.js의 "review: flaky-existing" 케이스와 같은 배선이다.
+ */
+async function harvestFlakyIssue(issue) {
+  const cwd = mkdtempSync231(joinPath231(tmpdir231(), "adm231-flaky-"));
+  const TO = "vitest run 'test/a.test.js' -t 'flaky one'";
+  const ok = { code: 0, stdout: "", stderr: "" }, bad = { code: 1, stdout: "", stderr: "boom" };
+  const codes = [1, 0]; let i = 0;
+  const run = makeFakeRun231([
+    { match: (c, a, o) => c === "bash" && a[1] === TO && o.cwd.endsWith("classify-wt"), result: () => (codes[i++] === 0 ? ok : bad) },
+    { match: (c, a) => c === "bash" && a[1] === TO, result: ok },
+    { match: (c, a) => c === "bash" && a[1] === "vitest --json", result: bad },
+    { match: (c, a) => c === "git" && a[0] === "diff" && a[1] === "--name-status", result: { code: 0, stdout: "M\tsrc/a.js\n", stderr: "" } },
+    { match: (c, a) => c === "git" && a[0] === "rev-parse", result: { code: 0, stdout: `${"h".repeat(40)}\n`, stderr: "" } },
+    { match: (c, a) => c === "git" && a[0] === "worktree", result: ok },
+  ]);
+  const harness = {
+    harness: { maturity: "M2" },
+    commands: { unit: "vitest --json", test_files: "vitest run {files}", test_one: "vitest run {file} -t {name}", proof: {} },
+    gates: { required: ["unit"], fast: ["unit"], full: ["unit"], deep: ["unit"], thresholds: { new_test_repeats: 1, flaky_isolation_runs: 1, flaky_base_runs: 2, flaky_max: 2, quarantine_max_effective: 3 } },
+    test: { unit_report: ".factory/out/unit.json", test_glob: ["test/**"], source_glob: ["src/**"] },
+  };
+  const readFile = (p) => (p.endsWith("unit.json") ? JSON.stringify({ numTotalTests: 1, numPassedTests: 0, numFailedTests: 1, testResults: [{ name: joinPath231(cwd, "test/a.test.js"), assertionResults: [{ fullName: "flaky one", status: "failed" }] }] }) : null);
+  const created = [];
+  const gh = { async createIssue(args) { created.push(args); return 900 + created.length; }, async searchIssues() { return []; }, async comment() { return "u"; } };
+  await runStageGates231({ run, cwd, harness, stage: "review", tier: "standard", base: "b".repeat(40), gh, issue, readFile });
+  rmSync231(cwd, { recursive: true, force: true });
+  expect(created).toHaveLength(1);
+  return { body: created[0].body, labels: created[0].labels };
+}
+
 function ghOver(issues, { lists = {} } = {}) {
   const run = makeFakeRun231([
     { match: (c, a) => c === "gh" && a[0] === "issue" && a[1] === "view", result: (c, a) => (issues[a[2]] ? { code: 0, stdout: ghIssueJson(issues[a[2]]), stderr: "" } : { code: 1, stdout: "", stderr: "Could not resolve to an issue" }) },
@@ -369,9 +418,12 @@ test("test_231_self_generated_needs_marker_and_factory_author", async () => {
 
 test("test_231_factory_flaky_issue_under_pat_author_still_admitted", async () => {
   // 진짜 생산자의 모양: gates.js의 flaky 수확(본문·라벨)과 feedback/upstream-issue.js의 개선 이슈.
-  const gatesSrc = readFileSync231(`${ROOT231}factory/lib/gates.js`, "utf8");
-  expect(gatesSrc).toContain('body: `Detected while implementing #${issue}. evidence: ${JSON.stringify(c.evidence)}`, labels: ["backlog", "factory:flaky"]');
-  const flakyFrom = (number, of, author) => ({ number, body: `Detected while implementing #${of}. evidence: ${JSON.stringify({ base_runs: 2 })}`, labels: ["backlog", "factory:flaky"], author });
+  // flaky 이슈는 손으로 짓지 않는다 — 진짜 runStageGates가 수확하며 gh.createIssue에 넘긴 본문·라벨을 그대로 쓴다.
+  const harvested = {};
+  for (const of of [7, 20, 50, 60]) harvested[of] = await harvestFlakyIssue(of);
+  expect(harvested[7].labels).toEqual(["backlog", "factory:flaky"]);
+  expect(harvested[7].body).toMatch(/^Detected while implementing #7\. evidence: \{/);
+  const flakyFrom = (number, of, author) => ({ number, body: harvested[of].body, labels: [...harvested[of].labels], author });
   const up = renderUpstreamIssue231({ fingerprint: "ab12cd34ef56", tags: ["ktb"], payload: { reason: "gate misread" }, sourceRepo: "LeeHyeonKyu/own-calendar", sourceIssue: 17 });
   const issues = {
     7: { number: 7, body: person.body, labels: ["factory:in-progress"], author: humanAuthor("LeeHyeonKyu") },

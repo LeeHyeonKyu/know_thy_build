@@ -75,6 +75,10 @@ export function originOf(issue) {
 }
 
 const PATH_CHARS_RE = /^[\w.*/@{}!,[\]-]+$/;
+/** 목록 항목 — 글머리표(`-`·`*`·`+`)와 번호(`1.`·`1)`). */
+const LIST_ITEM_RE = /^\s*(?:[-*+]|\d+[.)])[ \t]+(.*)$/;
+/** 점이 든 산문 약어(`e.g`·`i.e`) — 경로 모양이지만 경로가 아니다. */
+const ABBREV_RE = /^(?:[a-z]\.)+[a-z]?$/i;
 
 /**
  * `## Impact paths`(또는 `###`) 절의 경로. 다른 절의 백틱은 경로가 아니다 — 절은 다음 `#`·`##`·`###` 제목에서 끝난다.
@@ -82,8 +86,10 @@ const PATH_CHARS_RE = /^[\w.*/@{}!,[\]-]+$/;
  * 백틱은 빈 배열이 됐고 NEVER_AUTOMATE 조기 차단이 아무 경로도 보지 못했다. 이제:
  *   - 백틱 토큰은 어디에 있든 전부 읽는다(공백이 섞이면 공백으로 나눠 각각). 백틱은 쓴 사람이 "이것은 경로다"라고 말한 것이므로
  *     `/`·`.` 모양 검사는 하지 않는다(`Dockerfile`도 경로다) — 예전 규칙 그대로다.
- *   - 백틱이 없는 목록 항목(`- `/`* `)은 `(…)` 설명을 떼고 첫 토큰을 읽되, 경로 모양(`/`나 `.`을 포함)일 때만 받는다 — 산문 항목
- *     (`- 없음`)을 경로로 읽지 않기 위해서다. 끝의 `,`·`.`·`;`·`:`는 떼어 낸다.
+ *   - 목록 항목(`- `·`* `·`+ `·`1. `·`1) `)은 백틱 밖의 글도 읽는다: `(…)` 설명과 백틱 구간을 떼고, 공백·쉼표로 나눈 **모든**
+ *     토큰 중 경로 모양(`/`나 `.`을 포함하고 `e.g`·`i.e` 같은 약어가 아닌 것)만 받는다 — 산문 항목(`- 없음`, `- none`)을
+ *     경로로 읽지 않기 위해서다. 끝의 `,`·`.`·`;`·`:`는 떼어 낸다. 백틱 설명이 붙은 항목(`- a/b.toml (see \`ci.yml\`)`)도,
+ *     백틱 없는 쉼표 목록의 두 번째 경로(`- a.js, templates/x.toml`)도 그래서 읽힌다(self-critique, #231).
  * 넓게 읽는 쪽은 fail closed 쪽이다: 경로를 더 보면 거부가 늘 뿐이다.
  */
 export function impactPathsOf(body) {
@@ -94,15 +100,16 @@ export function impactPathsOf(body) {
   const out = [];
   const keep = (raw, { shaped }) => {
     const p = String(raw).trim().replace(/[,.;:]+$/, "");
-    if (!p || !PATH_CHARS_RE.test(p) || (shaped && !/[/.]/.test(p))) return;
+    if (!p || !PATH_CHARS_RE.test(p)) return;
+    if (shaped && (!/[/.]/.test(p) || ABBREV_RE.test(p))) return;
     if (!out.includes(p)) out.push(p);
   };
   for (const line of section.split("\n")) {
-    const ticks = [...line.matchAll(/`([^`\n]+)`/g)];
-    for (const t of ticks) for (const tok of t[1].trim().split(/\s+/)) keep(tok, { shaped: false });
-    if (ticks.length) continue;
-    const item = /^\s*[-*][ \t]+(.*)$/.exec(line);
-    if (item) keep(item[1].replace(/\([^)]*\)/g, " ").trim().split(/\s+/)[0] ?? "", { shaped: true });
+    for (const t of line.matchAll(/`([^`\n]+)`/g)) for (const tok of t[1].trim().split(/\s+/)) keep(tok, { shaped: false });
+    const item = LIST_ITEM_RE.exec(line);
+    if (!item) continue;
+    const plain = item[1].replace(/`[^`\n]*`/g, " ").replace(/\([^)]*\)/g, " ");
+    for (const tok of plain.split(/[\s,]+/)) keep(tok, { shaped: true });
   }
   return out;
 }
