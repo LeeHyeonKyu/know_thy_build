@@ -7679,3 +7679,43 @@ test("test_226_structural_success_result_is_not_a_payload_error", async () => {
     }
   }
 });
+
+// ── #249 dw5 — main's #278 merge git auth survives the re-land's base merge ─────────────────────────────────────────
+// Nothing else pins that main() APPLIES mergeGitAuth (the #278 assertions above test the function, not its call). The one
+// statement is read out of main()'s source, checked to sit at main()'s top level after `stage` is bound and before the first
+// git/gh call, and then EXECUTED as written over an injected env: for merge with GH_TOKEN it must leave gitAuthEnv's
+// extraheader config in that env, for every other stage it must add nothing. Dropping the line, moving it below the first
+// git/gh call, or changing what it passes (another stage, another env) fails here.
+test("test_249_merge_git_auth_survives_the_base_merge", () => {
+  const src = readFileSync(new URL("../bin/run-stage.js", import.meta.url), "utf8");
+  const start = src.indexOf("\nasync function main() {");
+  expect(start).toBeGreaterThan(-1);
+  const mainSrc = src.slice(start);
+  const lines = [...mainSrc.matchAll(/^ {2}(Object\.assign\(process\.env, mergeGitAuth\([^\n]*?\);)/gm)];
+  expect(lines).toHaveLength(1);                                                 // exactly one, at main()'s top level
+  expect(src.match(/mergeGitAuth\(\{/g)).toHaveLength(2);                         // its definition + that one call
+  const at = lines[0].index;
+  expect(at).toBeGreaterThan(mainSrc.indexOf("const [stage, issueArg] = argv;")); // `stage` is bound first
+  expect(mainSrc.indexOf("const [stage, issueArg] = argv;")).toBeGreaterThan(-1);
+  for (const firstCall of ['run("git"', 'run("gh"', "makeStageGh(", "abortStage(", "process.exit("]) {
+    const i = mainSrc.indexOf(firstCall);
+    expect(i, firstCall).toBeGreaterThan(at);                                    // before any git or gh call (or exit)
+  }
+
+  // run the statement exactly as main() has it, with `process.env` bound to an injected env
+  const apply = (stage, env) => {
+    const fakeProcess = { env: { ...env } };
+    new Function("process", "mergeGitAuth", "stage", lines[0][1])(fakeProcess, mergeGitAuth, stage);
+    return fakeProcess.env;
+  };
+  const token = "test-token-249";
+  const merged = apply("merge", { GH_TOKEN: token });
+  expect(merged).toEqual({ GH_TOKEN: token, ...gitAuthEnv({ token }) });
+  expect(merged.GIT_CONFIG_KEY_1).toBe("http.https://github.com/.extraheader");
+  expect(merged.GIT_CONFIG_VALUE_1).toBe(`AUTHORIZATION: basic ${Buffer.from(`x-access-token:${token}`, "utf8").toString("base64")}`);
+  expect(apply("merge", { GH_TOKEN: token, GITHUB_SERVER_URL: "https://ghe.example.com" }).GIT_CONFIG_KEY_0).toBe("http.https://ghe.example.com/.extraheader");
+  expect(apply("merge", {})).toEqual({});                                        // no token → nothing added, no throw
+  for (const stage of ["triage", "plan", "implement", "review"]) {
+    expect(apply(stage, { GH_TOKEN: token }), stage).toEqual({ GH_TOKEN: token });
+  }
+});
