@@ -87,17 +87,25 @@ const ABBREV_RE = /^(?:[a-z]\.)+[a-z]?$/i;
  * 백틱은 빈 배열이 됐고 NEVER_AUTOMATE 조기 차단이 아무 경로도 보지 못했다. 이제:
  *   - 백틱 토큰은 어디에 있든 전부 읽는다(공백이 섞이면 공백으로 나눠 각각). 백틱은 쓴 사람이 "이것은 경로다"라고 말한 것이므로
  *     `/`·`.` 모양 검사는 하지 않는다(`Dockerfile`도 경로다) — 예전 규칙 그대로다.
- *   - 목록 항목(`- `·`* `·`+ `·`1. `·`1) `)은 백틱 밖의 글도 읽는다: `(…)` 설명과 백틱 구간을 떼고, 공백·쉼표로 나눈 **모든**
- *     토큰 중 경로 모양(`/`나 `.`을 포함하고 `e.g`·`i.e` 같은 약어가 아닌 것)만 받는다 — 산문 항목(`- 없음`, `- none`)을
- *     경로로 읽지 않기 위해서다. 끝의 `,`·`.`·`;`·`:`는 떼어 낸다. 백틱 설명이 붙은 항목(`- a/b.toml (see \`ci.yml\`)`)도,
- *     백틱 없는 쉼표 목록의 두 번째 경로(`- a.js, templates/x.toml`)도 그래서 읽힌다(self-critique, #231).
+ *   - 목록 항목(`- `·`* `·`+ `·`1. `·`1) `)은 백틱 밖의 글도 읽는다: 백틱 구간을 떼고, 경로 문자가 아닌 글자(공백·쉼표·괄호·
+ *     따옴표·한글 조사·`、`…)에서 끊은 **모든** 조각 중 경로 모양(`/`나 `.`을 포함하고 `e.g`·`i.e` 같은 약어가 아닌 것)만 받는다 —
+ *     산문 항목(`- 없음`, `- none`)을 경로로 읽지 않기 위해서다. 끝의 `,`·`.`·`;`·`:`는 떼고, `**굵게**`로 감싼 조각은 속도 읽는다.
+ *     괄호는 버리지 않고 끊는 자리일 뿐이다: `(신규)` 설명은 경로 모양이 아니라 떨어지고, `(templates/x.toml)`·`[링크](a/b.toml)`의
+ *     경로는 읽힌다. 조사가 붙은 `a/b.toml에서`도 `a/b.toml`이 된다(self-critique, #231).
+ *   - 절의 끝을 찾을 때 코드 펜스(```·~~~) 안의 `# …` 줄은 제목이 아니다.
  * 넓게 읽는 쪽은 fail closed 쪽이다: 경로를 더 보면 거부가 늘 뿐이다.
  */
 export function impactPathsOf(body) {
   const text = String(body ?? "");
   const m = /^#{2,3}[ \t]+Impact paths.*$/m.exec(text);
   if (!m) return [];
-  const section = text.slice(m.index + m[0].length).split(/^#{1,3}\s/m)[0];
+  const lines = [];
+  let fence = false;
+  for (const line of text.slice(m.index + m[0].length).split("\n")) {
+    if (/^\s*(?:```|~~~)/.test(line)) fence = !fence;
+    else if (!fence && /^#{1,3}\s/.test(line)) break;
+    lines.push(line);
+  }
   const out = [];
   const keep = (raw, { shaped }) => {
     const p = String(raw).trim().replace(/[,.;:]+$/, "");
@@ -105,12 +113,16 @@ export function impactPathsOf(body) {
     if (shaped && (!/[/.]/.test(p) || ABBREV_RE.test(p))) return;
     if (!out.includes(p)) out.push(p);
   };
-  for (const line of section.split("\n")) {
+  for (const line of lines) {
     for (const t of line.matchAll(/`([^`\n]+)`/g)) for (const tok of t[1].trim().split(/\s+/)) keep(tok, { shaped: false });
     const item = LIST_ITEM_RE.exec(line);
     if (!item) continue;
-    const plain = item[1].replace(/`[^`\n]*`/g, " ").replace(/\([^)]*\)/g, " ");
-    for (const tok of plain.split(/[\s,]+/)) keep(tok, { shaped: true });
+    const plain = item[1].replace(/`[^`\n]*`/g, " ");
+    for (const tok of plain.split(/[^\w.*/@{}!\[\]-]+/)) {
+      keep(tok, { shaped: true });
+      const bold = /^(\*\*|__)([^/].*[^/])\1$/.exec(tok);
+      if (bold) keep(bold[2], { shaped: true });
+    }
   }
   return out;
 }
@@ -126,6 +138,9 @@ export function queueAdmission({ issue, charter, queued = [], openSelfGenerated 
   const queueMax = Number.isInteger(charter?.back_pressure?.queue_max) ? charter.back_pressure.queue_max : caps.queue_max;
   const reasons = [];
   // rework cf1 — 상한은 러너가 쓴 마커·라벨로만 건다(작성자 갈래 없이: 공유 계정에서는 소유자의 피처도 공장 작성자다).
+  // plan non_goal "open_max/depth_max·openSelfGenerated·기원 사슬의 판정을 바꾸지 않는다"와의 관계: #231 전의 gh.issue()는 작성자를
+  // 싣지 않아 작성자 갈래가 프로덕션에서 한 번도 참이 된 적이 없다 — 지금까지 실제로 돈 판정은 마커 또는 라벨이고, 세 상한 입력
+  // (이 이슈, openSelfGenerated, 기원 사슬)이 모두 `[]`로 그 판정을 그대로 지킨다. 작성자를 실은 것이 상한을 바꾸지 않게 하는 것이다.
   const self = isSelfGenerated(issue, []);
   const body = String(issue?.body ?? "");
 
@@ -197,7 +212,8 @@ export function makeQueueAdmission({ gh, charter, factoryLogins = null }) {
       for (const c of candidates.values()) {
         if (c.number === it.number) continue;
         const full = await gh.issue(c.number);
-        if (labelsOf(full).some((l) => ACTIVE.includes(l)) && isSelfGenerated(full, logins)) openSelfGenerated.push({ number: c.number });
+        // 상한 입력은 셋 다 같은 판정(마커 또는 라벨, rework cf1 — queueAdmission의 `self` 주석)으로 센다.
+        if (labelsOf(full).some((l) => ACTIVE.includes(l)) && isSelfGenerated(full, [])) openSelfGenerated.push({ number: c.number });
       }
       const cache = new Map();
       const byNumber = (n) => cache.get(n) ?? null;

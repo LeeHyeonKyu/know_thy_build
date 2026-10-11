@@ -293,6 +293,26 @@ test("test_231_impact_paths_reads_backticked_and_plain_list_items", () => {
     const refused = queueAdmission({ issue: { ...person, body: `## Impact paths\n${body}\n\n## done_when\n- [ ] \`test_1_a\`` }, charter: charter({ never_automate: ["templates/factory/**"] }), ...base });
     expect(refused.reasons.join(" "), body).toContain("NEVER_AUTOMATE: templates/factory/harness.toml (glob templates/factory/**)");
   }
+  // self-critique (#231) — 괄호 안·링크 대상·조사가 붙은 경로·따옴표·굵게·코드 펜스 속 `#` 줄: 모두 경로를 내고, 진짜 CHARTER에서 거부된다
+  const leaky = {
+    link: "- [harness](templates/factory/harness.toml)",
+    parenthesised: "- harness config (templates/factory/harness.toml)",
+    koreanParticle: "- templates/factory/harness.toml에서",
+    quoted: "- \"templates/factory/harness.toml\"",
+    ideographicComma: "- templates/factory/harness.toml、x",
+    bold: "- **templates/factory/harness.toml**",
+    fencedHashLine: "```\n# note\n```\n- templates/factory/harness.toml",
+  };
+  const realCharter231 = loadCharter231(ROOT231);
+  for (const [name, item] of Object.entries(leaky)) {
+    const sectionBody = `## Impact paths\n${item}\n\n## done_when\n- [ ] \`test_1_a\``;
+    expect(impactPathsOf(sectionBody), name).toContain("templates/factory/harness.toml");
+    const refused = queueAdmission({ issue: { ...person, body: sectionBody }, charter: realCharter231, ...base });
+    expect(refused.ok, name).toBe(false);
+    expect(refused.reasons.join(" "), name).toContain("NEVER_AUTOMATE: templates/factory/harness.toml (glob templates/factory/**)");
+  }
+  // 펜스 밖의 제목은 여전히 절을 끝낸다
+  expect(impactPathsOf("## Impact paths\n```\n# note\n```\n- a/b.ts\n## done_when\n- c/d.ts")).toEqual(["a/b.ts"]);
 });
 
 /** 진짜 `:issue` 템플릿의 첫 마크다운 블록(Impact paths가 든 것)을 그대로 꺼내고, 자리표시자를 실제 값으로 채운다. */
@@ -462,8 +482,17 @@ test("test_231_factory_flaky_issue_under_pat_author_still_admitted", async () =>
     expect(deep.ok).toBe(false);
     expect(deep.reasons.join(" ")).toMatch(/generation 2 > 1/);
   }
-  // 상한의 판정(마커 또는 라벨 또는 공장 작성자)은 그대로다: 사람이 붙여 넣은 마커도 상한에는 센다
-  expect(isSelfGenerated({ number: 70, body: "Detected while implementing #7.", labels: ["backlog"], author: "LeeHyeonKyu" }, ["bot-hk"])).toBe(true);
+  // 상한의 판정은 마커 또는 라벨이다(rework cf1 — 심사 경로는 작성자 갈래를 쓰지 않는다): 사람이 붙여 넣은 마커(done_when 있음)도,
+  // 라벨만 단 이슈도 상한에는 센다 — 상한을 면제 규칙(공장 작성자의 마커)으로 좁히거나 라벨 경로를 좁히면 여기서 실패한다
+  const fullCaps = [1, 2].map((number) => ({ number }));
+  for (const it of [
+    { number: 70, body: `${person.body}\n\nDetected while implementing #7.`, labels: ["backlog"], author: "LeeHyeonKyu" },
+    { number: 72, body: person.body, labels: ["backlog", "factory:flaky"], author: "LeeHyeonKyu" },
+  ]) {
+    const r = queueAdmission({ issue: it, charter: charter(), ...base, openSelfGenerated: fullCaps });
+    expect(r.self_generated, String(it.number)).toBe(true);
+    expect(r.reasons, String(it.number)).toEqual(["self-generated open 2 ≥ 2 (self_generated.open_max)"]);
+  }
   // #136 세대 접기는 그대로다 — 사람 #17 → 개선 #20 → 하네스 #50 → flaky #70(소유자 작성)은 한 세대
   const spec = {
     17: { number: 17, body: person.body, labels: ["backlog"], author: humanAuthor("LeeHyeonKyu") },
