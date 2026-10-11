@@ -3228,8 +3228,8 @@ export async function mirrorMatchesBranchHead({ root, run, importer, match = mir
 }
 
 /**
- * #253 — 오버레이 드리프트 사유의 **단일 출처**. 두 자리(아래 `assertStageBranch`, 쓰기 금지 스테이지의
- * `assertCleanWorktree`)가 같은 함수로 사유를 만든다 — 한 자리만 고쳐지는 것을 막는다(1.4.22의 전례).
+ * #253 — `assertStageBranch`(아래, 쓰기 스테이지의 세션 뒤 가드)가 돌려주는 오버레이 드리프트 사유. 이 사유는
+ * `undecidable — …`/`branch: FAIL — …`로 운영자와 sweeper의 다음 빌더에게 그대로 간다.
  * 접두 `factory config changed during the stage: <paths>`는 그대로다(하류가 그 접두를 읽는다). 드리프트한 경로에
  * mirrorStep의 가족(`inMirrorFamily`)이 하나라도 있으면 처방을 덧붙인다: 미러는 러너가 만들고, self-mirror 테스트는
  * 빌더 세션 안에서 노트와 함께 통과한다(`factory/test/helpers/builder-session.js`). git diff 실패(`drift.reason`)는 그대로.
@@ -3665,7 +3665,7 @@ async function main() {
       // 브랜치의 harness.toml을 남겨 두는데, 이 재확인이 하네스 모드를 모르면 그 파일을 main과 비교해 "변경됐다"고 읽는다 —
       // 1.4.21이 overlay만 고치고 이 자리를 놓쳐 #9가 같은 사유로 한 번 더 섰다.
       const drift = await overlayDrift({ run, cwd: root, sha: overlaySha, harnessIssue: overlayHarness });
-      return drift.ok ? clean : { ok: false, dirty: drift.paths, reason: overlayDriftReason(drift) };
+      return drift.ok ? clean : { ok: false, dirty: drift.paths, reason: drift.reason || `factory config changed during the stage: ${drift.paths.join(", ")}` };
     },
     /**
      * 감사 H3 — 컨텍스트는 `run`/`base`를 받아야 tier 바닥(diff)을 계산할 수 있다. base를 못 구하는
