@@ -186,8 +186,9 @@ export function parseRunRecord(text, { reviewReworks = false } = {}) {
       // #212 dw6 — only on request (`lib/budget.js`): a review section that did NOT pass the round — its runner `transition:` line goes
       // anywhere but factory:approved (factory:rework, and factory:needs-human when the rejection lands at round K / the 2K ceiling,
       // which is where the #196 flow's re-review sits). A forged line can only ADD a rejection (that counts a conflict round again) —
-      // it never hides one.
-      ...(reviewReworks && m[1] === "review" && bodyLines.some((l) => /^transition: factory:(?!approved(?:\s|$))\S/.test(l)) ? { review_rejected: true } : {}),
+      // it never hides one. cf2: a REFUSED transition (`transition refused: <reason>`, run-stage `refusal(t)`) did not reach
+      // factory:approved either — transition.js parks the issue in factory:needs-human — so it ends the conflict round the same way.
+      ...(reviewReworks && m[1] === "review" && bodyLines.some((l) => /^transition: factory:(?!approved(?:\s|$))\S/.test(l) || /^transition refused:/.test(l)) ? { review_rejected: true } : {}),
     });
     // #212 skeptic — a runner revocation (first body line, naming this section's implement stage and runner) withdraws ITS run's
     // conflict-round tag: tag without marker is not a conflict round. The runner writes it right after its own tag, so it is the LATEST

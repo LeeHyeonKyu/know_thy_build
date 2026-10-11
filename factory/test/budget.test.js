@@ -334,3 +334,20 @@ test("test_212_conflict_round_cost_is_revoked_when_the_next_review_rejects", () 
   expect(lifetimeCostOf(later.read())).toMatchObject({ usd: 4, conflictUsd: 9.5, conflictRuns: 1 });
   expect(lifetimeCostOf(later.read())).not.toHaveProperty("conflictRevokedRuns");
 });
+
+test("test_212_conflict_round_cost_is_revoked_when_the_next_review_transition_is_refused", () => {
+  // cf2 (round 2) — dw6: a review that ends anywhere other than factory:approved revokes the exclusion. A review that approves but whose
+  // transition to factory:approved is REFUSED (transition.js swaps the label to factory:needs-human) writes `transition refused: <reason>`
+  // and no `transition:` line — the issue ended in needs-human, so the conflict round's cost counts as today.
+  const cap = (rec) => budgetCheck({ charter: { budget: { usd_per_issue: 60 } }, recordText: rec.read() });
+  const refused = record212();
+  refused.normal("gha-1", 55); refused.conflict("gha-2", 9.5);
+  appendRunRecord({ root: refused.root, issue: 212, stage: "review", runnerId: "gha-3", lines: ["verify: ok", "transition refused: review head_sha abc != PR head def"] });
+  expect(lifetimeCostOf(refused.read())).toEqual({ usd: 64.5, runs: 3, priced: 2, conflictRevokedUsd: 9.5, conflictRevokedRuns: 1 });
+  expect(cap(refused)).toMatchObject({ ok: false, usd: 64.5 });
+  // control: the same record with an approving transition keeps the exclusion.
+  const approved = record212();
+  approved.normal("gha-1", 55); approved.conflict("gha-2", 9.5);
+  appendRunRecord({ root: approved.root, issue: 212, stage: "review", runnerId: "gha-3", lines: ["verify: ok", "transition: factory:approved"] });
+  expect(lifetimeCostOf(approved.read())).toEqual({ usd: 55, runs: 2, priced: 1, conflictUsd: 9.5, conflictRuns: 1 });
+});
