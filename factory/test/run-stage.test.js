@@ -6791,3 +6791,25 @@ test("test_206_gate_red_finding_drops_the_unscrubbable_head_of_a_tail_cut_comman
   const [short] = gateRedFindings(redGates({ "must-not": { status: "RED", code: null, log: mustNotLog195() } }), { env });
   expect(short.detail).toContain("factory/test/evidence.test.js");
 });
+
+// skeptic (#206): the sec1 head drop belongs to the command gates' raw tail cut (gates.js:384) ONLY. A must-not log is built
+// in one piece (gates.js:647) — never tail-cut, one line ("; "-joined) — so a LONG one (40 `.github/**` touches, well past
+// 2000 chars) must still give its reason from the START of the log, head-cut to 300: not the blind old wording.
+test("test_206_long_single_line_must_not_log_keeps_its_reason_from_the_start", async () => {
+  const contract = mustNotContract("must_not:\n- touch: `.github/**`\n");
+  const changed = Array.from({ length: 40 }, (_, i) => `.github/workflows/w${String(i).padStart(2, "0")}-nightly-release-pipeline.yml`);
+  const v = mustNotViolations({ contract, changed, added: new Map() });
+  expect(v).toHaveLength(40);
+  const note = "";
+  const log = `issue must_not contract violated: ${v.map((x) => `${x.file}: ${x.rule}`).join("; ")}${note}`; // gates.js:647, byte-exact
+  expect(log.length).toBeGreaterThan(2000);
+  expect(log).not.toContain("\n");
+  const findings = await findingsVia({ "must-not": { status: "RED", code: null, duration_ms: 0, log } });
+  const mn = findings.find((f) => f.check === "gate:must-not");
+  expect(mn.detail).toBe(`gate must-not RED — ${log.slice(0, GATE_LOG_FINDING_MAX)}`);
+  expect(mn.detail).toContain(".github/workflows/w00-nightly-release-pipeline.yml");
+  expect(mn.detail).not.toContain("(no test names; see the gate log)");
+  // the same long synthetic log carrying a line break is still read from its start (no first line is dropped)
+  const [ml] = gateRedFindings(redGates({ "must-not": { status: "RED", code: null, log: log.replace("; ", "\n") } }), { env: {} });
+  expect(ml.detail).toBe(`gate must-not RED — ${log.replace("; ", " ").slice(0, GATE_LOG_FINDING_MAX)}`);
+});

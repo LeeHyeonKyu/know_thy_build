@@ -152,26 +152,31 @@ const GATE_LOG_TAIL_CUT = 2000;
  * ① `scrubText` + `SECRET_ENV`(gates.js의 gates-detail과 같은 규칙 원천 — 새 정규식이 아니다)로 스크럽,
  * ② 개행 → 공백, ③ 코드펜스(```)를 깨뜨린다 — 코멘트의 JSON 블록은 `}` 뒤 첫 ```에서 끝나는 lazy 정규식으로 읽히므로
  * (issue-comments.js SELF_GATE_FINDINGS_JSON) 로그 속 `} ```` 하나가 블록을 잘라 findings 전체를 잃게 한다,
- * ⓪ 생산자가 스크럽 전에 꼬리를 자른 log(`GATE_LOG_TAIL_CUT`자)는 잘린 첫 줄을 버린다(sec1),
+ * ⓪ 생산자가 스크럽 전에 꼬리를 자른 log — **명령 게이트**(정수 `code`)의 `GATE_LOG_TAIL_CUT`자 log뿐 — 는 잘린 첫 줄을
+ * 버린다(sec1: 그 머리는 log의 시작이 아니라 생산자의 자른 자리다). 합성 게이트(must-not 등, `code: null`)는 통째로 만든
+ * log라 길어도 시작부터 읽는다,
  * ④ 앞 `GATE_LOG_FINDING_MAX`자. 스크럽이 자르기보다 먼저여야 경계에 걸친 비밀이 반쪽으로 새지 않는다.
  * log가 비어 있으면 예전 문구다. ` — ${reason}` 접미 규칙은 바뀌지 않는다.
  */
 export function gateRedFindings(gates, { env = process.env } = {}) {
   const secrets = SECRET_ENV.map((k) => env?.[k]).filter((v) => typeof v === "string" && v);
-  const logReason = (raw) => {
+  const logReason = (raw, tailCut) => {
     if (typeof raw !== "string") return "";
     // sec1: a command gate's log is the RAW tail `(stderr + stdout).slice(-GATE_LOG_TAIL_CUT)` (gates.js), cut before any
     // scrub — its head is that cut, and a secret split there is a remnant no scrub rule recognises. Such a log drops its
-    // partial first line; with no line break there is no safe head at all (→ the old wording).
-    const nl = raw.length >= GATE_LOG_TAIL_CUT ? raw.indexOf("\n") : -1;
-    const log = raw.length < GATE_LOG_TAIL_CUT ? raw : nl < 0 ? "" : raw.slice(nl + 1);
+    // partial first line; with no line break there is no safe head at all (→ the old wording). Only a COMMAND gate (an
+    // integer exit `code`) is tail-cut: the synthetic gates (must-not, prove-test, … — `code: null`) build their log whole,
+    // often as one long line, and are read from their start.
+    const cut = tailCut && raw.length >= GATE_LOG_TAIL_CUT;
+    const nl = cut ? raw.indexOf("\n") : -1;
+    const log = !cut ? raw : nl < 0 ? "" : raw.slice(nl + 1);
     if (!log.trim()) return "";
     const one = scrubText(log, { secrets }).text.replace(/\s*[\r\n]+\s*/g, " ").replace(/`{3,}/g, (m) => "'".repeat(m.length)).trim();
     return one.slice(0, GATE_LOG_FINDING_MAX);
   };
   return Object.entries(gates?.gates || {}).filter(([, g]) => g?.status === "RED").map(([name, g]) => {
     const ids = (Array.isArray(g.failing_ids) && g.failing_ids.length ? g.failing_ids : g.detail?.failing || []).slice(0, 10).join(", ");
-    const why = ids ? `failing: ${ids}` : logReason(g.log) || "failing: (no test names; see the gate log)";
+    const why = ids ? `failing: ${ids}` : logReason(g.log, Number.isInteger(g.code)) || "failing: (no test names; see the gate log)";
     return { check: `gate:${name}`, blocking: true, detail: `gate ${name} RED — ${why}${g.reason ? ` — ${g.reason}` : ""}` };
   });
 }
