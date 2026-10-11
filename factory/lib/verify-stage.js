@@ -266,13 +266,16 @@ export function normalizePlanHandoff(plan, { maxDoneWhen = 6 } = {}) {
   const covered = new Set();
   for (const d of doneWhen) if (Array.isArray(d?.covers)) for (const c of d.covers) covered.add(String(c).trim().toLowerCase());
   const signoffObjections = dissent
+    // rule (a)'s own severity test: a `low` entry is not a risk (as before #239) — no exemption needed, no note.
+    .filter((d) => !(typeof d?.severity === "string" && SEVERITY_RANK[d.severity] < SEVERITY_RANK.medium))
     .filter((d) => isSignoffObjection(d) && !covered.has(d.id.trim().toLowerCase()))
     .map((d) => {
       const raw = typeof d.objection === "string" ? d.objection : typeof d.text === "string" ? d.text : "";
-      return { id: d.id, role: d.role.trim(), text: raw.replace(/\s+/g, " ").trim().slice(0, SIGNOFF_TEXT_MAX) };
+      return { id: d.id, role: d.role.trim(), text: raw.slice(0, SIGNOFF_TEXT_MAX) };   // the first 120 characters, verbatim
     });
   const notes = [
-    ...signoffObjections.map((o) => `plan: unresolved sign-off objection from ${o.role}: ${o.text}`),
+    // one record line per objection: each whitespace character becomes one space (no collapsing, the cut does not move).
+    ...signoffObjections.map((o) => `plan: unresolved sign-off objection from ${o.role}: ${o.text.replace(/\s/g, " ")}`),
     ...(dropped.length ? [`plan: skeptic items beyond max_done_when dropped: ${dropped.join(", ")}`] : []),
   ];
   return { doneWhen, dropped, signoffObjections, notes };

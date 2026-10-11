@@ -547,3 +547,56 @@ test("test_239_skeptic_items_beyond_max_done_when_are_dropped_not_rejected", asy
   expect(o.reasons.join("; ")).toMatch(/dissent without done_when: d9/);
   expect(validatePlanHandoff(orphan, { maxDoneWhen: 6 }).join()).toMatch(/dissent without done_when: d9/);
 });
+
+/**
+ * #239 (dw2, skeptic finding) — with several skeptic items over the cap, the **trailing** skeptic items are the ones dropped
+ * (as documented), and the covers of the kept set are the ones that count: a dissent covered only by a dropped trailing item
+ * is rejected, one covered by a kept leading skeptic item passes.
+ */
+test("test_239_skeptic_overflow_drops_the_trailing_skeptic_items", async () => {
+  const limits = { planLimits: { max_done_when: 6 } };
+  const planner = [1, 2, 3, 4, 5].map((n) => dw239(n));
+  const sk = (n, covers) => dw239(n, { source: "skeptic", ...(covers ? { covers } : {}) });
+  // 5 planner + 3 skeptic = 8 > 6 → two skeptic items go; the leading one (s6) stays.
+  const r = verifyPlan(planFix({
+    dissent_log: [{ id: "dA", role: "skeptic", severity: "medium", objection: "kept cover" }],
+    done_when: [...planner, sk(6, ["dA"]), sk(7), sk(8)],
+  }), limits);
+  expect(r.reasons).toEqual([]);
+  expect(r.data.done_when.map((d) => d.id)).toEqual(["dw1", "dw2", "dw3", "dw4", "dw5", "dw6"]);
+  expect(r.planNotes).toEqual(["plan: skeptic items beyond max_done_when dropped: dw7, dw8"]);
+
+  // Interleaved: a skeptic item between planner items is kept when it is not among the trailing overflow.
+  const mid = verifyPlan(planFix({ done_when: [dw239(1), sk(2), dw239(3), dw239(4), dw239(5), dw239(6), sk(7)] }), limits);
+  expect(mid.data.done_when.map((d) => d.id)).toEqual(["dw1", "dw2", "dw3", "dw4", "dw5", "dw6"]);
+  expect(mid.planNotes).toEqual(["plan: skeptic items beyond max_done_when dropped: dw7"]);
+
+  // The only cover of dB sits on a dropped trailing item → rejected by name, even though a kept skeptic item exists.
+  const o = verifyPlan(planFix({
+    dissent_log: [{ id: "dB", role: "skeptic", severity: "medium", objection: "dropped cover" }],
+    done_when: [...planner, sk(6), sk(7), sk(8, ["dB"])],
+  }), limits);
+  expect(o.ok).toBe(false);
+  expect(o.reasons.join("; ")).toMatch(/dissent without done_when: dB — /);
+});
+
+/**
+ * #239 (dw1, skeptic finding) — the exemption and the record line follow rule (a)'s severity: a `low` sign-off entry is not
+ * a risk (as before #239), so it gets neither `signoff_objections` nor a record line; a severity-less one is treated as
+ * medium. The handoff carries the objection's first 120 characters verbatim; the single-line record maps each whitespace
+ * character to one space (a newline would split the run record line) without collapsing runs or shifting the cut.
+ */
+test("test_239_signoff_severity_and_verbatim_first_120_chars", async () => {
+  const low = verifyPlan(planFix({ dissent_log: [{ id: "signoff-skeptic", role: "skeptic", severity: "low", objection: "minor nit" }] }));
+  expect(low.ok).toBe(true);
+  expect("signoff_objections" in low.data).toBe(false);
+  expect(low.planNotes).toEqual([]);
+
+  const objection = "first  line\nsecond\tline   " + "x".repeat(200);
+  const head = objection.slice(0, 120);
+  expect(head).toBe("first  line\nsecond\tline   " + "x".repeat(94));
+  const none = verifyPlan(planFix({ dissent_log: [{ id: "signoff-skeptic", role: "skeptic", objection }] }));
+  expect(none.ok).toBe(true);
+  expect(none.data.signoff_objections).toEqual([{ id: "signoff-skeptic", role: "skeptic", text: head }]);
+  expect(none.planNotes).toEqual([`plan: unresolved sign-off objection from skeptic: first  line second line   ${"x".repeat(94)}`]);
+});
