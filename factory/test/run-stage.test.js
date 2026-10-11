@@ -6649,8 +6649,9 @@ test("test_239_review_record_carries_r1_verdicts_and_flip_count", async () => {
  * still goes through the real end-anchored parser (merge refuses on a miss), in both the R1-present and R1-absent paths.
  */
 test("test_239_review_evidence_line_still_parses_after_flip_count", async () => {
-  const { parseReviewEvidence, reviewEvidenceLine } = await import("../lib/run-record.js");
-  const expected = reviewEvidenceLine({ runId: "9001", runnerId: "gha-9001", headSha: "b".repeat(40), round: 1, decision: "approved", verdicts: [{ role: "architect", verdict: "approve" }, { role: "skeptic", verdict: "approve" }] });
+  const { parseReviewEvidence } = await import("../lib/run-record.js");
+  // A literal, not the writer's output: if `reviewEvidenceLine`'s format moved, expected and actual must not move together.
+  const expected = `review-evidence: run_id=9001 runner=gha-9001 head_sha=${"b".repeat(40)} round=1 decision=approved verdicts=architect=approve,skeptic=approve qa_manifest=none qa_claims=none`;
   for (const r1 of [[{ role: "architect", verdict: "reject" }, { role: "skeptic", verdict: "approve" }], null]) {
     const lines = [];
     expect(await review239({ r1, lines })).toBe(0);
@@ -6664,4 +6665,42 @@ test("test_239_review_evidence_line_still_parses_after_flip_count", async () => 
     expect(parsed).not.toBe(null);
     expect(parsed).toEqual(expect.objectContaining({ headSha: "b".repeat(40), decision: "approved", verdicts: "architect=approve,skeptic=approve", round: 1 }));
   }
+});
+
+/**
+ * #239 (dw4, skeptic finding) — every review exit that writes a closing record carries the `review-r1:` line, not only the
+ * success paths: the `review: incomplete` needs-human exit and the K-exhausted exit whose brief comment cannot be posted
+ * are exactly the runs where the R1 data matters. Both the populated line and the placeholder are pinned on each.
+ */
+test("test_239_review_r1_line_on_incomplete_and_k_restart_fail_exits", async () => {
+  // (a) review: incomplete — the roster names a role with no verdict.
+  const incomplete = async (r1) => {
+    const lines = [];
+    const verdicts = [reviewVerdictK("architect", "approve")];
+    const deps = kDeps({
+      round: 1, verdicts,
+      buildContext: async () => ({ roster: ["architect", "skeptic"], orchestration: "workflow", limits: { K: 3 } }),
+      verifyStage: () => ({ ok: true, reasons: [], data: { head_sha: "b".repeat(40), verdicts, ...(r1 ? { r1_verdicts: r1 } : {}) } }),
+      runRecord: (l) => lines.push(...l),
+    });
+    expect(await runStage({ stage: "review", issue: 239, deps, runnerId: "gha-9001", runId: "9001" })).toBe(2);
+    expect(lines.some((l) => l.startsWith("review: incomplete — missing verdicts: skeptic"))).toBe(true);
+    return lines.filter((l) => l.startsWith("review-r1:"));
+  };
+  expect(await incomplete([{ role: "architect", verdict: "reject" }])).toEqual(["review-r1: architect=reject r2_flipped=1"]);
+  expect(await incomplete(null)).toEqual(["review-r1: (not carried by this workflow)"]);
+
+  // (b) K exhausted, restart chosen, the brief comment fails → no transition, but the record still carries review-r1.
+  const kFail = async (r1) => {
+    const gh = gh174({ failComment: (body) => K_RESTART.test(body) });
+    await seedRework174(gh, 2);
+    const lines = [];
+    const d = reviewDeps174(gh, { verdicts: verdicts174(MF174), lines, data: r1 ? { r1_verdicts: r1 } : {} });
+    expect(await review174(d)).not.toBe(0);
+    expect(d.transition).not.toHaveBeenCalled();
+    expect(lines.some((l) => /k-restart: FAIL — the brief comment could not be posted/.test(l))).toBe(true);
+    return lines.filter((l) => l.startsWith("review-r1:"));
+  };
+  expect(await kFail([{ role: "correctness", verdict: "approve" }, { role: "qa", verdict: "approve" }])).toEqual(["review-r1: correctness=approve,qa=approve r2_flipped=1"]);
+  expect(await kFail(null)).toEqual(["review-r1: (not carried by this workflow)"]);
 });
