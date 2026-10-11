@@ -32,14 +32,6 @@ export function baseInstallCommand(harness, tmp, exists = existsSync) {
 }
 
 /**
- * #257 — proveTest/proveFixedTests가 `exists`를 받지 않았을 때 **설치 탐침**에 쓰는 기본값. `git worktree add`가 실제로 만든
- * 워크트리에는 언제나 `.git`(gitdir 파일)이 있다 — 그것이 없는 경로의 lockfile은 base 커밋의 것이 아니라 그 자리에 남은
- * 잔재다(#253: 러너의 /tmp/wt에 놓인 package-lock.json이 `npm ci`를 골랐다). 실제 워크트리에서는 결과가 예전과 같다.
- * 테스트 파일의 존재 확인(proveFixedTests의 missing)은 이 탐침이 아니라 그대로 existsSync다.
- */
-const worktreeInstallProbe = (tmp) => (p) => existsSync(join(tmp, ".git")) && existsSync(p);
-
-/**
  * base 실행의 실패가 **이 변경에 대해 아무것도 말해주지 않는** 종류인가(감사 M2). 모듈을 못 찾거나
  * ESM/CJS 경계에서 죽은 것은 "base에 그 기능이 없다"가 아니라 "base에서 테스트가 아예 시작되지
  * 못했다"다 — 증명이 아니라 판정 불가다.
@@ -127,7 +119,7 @@ export function selfReferentialTests(addedTests = [], readFile) {
   return hits;
 }
 
-export async function proveTest({ run, cwd, harness, base, addedTests, addedFiles = [], mode = "prove", tmp = `${cwd}/.factory/out/prove-wt`, exists }) {
+export async function proveTest({ run, cwd, harness, base, addedTests, addedFiles = [], mode = "prove", tmp = `${cwd}/.factory/out/prove-wt`, exists = existsSync }) {
   if (!harness.commands?.test_files) return { ...MISSING_TEST_FILES };
   if (!addedTests?.length) return { ok: false, detail: "no new tests in this change (done_when must be backed by new tests)" };
   const g = (args) => run("git", args, { cwd });
@@ -147,7 +139,7 @@ export async function proveTest({ run, cwd, harness, base, addedTests, addedFile
     const indexNote = ita.code === 0 ? "" : ` (note: intent-to-add of the copied tests failed in the base worktree: ${String(ita.stderr || "").trim().slice(0, 120)})`;
     // 감사 M2 — 설치가 실패하면 그 base 실행은 무엇을 말하든 믿을 수 없다. fail closed:
     // "실패했으니 증명됐다"가 정확히 이 게이트가 죽었던 방식이다.
-    const install = baseInstallCommand(harness, tmp, exists ?? worktreeInstallProbe(tmp));
+    const install = baseInstallCommand(harness, tmp, exists);
     if (install) {
       const ins = await run("bash", ["-lc", install], { cwd: tmp });
       if (ins.code !== 0) {
@@ -226,16 +218,16 @@ export async function repeatNewTests({ run, cwd, harness, addedTests, times, ful
  * 에서 돌려 **RED**(판정 불가 아님)를 확인하고 head에서 **GREEN**을 확인한다 — 그 둘이 이 변경의 증명이다.
  * 목록의 파일은 base에도 있으므로 복사하지 않는다; base에서 통과하면 "고친 것이 없다"(RED), base에서 모듈 오류면 판정 불가.
  */
-export async function proveFixedTests({ run, cwd, harness, base, tests, tmp = `${cwd}/.factory/out/prove-wt`, exists }) {
+export async function proveFixedTests({ run, cwd, harness, base, tests, tmp = `${cwd}/.factory/out/prove-wt`, exists = existsSync }) {
   if (!harness.commands?.test_files) return { ...MISSING_TEST_FILES };
   if (!tests?.length) return { ok: false, detail: "fixes_tests: list is empty" };
   const g = (args) => run("git", args, { cwd });
   const add = await g(["worktree", "add", "--detach", tmp, base]);
   if (add.code !== 0) return { ok: false, detail: `worktree add failed: ${add.stderr}` };
   try {
-    const missing = tests.filter((f) => !(exists ?? existsSync)(join(tmp, f)));
+    const missing = tests.filter((f) => !exists(join(tmp, f)));
     if (missing.length) return { ok: false, misconfigured: true, detail: `fixes_tests names files that do not exist on base ${base.slice(0, 7)}: ${missing.join(", ")} — the marker must list EXISTING tests that are red on base` };
-    const install = baseInstallCommand(harness, tmp, exists ?? worktreeInstallProbe(tmp));
+    const install = baseInstallCommand(harness, tmp, exists);
     if (install) {
       const ins = await run("bash", ["-lc", install], { cwd: tmp });
       if (ins.code !== 0) return { ok: false, misconfigured: true, inconclusive: [...tests], detail: `base dependency install failed (${install}, exit ${ins.code}) — the base run cannot prove anything: ${String(ins.stderr || ins.stdout || "").trim().slice(0, 200)}` };
