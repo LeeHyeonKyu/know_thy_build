@@ -73,10 +73,16 @@ export function lifetimeCostOf(recordText) {
  * factory:rework, or factory:needs-human when the rejection lands at round K): forged text can add
  * a rejection — the round then counts, as today — but cannot hide one. The K side reads the same event from the issue comments
  * (`lib/retro/issue-comments.js` `conflictExemptIndices`: the next rework after the round is not the merge stage's).
+ * cf1/spec1 (round 3) — "the next round" is an implement section that RAN a round, not any implement section: runStage also writes
+ * implement sections that are not rounds (`duplicate-run: skipped`, `entry state … — nothing to do`, `lock: release failed` — none
+ * carries a usage line), and stopping at one of those hid the rejection behind it. A round is a section with a parsed usage line,
+ * an engine crash or a conflict-round tag. A round this misses only lets a later rejection count the cost (the safe side).
  */
+const startsRound = (e) => e.stage === "implement"
+  && (e.engine_crash || e.conflict_round || e.cost_usd != null || e.num_turns != null || e.input_tokens != null || e.output_tokens != null);
 function reviewRejectedAfter(entries, i) {
   for (let j = i + 1; j < entries.length; j++) {
-    if (entries[j].stage === "implement") return false;
+    if (startsRound(entries[j])) return false;
     if (entries[j].review_rejected) return true;
   }
   return false;
