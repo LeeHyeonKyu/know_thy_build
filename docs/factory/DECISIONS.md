@@ -4620,6 +4620,14 @@ doctor-ci의 토큰 검사는 `continue-on-error`라 잡을 죽이지 않지만 
 - 데몬 경쟁: 진입 재심사의 전이는 claim을 쥔 채로 끝난다. claim을 잃은 런은 이 자리에 오기 전에 exit 2로 끝난다(KTB-28).
   이를 직접 고정하는 테스트는 없다.
 
+**되돌릴 때 남는 것**(이 변경을 revert해도 저장소·이슈에 남고 자동으로 치워지지 않는다 — 정리 도구는 #249 plan의 non_goals에 따라 만들지 않았다):
+- retro가 `backlog`로 만든 성숙도 승격 이슈 중 문이 거부한 것은 revert 뒤에도 `backlog`에 남고, 그 위의 `factory-harness-not-queued`
+  코멘트도 남는다. retro의 제목 dedup이 같은 제목의 새 이슈를 막으므로 revert된 retro가 그 이슈를 큐 라벨로 다시 만들지 않는다 —
+  사람이 큐에 넣거나 닫는다.
+- triage 진입 재심사·로컬 진입·blocked 재시도 hop이 이미 쓴 라벨(`factory:needs-info`·`factory:wont-do`·`factory:needs-human`, hop 거부로
+  남은 `factory:blocked`)과 그 `factory-transition:v1` 전이 코멘트는 그대로다. revert는 그 이슈들을 큐로 되돌리지 않는다.
+- retro `_retro.md` 이력의 하네스 단계에 실린 `queued: false`·`queue_reason` 필드는 기록으로 남는다.
+
 **이 항목이 대체하는 기존 기록**(옛 ADR 본문은 고치지 않는다 — 가리키는 방향은 여기서 그쪽이다):
 - Plan 4 retro 결정 "retro는 절대 라벨을 옮기지 않는다": 예외가 하나 생겼다. retro가 방금 만든 성숙도 승격 이슈의 `backlog → factory:queue`
   한 걸음이고, 그 걸음은 리허설과 큐 진입 심사를 실은 `transition()`으로만 간다(`makeRetroCreateIssue`). 기존 이슈의 라벨은 여전히 옮기지 않는다.
@@ -4636,7 +4644,7 @@ doctor-ci의 토큰 검사는 `continue-on-error`라 잡을 죽이지 않지만 
 `test_230_retro_promotion_issue_is_born_backlog_and_transitioned`, `test_230_admission_codes_classify_per_issue_vs_capacity_refusals`;
 #247: `test_247_triage_refusal_leaves_a_terminal_label_and_one_comment`, `test_247_triage_reentry_does_not_count_itself_against_queue_max`,
 `test_247_local_entry_receives_production_admission_closure`(main과 같은 늦은 CHARTER 심사기로, runStage의 순서대로 로컬 진입이 여전히 큐에 넣는다);
-#249: `test_249_local_entry_production_wiring_passes_admission`(main()의 `localEntry: makeLocalEntry({ … })` 호출 인자 그대로 — 적격 이슈는 큐로, 부적격 이슈는 큐 문의 문장으로 거부), `test_249_retro_history_records_queued_false_with_the_refusal_reason`(retro의 `_retro.md` 이력 `applied`의 하네스 단계가 거부·던짐이면 `queued: false` + 기록 줄과 같은 `queue_reason`을, 통과면 둘 다 싣지 않는다);
+#249: `test_249_local_entry_production_wiring_passes_admission`(main()의 `localEntry: makeLocalEntry({ … })` 호출 인자 그대로 — 적격 이슈는 큐로, 부적격 이슈는 큐 문의 문장으로 거부), `test_249_retro_history_records_queued_false_with_the_refusal_reason`(retro의 `_retro.md` 이력 `applied`의 하네스 단계가 거부·던짐이면 `queued: false` + 기록 줄과 같은 `queue_reason`을, 통과면 둘 다 싣지 않는다), `test_249_retro_admission_uses_the_factory_logins_retro_resolves`(retro 심사기가 retro의 env에서 해석한 공장 로그인을 싣는다 — 마커만 있고 공장 라벨·done_when이 없는 요청은 작성자가 그 로그인일 때만 들어간다);
 #249 sec1: `test_249_blocked_retry_hop_is_refused_by_queue_caps`(작성자가 팩토리가 아닌 마커, 진짜 심사기 — `queue_max`·`depth_max`에서 hop 거부,
 blocked·exit 2·상한이 적힌 기록, 구성원 그대로), `test_249_blocked_retry_hop_with_room_still_reaches_triage`(자리가 있으면 hop이 같은 문으로 큐에 넣고
 에이전트에 닿는다), `test_249_hop_restored_entry_recheck_enforces_queue_max`(hop으로 복구된 진입도 `queue_max` 재심사에서 `transition()`과 같은 문장으로 거부).
