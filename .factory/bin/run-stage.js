@@ -6,7 +6,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { run } from "../lib/exec.js";
 import { makeGh, allChecksGreen, resolveFactoryLogins, PR_BODY_TIMEOUT_MS, bounded } from "../lib/gh.js";
 import { buildEvidence, applyEvidenceSection, evidenceComment, hasEvidenceComment, PR_BODY_MAX_CHARS } from "../lib/evidence.js";
-import { loadCharter, loadHarness, loadRoles, breakerThresholds } from "../lib/config.js";
+import { loadCharter, loadHarness, loadRoles, breakerThresholds, DIRECT_AGENT_STAGES } from "../lib/config.js";
 import { composeEnv } from "../lib/test-env.js";
 import { loadQuarantine, saveQuarantine as writeQuarantine } from "../lib/quarantine.js";
 import { backPressure } from "../lib/back-pressure.js";
@@ -14,7 +14,8 @@ import { runStageGates, verdictLine, gatesDetailLines, commitStatusState, maxTie
 import { isGitDiffError, changedFiles } from "../lib/changed-files.js";
 import { MergeBaseError, MERGE_BASE_BLOCKED_REASON, MERGE_BASE_ERROR_CODE, isMergeBaseError, GIT_DIFF_BLOCKED_REASON } from "../lib/blocked-errors.js";
 import { integrityCheck, protectedPaths, policyViolations } from "../lib/integrity.js";
-import { needsDenyAllWritesHook } from "../lib/agent-md.js";
+import { needsDenyAllWritesHook, DENY_WRITES_TOOLS } from "../lib/agent-md.js";
+import { parseFrontmatter } from "../lib/frontmatter.js";
 import { claim, release, lockHolder } from "../lib/claim.js";
 import { requirementFor } from "../lib/requirements.js";
 import { STAGE_OF_TARGET, ENTRY_LABELS, BLOCKED_RETRY, factoryLabelOf, STATES, TIERS, tierLabel } from "../lib/labels.js";
@@ -111,6 +112,206 @@ export function stageClaudeEnv({ root, stage, harnessIssue = false, harness = nu
   // 잡았다. 격리는 러너가 띄우는 **모든** 프로세스에 걸려야 한다 — 에이전트의 Bash도 이 세션의 자식이다.
   Object.assign(env, composeEnv(harness, root));
   return env;
+}
+
+/**
+ * ── #237 (허점 원장 P-11, T-4) — 에이전트가 하나뿐인 스테이지는 디스패처 없이 에이전트를 직접 부른다 ─────────────────
+ *
+ * `[factory] orchestration = "agent"`일 때(실효값은 `lib/config.js`의 `orchestrationFor` — triage·retro만 `agent`가 된다)
+ * triage는 `claude -p "/factory-triage <n>"`(디스패처 세션 → Workflow 런타임 → 에이전트, 세 겹) 대신 **역할 세션 하나**를
+ * 띄운다. 디스패처가 하던 일은 `loaded.json`을 읽어 Workflow에 넘기고 반환값을 그대로 출력하는 것뿐이었는데, 실패는
+ * 바로 그 전달에서 났다(#170 args를 문자열로, #195·#201 잘라서, own-calendar #124 출력 파일 폴링으로 턴 소진).
+ *
+ * 세션의 모양(ADR-039):
+ *   - 시스템 프롬프트 = 역할 md의 본문(`.claude/agents/factory-<stage>.md`, frontmatter는 설정이지 지시가 아니라 뺀다).
+ *   - 역할 md 경로와 모델 = roles.toml(`directRoleSpec` — `[triage]`·`[retro.analyst]`의 `agent`·`model`), 모델이 없으면
+ *     `loaded`의 roster, 그것도 없으면 md frontmatter의 `model` — 워크플로의 `agent()`와 같은 출처다.
+ *   - 쓰기 도구는 **argv에서** 거부한다(`--disallowedTools`, `DENY_WRITES_TOOLS`) — frontmatter의 `deny-all-writes.sh` 훅이
+ *     `--system-prompt` 세션에도 걸리는지는 M0에서 확인할 수 없으므로 그것에 기대지 않는다(plan d1).
+ *   - 쓸 수 있는 도구 집합 자체를 역할의 `tools:`로 **좁힌다**(`--tools`). 워크플로 경로에서 그 목록은 화이트리스트이고,
+ *     `--allowedTools`는 사전 승인일 뿐 제한이 아니다 — 좁히지 않으면 `.claude/settings.json`이 여는 `Agent`·`Workflow`로
+ *     세션이 쓰기 가능한 자식을 띄울 수 있다(자식에게 부모의 거부 목록이 이어지는지는 확인되지 않았다). 그래서 띄우는
+ *     도구(`Agent`·`Task`·`Workflow`)는 거부 목록에도 넣는다(`DIRECT_DENY_TOOLS`) — `--tools`가 무시되는 CLI에서도 닫히게.
+ *   - 나머지 가드(`dontAsk`·`--settings`·`--max-turns`·예산·`FACTORY_STAGE`)는 디스패처 세션과 같다.
+ * 스테이지 산출물은 그 세션의 **최종 메시지**다. `issue`·`orchestration`·`guarantee`는 에이전트가 아니라 러너가 찍는다.
+ */
+export const DIRECT_GUARANTEE = "verified";
+export const DIRECT_AGENT_MD = Object.freeze({ triage: ".claude/agents/factory-triage.md", retro: ".claude/agents/factory-retro.md" });
+/** 직접 세션이 거부하는 도구: 쓰기 도구 + 다른 세션을 띄우는 도구(읽기 전용 역할이 쓰기 가능한 자식에게 일을 넘기지 못하게). */
+export const DIRECT_DENY_TOOLS = Object.freeze([...DENY_WRITES_TOOLS, "Agent", "Task", "Workflow"]);
+/**
+ * 이 직접 스테이지의 역할 정의 — roles.toml(`[triage]`, `[retro.analyst]`)의 `agent`(md 경로)·`model`. 워크플로의 `agent()`가
+ * 읽는 곳과 같은 출처라, 운영자가 roles.toml을 바꾸면 두 경로가 같이 바뀐다. 이름이 없으면 기본 md·모델 없음(frontmatter가 정한다).
+ */
+export function directRoleSpec(roles, stage) {
+  const def = stage === "retro" ? roles?.retro?.analyst : roles?.[stage];
+  return {
+    md: typeof def?.agent === "string" && def.agent ? def.agent : DIRECT_AGENT_MD[stage],
+    model: typeof def?.model === "string" && def.model ? def.model : null,
+  };
+}
+/** 이 런이 직접 경로인가 — 실효 orchestration(컨텍스트가 실은 값)이 `agent`이고 스테이지가 단일 에이전트 스테이지일 때만. */
+export const isDirectAgentRun = ({ stage, orchestration }) => orchestration === "agent" && DIRECT_AGENT_STAGES.includes(stage);
+
+/**
+ * 역할 md 전문 → `{systemPrompt, model, tools}`. 모델은 넘긴 값(roles.toml)이 이기고, 없으면 frontmatter의 `model`.
+ * `tools`는 frontmatter의 `tools:`(역할이 쓰는 읽기 도구) — 쓰기 도구는 거기 있어도 빼고 넘긴다(거부 목록이 이긴다).
+ */
+export function directAgentRole(mdText, { model = null } = {}) {
+  const { data, body } = parseFrontmatter(String(mdText ?? ""));
+  const tools = (typeof data.tools === "string" ? data.tools.split(",") : Array.isArray(data.tools) ? data.tools : [])
+    .map((t) => String(t).trim()).filter((t) => t && !DIRECT_DENY_TOOLS.includes(t));
+  return { systemPrompt: body.trim(), model: model || (typeof data.model === "string" && data.model ? data.model : null), tools };
+}
+
+/**
+ * 직접 세션의 `claude -p` 인자 — `stageClaudeArgs`의 형제이고 `bin/retro.js`의 `retroClaudeArgs`가 그대로 재사용한다.
+ * 시스템 프롬프트가 비었으면 던진다: 역할 없이 도는 세션은 이 스테이지의 판정자가 아니다(호출자가 fail closed로 받는다).
+ */
+export function directAgentClaudeArgs({ prompt, systemPrompt, model = null, tools = [], maxTurns, settingsPath, charter }) {
+  if (!systemPrompt) throw new Error("direct agent: the role md has no body to use as the system prompt");
+  const allowed = tools.filter((t) => !DIRECT_DENY_TOOLS.includes(t));
+  // 도구 집합을 역할의 목록으로 좁힌다 — 목록이 비면 "기본 도구 전부"로 떨어지지 않게 띄우지 않는다(fail closed).
+  if (!allowed.length) throw new Error("direct agent: the role md names no read tools (`tools:`) to restrict the session to");
+  const args = ["-p", prompt, "--system-prompt", systemPrompt];
+  if (model) args.push("--model", model);
+  // `--tools`는 쓸 수 있는 도구 자체를 정하고, `--allowedTools`는 그것을 `dontAsk` 아래서 묻지 않고 승인한다(디스패처는 자기 커맨드 md의 `allowed-tools`로 받았다).
+  args.push("--tools", allowed.join(","), "--allowedTools", allowed.join(","));
+  args.push("--disallowedTools", DIRECT_DENY_TOOLS.join(","), "--permission-mode", "dontAsk", "--max-turns", String(maxTurns), "--output-format", "json", "--settings", settingsPath);
+  if (charter?.budget?.usd_per_stage) args.push("--max-budget-usd", String(charter.budget.usd_per_stage));
+  return args;
+}
+
+/**
+ * 직접 triage 세션의 사용자 프롬프트. **워크플로가 주입하던 판정 재료를 그대로 싣는다** — CHARTER `triage.default`
+ * (없거나 이상하면 좁은 쪽 `needs-info`)와 러너가 계산한 `explicit_submission`. 문장은 `.claude/workflows/factory-triage.js`의
+ * triagePrompt와 같은 판정표다: 그 파일은 보호 경로라 여기서 import할 수 없고(워크플로 스크립트는 모듈이 아니다), 두 사본이
+ * 갈라지면 판정이 모드에 따라 달라진다 — 한쪽을 고치면 다른 쪽도 고친다(plan open_risks "prompt drift").
+ */
+export function directTriagePrompt({ issue, loaded, contextPath = ".factory/out/context.json", loadedPath = ".factory/out/loaded.json" }) {
+  const role = (Array.isArray(loaded?.roster) ? loaded.roster : []).find((r) => r && r.name === "triage") || {};
+  const t = loaded?.triage || {};
+  const triageDefault = t.default === "ready" || t.default === "needs-info" ? t.default : "needs-info";
+  const submitted = t.explicit_submission === true;
+  return `Read \`${contextPath}\` and \`${loadedPath}\`, your lessons file at \`${role.lessons || ".factory/lessons/factory-triage.md"}\`, `
+    + `\`docs/factory/CHARTER.md\` (sections NEVER_AUTOMATE and Tiers), the spec named by context.spec_path if present, `
+    + `and \`.factory/harness.toml\` [load_bearing]. Judge whether issue #${issue} is something the factory can build `
+    + `and, if so, its tier — per your Lens (a NEVER_AUTOMATE match -> wont-do; done_when not yet writable concretely `
+    + `-> needs-info with <=3 questions, and only questions that cannot be answered by reading the repository; `
+    + `a literal [ready] marker in the issue body -> ready; `
+    + (submitted ? `this issue was explicitly submitted to the queue by ${t.submitted_by || "an unnamed principal"} (loaded.triage.explicit_submission is true), which counts exactly like [ready] -> ready; ` : "")
+    + `anything else -> this repo's charter default, which is \`${triageDefault}\` (CHARTER triage.default) — do NOT invent a \`ready\` of `
+    + `your own; predicted diff paths under docs/** only -> tier docs; touches [load_bearing].paths -> tier load-bearing; `
+    + `otherwise -> tier standard; a bug report with no repro steps -> needs-info). Return exactly the factory.triage.v1 fields: `
+    + `disposition, tier (required when ready), questions (required when needs-info), impact_paths (repo-relative paths this `
+    + `change would touch — the stage re-checks them against the glob-shaped NEVER_AUTOMATE items), reason, summary.\n\n`
+    + `Your final message is the stage artifact and is parsed by a machine: emit ONLY that one JSON object — no prose, no code fence. `
+    + `Do not edit any file.`;
+}
+
+/**
+ * 러너의 도장. 에이전트 답에서 `triage.v1`을 (도장을 얹은 채로) 통과하는 객체를 찾아 `issue`(이 런의 이슈)·
+ * `orchestration: "agent"`·`guarantee`를 **덮어쓴다** — 이 셋은 답이 어떻게 만들어졌는가에 대한 주장이고 그것은
+ * 러너만 안다(워크플로가 자기 반환값에 하던 일과 같다). 못 찾거나 봉투가 오류면 손대지 않는다: 그 산출물은 그대로
+ * verify-stage의 `stage artifact missing or invalid` 경로로 간다(도장이 무효한 답을 살리지 않는다).
+ */
+export function stampDirectArtifact({ out, issue }) {
+  if (!out || out.is_error || typeof out.result !== "string") return out;
+  const stamp = { issue, orchestration: "agent", guarantee: DIRECT_GUARANTEE };
+  const ex = extractStageArtifact({ envelopeResult: out.result, transcriptText: "", validate: (o) => validate("triage.v1", { ...o, ...stamp }) });
+  return ex.ok ? { ...out, result: JSON.stringify({ ...ex.data, ...stamp }) } : out;
+}
+
+/** 운영자가 어느 경로가 돌았는지 읽는 run 기록 한 줄(`usage:` 줄은 그대로 둔다 — 비용 장부가 그 모양을 파싱한다). */
+export const directAgentLine = ({ stage, out }) =>
+  `orchestration=agent (direct ${stage} session, no dispatcher) num_turns: ${out?.num_turns ?? "n/a"} cost_usd: ${out?.total_cost_usd ?? "n/a"} terminal_reason: ${out?.terminal_reason ?? "n/a"}`;
+
+/**
+ * main()의 `claudeP` dep — 테스트가 이 생산자를 그대로 돈다(#174 `makeTransitionDep` 선례). 워크플로 경로는 예전 그대로다
+ * (`stageClaudeArgs`/`stageClaudeEnv`, 같은 파일 기록). 직접 경로는:
+ *   ① 컨텍스트가 이 런의 이슈 것인지 먼저 본다 — 아니면(지난 런의 `context.json`) **세션을 띄우지 않고** 오류 봉투를 돌려준다.
+ *      verify가 그것을 `stage artifact missing or invalid`로 떨어뜨려 needs-human에 세운다(워크플로의 issue-mismatch와 같은 fail closed).
+ *   ② 역할 md를 못 읽거나 비었어도 같은 자리로 간다(역할 없는 세션을 띄우지 않는다).
+ *   ③ 봉투가 정상이면 러너의 도장을 찍는다(`stampDirectArtifact`).
+ */
+export function makeStageClaudeP({ root, stage, issue, run: runner = run, getHarness, getCharter, getRoles = () => loadRoles(root), readFile = (p) => readFileSync(p, "utf8"), record = () => {} }) {
+  const outDir = join(root, ".factory/out");
+  /*
+   * 거부도 이 런의 산출물을 **남긴다**: 거부 봉투로 `<stage>.json`·`<stage>.envelope.json`을 덮는다. 그러지 않으면 지난 런의
+   * 파일(다른 이슈의 유효한 판정일 수도 있다)이 이 런의 needs-human 옆에 그대로 남아, 사람과 `bin/verify-stage.js`가
+   * 그것을 이 런의 출력으로 읽는다.
+   */
+  const refuse = (reason) => {
+    try { record(`direct agent: refused before spawning — ${reason}`); } catch { /* 기록 실패가 거부를 막지 않는다 */ }
+    const out = { is_error: true, subtype: "factory_refused", result: reason, num_turns: 0 };
+    try { mkdirSync(outDir, { recursive: true }); for (const f of [`${stage}.json`, `${stage}.envelope.json`]) writeFileSync(join(outDir, f), JSON.stringify(out)); } catch { /* 기록 실패가 거부를 막지 않는다 */ }
+    return out;
+  };
+  /**
+   * 세션이 **실제로 읽는** 파일(`context.json`·`loaded.json`)이 이 런의 이슈 것인가 — 메모리의 페이로드가 맞아도 디스크가 지난
+   * 런의 것이면 에이전트는 그것으로 판정한다. 파일이 없으면 판정할 재료가 없을 뿐 다른 이슈로 판정하지는 않으므로 통과,
+   * 있는데 못 읽거나 이슈가 다르면 거부 사유를 돌려준다.
+   */
+  const staleOnDisk = () => {
+    for (const [f, issueOf] of [["context.json", (o) => o?.issue?.number], ["loaded.json", (o) => o?.issue]]) {
+      const p = join(outDir, f);
+      if (!existsSync(p)) continue;
+      let o;
+      try { o = JSON.parse(readFileSync(p, "utf8")); } catch (e) { return `.factory/out/${f} unreadable — ${e?.message || e}`; }
+      if (Number(issueOf(o)) !== Number(issue)) return `context issue mismatch: .factory/out/${f} is for issue ${issueOf(o)}, this run is for ${issue}`;
+    }
+    return null;
+  };
+  return async (ctx, { harnessIssue = false } = {}) => {
+    const harness = getHarness(), charter = getCharter();
+    const direct = isDirectAgentRun({ stage, orchestration: ctx?.orchestration });
+    let args;
+    if (direct) {
+      if (Number(ctx?.loaded?.issue) !== Number(issue)) return refuse(`context issue mismatch: the context payload says ${ctx?.loaded?.issue}, this run is for ${issue}`);
+      const stale = staleOnDisk();
+      if (stale) return refuse(stale);
+      let roles = {};
+      try { roles = getRoles() || {}; } catch { roles = {}; }   // roles.toml이 없으면 기본 md와 roster/frontmatter의 모델로 간다
+      const spec = directRoleSpec(roles, stage);
+      let role;
+      try { role = directAgentRole(readFile(join(root, spec.md)), { model: spec.model ?? (ctx.loaded.roster || []).find((r) => r?.name === stage)?.model ?? null }); }
+      catch (e) { return refuse(`${spec.md} unreadable — ${e?.message || e}`); }
+      try {
+        args = directAgentClaudeArgs({ prompt: directTriagePrompt({ issue, loaded: ctx.loaded }), systemPrompt: role.systemPrompt, model: role.model, tools: role.tools, maxTurns: stageMaxTurns(harness, stage), settingsPath: join(root, ciSettingsFile(harnessIssue)), charter });
+      } catch (e) { return refuse(e?.message || String(e)); }
+    } else {
+      args = stageClaudeArgs({ root, stage, issue, harness, charter, harnessIssue });
+    }
+    const r = await runner("claude", args, { cwd: root, env: stageClaudeEnv({ root, stage, harnessIssue, harness }) });
+    mkdirSync(join(root, ".factory/out"), { recursive: true });     // 파싱에 실패해도 원본 stdout은 남긴다
+    writeFileSync(join(root, ".factory/out", `${stage}.json`), r.stdout);
+    // envelope을 이름 붙여 한 벌 더 남긴다 — `<stage>.json`은 산출물 추출이 성공하면 그 객체로
+    // 덮이지만(KTB-7), usage·cost는 envelope에만 있으므로 사후 조사에 둘 다 필요하다.
+    writeFileSync(join(root, ".factory/out", `${stage}.envelope.json`), r.stdout);
+    let out;
+    try { out = JSON.parse(r.stdout); } catch { return { is_error: true, result: r.stdout + r.stderr }; }
+    return direct ? stampDirectArtifact({ out, issue }) : out;
+  };
+}
+
+/**
+ * main()의 `verifyStage` dep(같은 이유로 생산자로 뺐다). 직접 경로에서는 **세션 트랜스크립트를 후보로 쓰지 않는다**:
+ * 트랜스크립트 구제(KTB-7/17)는 디스패처가 Workflow 반환값을 다시 타이핑하다 잃는 경우를 위한 것이고, 직접 세션에는
+ * 그 hop이 없다 — 그 세션의 tool_result는 에이전트가 **읽은** 파일(지난 런의 `triage.json` 등)이지 답이 아니다.
+ * 턴 한도 봉투도 그래서 구제되지 않고 오늘의 사유(`stage did not finish: claude -p hit max turns`)로 간다.
+ */
+export function makeStageVerifyDep({ root, stage, getCtx, getCharter, qaManifest = () => null, transcriptOf = (out) => transcriptTextFor(root, out) }) {
+  return ({ out, gates }) => {
+    const ctxCache = getCtx(), charter = getCharter();
+    const direct = isDirectAgentRun({ stage, orchestration: ctxCache?.orchestration });
+    // 감사 M1 — NEVER_AUTOMATE의 글롭 항목은 CHARTER에서 그대로 온다(컨텍스트를 거치지 않는다:
+    // 이 재확인의 요점은 에이전트가 본 것과 **독립적인** 출처라는 데 있다).
+    const v = verifyStage({ stage, out, transcriptText: direct ? "" : transcriptOf(out), agentsLog: readAgentsLog(join(root, ".factory/out/agents.jsonl")), roster: ctxCache.roster, rolePrefix: ROLE_PREFIX[stage] || "", expectedRounds: ctxCache.rounds, orchestration: ctxCache.orchestration, gates, planLimits: ctxCache.plan, issueBody: ctxCache.issue?.body, neverAutomate: charter.never_automate, qaManifest: stage === "review" ? qaManifest() : null });
+    // 추출에 성공했으면 `<stage>.json`을 **산출물**로 덮는다 — 사람과 다음 도구가 여는 파일이
+    // 디스패처의 산문 섞인 envelope이 아니라 스테이지가 실제로 쓴 객체이도록(envelope은 옆에 남아 있다).
+    if (v.ok && v.data) { try { mkdirSync(join(root, ".factory/out"), { recursive: true }); writeFileSync(join(root, ".factory/out", `${stage}.json`), JSON.stringify(v.data, null, 2)); } catch { /* 기록 실패가 스테이지를 죽이지 않는다 */ } }
+    return v;
+  };
 }
 
 /** 게이트 파일이 판정을 만드는 스테이지. 여기서 gates가 null이면 판정은 워크플로의 자기 신고뿐이다. */
@@ -796,6 +997,8 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runAt
     let finalProgress = null;
     try { finalProgress = d.progress?.() ?? null; } catch { /* best-effort */ }
     usage = usageLine(out, finalProgress);
+    // #237 — 직접 경로였으면 그 사실을 턴·비용과 함께 한 줄로 남긴다(어느 경로가 돌았는지 운영자가 기록에서 읽는다).
+    if (isDirectAgentRun({ stage, orchestration: ctx?.orchestration })) record([directAgentLine({ stage, out })]);
     /**
      * #143 (S3b) — **빌더에게 넘긴 병합은 세션 직후에 끝났는지 묻는다.** 브랜치 확인·드리프트 제거·미러 커밋·턴 한도/API 오류의
      * 게이트 복구 **전**이다: 그 단계들은 전부 끝난 트리를 가정하고, 마커째 커밋된 트리를 미러로 재생성하거나 게이트로 판정하면
@@ -3696,16 +3899,8 @@ async function main() {
     /** KTB-23 implement 전용: `harness_needed`가 차 있을 때 여는(또는 재사용하는) `factory:harness` 이슈. */
     /** #136 (S2b): 새 하네스 이슈는 backlog로 태어나 리허설 + 심사를 실은 문으로 큐에 간다(`makeHarnessIssueDep`). */
     ensureHarnessIssue: makeHarnessIssueDep({ gh, issue, stage, rehearsal, admission }),
-    claudeP: async (_ctx, { harnessIssue = false } = {}) => {
-      const args = stageClaudeArgs({ root, stage, issue, harness, charter, harnessIssue });
-      const r = await run("claude", args, { cwd: root, env: stageClaudeEnv({ root, stage, harnessIssue, harness }) });
-      mkdirSync(join(root, ".factory/out"), { recursive: true });     // 파싱에 실패해도 원본 stdout은 남긴다
-      writeFileSync(join(root, ".factory/out", `${stage}.json`), r.stdout);
-      // envelope을 이름 붙여 한 벌 더 남긴다 — `<stage>.json`은 산출물 추출이 성공하면 그 객체로
-      // 덮이지만(KTB-7), usage·cost는 envelope에만 있으므로 사후 조사에 둘 다 필요하다.
-      writeFileSync(join(root, ".factory/out", `${stage}.envelope.json`), r.stdout);
-      try { return JSON.parse(r.stdout); } catch { return { is_error: true, result: r.stdout + r.stderr }; }
-    },
+    // #237 — 워크플로 경로는 예전과 바이트 단위로 같고, triage가 `orchestration = "agent"`면 역할 세션을 직접 띄운다(§makeStageClaudeP).
+    claudeP: makeStageClaudeP({ root, stage, issue, run, getHarness: () => harness, getCharter: () => charter, record: recordLine }),
     /**
      * 게이트 판정은 여기서 만들어 파일로 굳힌다 — handoff·전이·사람이 모두 같은 파일을 본다. 스테이지당 한 번이고, merge만
      * PR diff 밖의 RED에 한해 한 번 더 부른다(#157, ADR-034 — 두 번째 호출이 gates.json을 덮어쓴다, §makeStageGatesDep).
@@ -3799,15 +3994,8 @@ async function main() {
      * 붙인 뒤 그 파일을 다시 써 온디스크 산출물과 handoff 코멘트가 갈리지 않게 한다.
      */
     syncStageArtifact: (data) => { try { writeFileSync(join(root, ".factory/out", `${stage}.json`), JSON.stringify(data, null, 2)); } catch { /* 기록 실패는 스테이지를 죽이지 않는다 */ } },
-    verifyStage: ({ out, gates }) => {
-      // 감사 M1 — NEVER_AUTOMATE의 글롭 항목은 CHARTER에서 그대로 온다(컨텍스트를 거치지 않는다:
-      // 이 재확인의 요점은 에이전트가 본 것과 **독립적인** 출처라는 데 있다).
-      const v = verifyStage({ stage, out, transcriptText: transcriptTextFor(root, out), agentsLog: readAgentsLog(join(root, ".factory/out/agents.jsonl")), roster: ctxCache.roster, rolePrefix: ROLE_PREFIX[stage] || "", expectedRounds: ctxCache.rounds, orchestration: ctxCache.orchestration, gates, planLimits: ctxCache.plan, issueBody: ctxCache.issue?.body, neverAutomate: charter.never_automate, qaManifest: stage === "review" ? qaEvidenceSummary() : null });
-      // 추출에 성공했으면 `<stage>.json`을 **산출물**로 덮는다 — 사람과 다음 도구가 여는 파일이
-      // 디스패처의 산문 섞인 envelope이 아니라 스테이지가 실제로 쓴 객체이도록(envelope은 옆에 남아 있다).
-      if (v.ok && v.data) { try { writeFileSync(join(root, ".factory/out", `${stage}.json`), JSON.stringify(v.data, null, 2)); } catch { /* 기록 실패가 스테이지를 죽이지 않는다 */ } }
-      return v;
-    },
+    // #237 — 생산자로 뺐다(§makeStageVerifyDep): 직접 경로에서는 세션 트랜스크립트를 산출물 후보로 쓰지 않는다.
+    verifyStage: makeStageVerifyDep({ root, stage, getCtx: () => ctxCache, getCharter: () => charter, qaManifest: () => qaEvidenceSummary() }),
     /**
      * 감사 H3 — handoff에는 **러너가 계산한** 실효 tier를 함께 싣는다(`tier_effective`/`tier_source`).
      * 에이전트가 적는 `tier`는 자기 신고이고, 이 둘은 diff에서 나온 사실이다: 다음 스테이지와 사람이

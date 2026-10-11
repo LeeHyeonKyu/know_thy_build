@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+// Scope change (#237): dw4 — this CLI must give run-stage's answer for a direct (orchestration = "agent") triage, where CI never mines the transcript.
 /**
  * 스테이지 산출물을 **손으로** 한 번 더 검증하는 진단 CLI. CI의 판정은 `run-stage.js`가 하고,
  * 이것은 사람이 `.factory/out/`에 남은 파일로 "왜 떨어졌나"를 재현할 때 쓴다.
@@ -15,7 +16,7 @@ import { run } from "../lib/exec.js";
 import { readAgentsLog } from "../lib/agents-log.js";
 import { verifyStage } from "../lib/verify-stage.js";
 import { readTranscript } from "../lib/stage-artifact.js";
-import { ROLE_PREFIX, readFileOrNull } from "./run-stage.js";
+import { ROLE_PREFIX, readFileOrNull, isDirectAgentRun } from "./run-stage.js";
 
 export const USAGE = "usage: verify-stage <stage> <issue> [--transcript <path>]";
 
@@ -50,13 +51,17 @@ export function verifyStageCli({ root, argv = [], home = homedir(), readFile = r
   const out = raw && (typeof raw.result === "string" || "is_error" in raw) ? raw : { is_error: raw === null, result: JSON.stringify(raw) };
   const envelope = readJson(join(root, `.factory/out/${stage}.envelope.json`));
   const sessionId = envelope?.session_id ?? (typeof raw?.session_id === "string" ? raw.session_id : undefined);
+  const ctx = readJson(join(root, ".factory/out/context.json")) || {};
   let transcriptText = "", from = null;
-  if (transcript) { transcriptText = readFile(transcript) || ""; from = transcriptText ? transcript : `${transcript} (unreadable)`; }
+  // #237 — 직접 에이전트 세션(실효 orchestration `agent`의 triage·retro)의 트랜스크립트는 CI가 후보로 쓰지 않는다
+  // (run-stage `makeStageVerifyDep`): 그 tool_result는 에이전트가 **읽은** 파일이지 답이 아니다. 여기서 캐면 CI가
+  // needs-human으로 보낸 런을 이 진단이 ok라 부른다 — `--transcript`를 줘도 같다.
+  if (isDirectAgentRun({ stage, orchestration: ctx.orchestration })) from = "none (direct agent session — its transcript is never a candidate, as in CI)";
+  else if (transcript) { transcriptText = readFile(transcript) || ""; from = transcriptText ? transcript : `${transcript} (unreadable)`; }
   else {
     transcriptText = readTranscript({ root, home, sessionId, readFile }) || "";
     from = transcriptText ? `auto (session ${sessionId})` : (sessionId ? `auto (session ${sessionId}) — not found` : "none (no session_id in the envelope)");
   }
-  const ctx = readJson(join(root, ".factory/out/context.json")) || {};
   const r = verifyStage({
     stage, out, transcriptText,
     agentsLog: readAgentsLog(join(root, ".factory/out/agents.jsonl")),
