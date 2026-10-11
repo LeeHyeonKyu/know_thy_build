@@ -1291,7 +1291,7 @@ test("test_208_fixed_must_fix_renders_a_commit_link", async () => {
 const READ_ORG_DENIED = { code: 1, stdout: "", stderr: "GraphQL: Your token has not been granted the required scopes to execute this query. The 'login' field requires one of the following scopes: ['read:org'], but your token has only been granted the: ['repo', 'workflow', 'write:discussion'] scopes." };
 const PULL_217 = /^repos\/acme\/app\/pulls\/(\d+)$/;
 function repoScopeOnlyGh217({ body, hangGet = false, patchFail = null } = {}) {
-  const state = { body, gets: 0, patches: 0, getSignals: [] };
+  const state = { body, gets: 0, patches: 0, getSignals: [], settledLate: 0 };
   const method = (a) => { const i = a.findIndex((x) => x === "-X" || x === "--method"); return i >= 0 ? String(a[i + 1]).toUpperCase() : "GET"; };
   const pull = (a) => a.find((x) => PULL_217.test(x));
   const run = makeFakeRun([
@@ -1310,7 +1310,15 @@ function repoScopeOnlyGh217({ body, hangGet = false, patchFail = null } = {}) {
       match: (c, a) => c === "gh" && a[0] === "api" && pull(a) && method(a) === "GET" && !a.some((x) => ["--input", "-f", "-F", "--field", "--raw-field"].includes(x)),
       result: (_c, a, o) => {
         state.gets++;
-        if (hangGet) { state.getSignals.push(o?.signal); return new Promise(() => {}); }
+        if (hangGet === true) { state.getSignals.push(o?.signal); return new Promise(() => {}); }
+        // A real killed `gh` child does settle: "killed" → the exit a SIGTERM gives; "late-body" → the response arrives anyway,
+        // after the bound fired. Either way the read settles only once its signal aborts, so a chain that ignored the bound and
+        // kept waiting would see it and go on to PATCH.
+        if (hangGet) {
+          state.getSignals.push(o?.signal);
+          const late = { code: 0, stdout: JSON.stringify({ number: Number(PULL_217.exec(pull(a))[1]), body: state.body }), stderr: "" };
+          return new Promise((resolve) => o.signal.addEventListener("abort", () => { state.settledLate++; resolve(hangGet === "late-body" ? late : { code: 143, stdout: "", stderr: "signal: terminated" }); }, { once: true }));
+        }
         return { code: 0, stdout: JSON.stringify({ number: Number(PULL_217.exec(pull(a))[1]), body: state.body }), stderr: "" };
       },
     },
@@ -1387,6 +1395,32 @@ test("test_217_hung_rest_read_is_killed_and_no_write_lands", async () => {
   await new Promise((r) => setImmediate(r));
   expect(state.patches).toBe(0);
   expect(state.body).toBe("Closes #184\n");
+});
+
+test("test_217_hung_rest_read_that_settles_after_the_timeout_writes_nothing", async () => {
+  for (const mode of ["late-body", "killed"]) {
+    const { state, run, gh } = repoScopeOnlyGh217({ body: "Closes #184\n", hangGet: mode });
+    const deps = deps217(gh, 5);
+    await expect(deps.publishPrEvidence({ pr: 31, route: "merge", gates: LIVE_GATES }), mode).rejects.toThrow(/^edit: .*timed out after 5 ms/);
+    // The read really was the REST GET, it was aborted, and — unlike a never-settling fake — it then settled.
+    expect(state.gets, mode).toBe(1);
+    expect(state.getSignals[0].aborted, mode).toBe(true);
+    expect(state.settledLate, mode).toBe(1);
+    // Let the late settlement propagate through anything still waiting on it; nothing may write afterwards.
+    for (let i = 0; i < 5; i++) await new Promise((r) => setImmediate(r));
+    expect(state.patches, mode).toBe(0);
+    expect(run.calls.filter((c) => c.args.includes("PATCH")), mode).toEqual([]);
+    expect(state.body, mode).toBe("Closes #184\n");
+    // The merge stage: one named FAIL line, the merge still happens, and still no write after the late settlement.
+    const { code, moved, evidence } = await merge217(deps);
+    expect(code, mode).toBe(0);
+    expect(moved, mode).toEqual(["factory:merged"]);
+    expect(evidence, mode).toEqual([expect.stringMatching(/^evidence: FAIL — edit: .*timed out after 5 ms/)]);
+    expect(state.settledLate, mode).toBe(2);
+    for (let i = 0; i < 5; i++) await new Promise((r) => setImmediate(r));
+    expect(state.patches, mode).toBe(0);
+    expect(state.body, mode).toBe("Closes #184\n");
+  }
 });
 
 test("test_217_rest_patch_failure_still_one_named_fail_line", async () => {
