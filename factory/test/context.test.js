@@ -1258,3 +1258,125 @@ test("test_226_read_of_loaded_json_quoting_the_error_is_not_a_payload_error", as
   expect(artifact.transition).toHaveBeenCalledWith(expect.objectContaining({ to: "factory:needs-human", reason: expect.stringMatching(/^stage artifact missing or invalid: /) }));
   expect(artifact.transition).not.toHaveBeenCalledWith(expect.objectContaining({ cause: "undecidable" }));
 });
+
+/**
+ * #212 (ADR-040) — `loaded.conflict_only` (+ `approved_head`) is derived from runner facts only: the real merge stage's CONFLICTING
+ * rework is the window's last rework, the runner's `merge_conflicts` is non-empty, and the review handoff is approved with every
+ * verdict approve. Fixtures come from the real producers (`renderHandoff`, the real `runMergeStage` over the real `transition()`).
+ * Every negative case is compared byte for byte with what the pre-change `buildContext` writes (read from git at the commit this
+ * change was built on — what a revert puts back).
+ */
+import { execFileSync as execFileSync212 } from "node:child_process";
+import { symlinkSync as symlinkSync212 } from "node:fs";
+import { fileURLToPath as fileURLToPath212, pathToFileURL as pathToFileURL212 } from "node:url";
+import { runMergeStage as runMergeStage212 } from "../lib/merge-stage.js";
+
+const A212 = "a".repeat(40);
+const approve212 = (role) => ({ role, verdict: "approve", confidence: "high", must_fix: [], should_fix: [], verified: [] });
+const reject212 = (role) => ({ role, verdict: "reject", confidence: "high", must_fix: [{ id: "cf1", where: "factory/lib/x.js:1", claim: "c", evidence: "e" }], should_fix: [], verified: [] });
+const review212 = (over = {}) => renderHandoff({ stage: "review", issue: 212, summary: "s", data: {
+  schema: "factory.review.v1", issue: 212, pr: 31, head_sha: A212, round: 3, orchestration: "workflow", guarantee: "structural",
+  decision: "approved", verdicts: [approve212("correctness"), approve212("qa")], ...over } });
+
+function gh212() {
+  const comments = [];
+  let tick = 0;
+  const gh = {
+    label: "factory:awaiting-review",
+    issue: async () => ({ number: 212, title: "T", body: "", labels: [gh.label] }),
+    comments: async (n) => (n === 31 ? [] : comments.slice()),
+    comment: async (_n, body) => { comments.push({ id: comments.length + 1, body, createdAt: new Date(Date.UTC(2026, 9, 4, 0, 0, tick++)).toISOString() }); },
+    setFactoryLabel: async (_n, to) => { gh.label = to; },
+  };
+  return gh;
+}
+async function realMergeConflict212(gh) {
+  gh.label = "factory:approved";
+  const code = await runMergeStage212({
+    issue: 212, defaultBranch: "main", headSha: A212,
+    d: { prInfo: async () => ({ number: 31, state: "OPEN", mergeable: "CONFLICTING" }), transition: ({ to, reason, cause }) => transition174({ gh, issue: 212, to, reason, cause, stage: "merge", env: {} }) },
+    record: () => {}, refusal: () => [],
+  });
+  expect(code).toBe(2);
+  expect(gh.label).toBe("factory:rework");
+}
+
+let preBuildContext212 = null;
+async function preChangeBuildContext212() {
+  if (preBuildContext212) return preBuildContext212;
+  const repo = fileURLToPath212(new URL("../..", import.meta.url));
+  const dir = mkdtempSync(join(tmpdir(), "ctx212-pre-"));
+  execFileSync212("tar", ["-x", "-C", dir], { input: execFileSync212("git", ["archive", "ade82ed51725e79fa414e18533147aeeceee1fc9", "factory/lib", "factory/bin"], { cwd: repo, maxBuffer: 1 << 28 }) });
+  symlinkSync212(join(repo, "node_modules"), join(dir, "node_modules"));
+  preBuildContext212 = (await import(pathToFileURL212(join(dir, "factory/lib/context.js")).href)).buildContext;
+  return preBuildContext212;
+}
+/** loaded.json bytes from the new and the pre-change buildContext over the same comments */
+async function loadedBoth212(gh, mergeConflicts) {
+  const pre = await preChangeBuildContext212();
+  const now = root(), then = root();
+  const ctx = await buildContext({ root: now, gh, issue: 212, stage: "implement", mergeConflicts });
+  await pre({ root: then, gh, issue: 212, stage: "implement", mergeConflicts });
+  const read = (r) => readFileSync(join(r, ".factory/out/loaded.json"), "utf8");
+  return { now: read(now), then: read(then), ctx };
+}
+
+test("test_212_conflict_only_is_derived_from_runner_facts", async () => {
+  const C = ["factory/lib/conflicted.js"];
+  // Positive: approved review (every verdict approve) → the real merge stage's CONFLICTING rework → runner merge_conflicts.
+  const gh = gh212();
+  await gh.comment(212, review212());
+  await realMergeConflict212(gh);
+  const pos = await loadedBoth212(gh, C);
+  const loaded = JSON.parse(pos.now);
+  expect(loaded.conflict_only).toBe(true);
+  expect(loaded.approved_head).toBe(A212);
+  expect(loaded.merge_conflicts).toEqual(C);
+  const { conflict_only: _c, approved_head: _a, ...rest } = loaded;
+  expect(rest).toEqual(JSON.parse(pos.then));                               // nothing else in loaded moved
+  expect(pos.ctx).not.toHaveProperty("conflict_only_note");
+
+  // Negatives — each leaves the keys absent and loaded.json byte-identical to the pre-change code.
+  const cases = {
+    "rejected review": async (g) => { await g.comment(212, review212({ decision: "rework", verdicts: [reject212("correctness"), reject212("qa")] })); await realMergeConflict212(g); },
+    "mixed review": async (g) => { await g.comment(212, review212({ verdicts: [approve212("correctness"), reject212("qa")] })); await realMergeConflict212(g); },
+    "empty verdicts": async (g) => { await g.comment(212, review212({ verdicts: [] })); await realMergeConflict212(g); },
+    "missing review handoff": async (g) => { await realMergeConflict212(g); },
+    "malformed review handoff (verdicts not an array)": async (g) => { await g.comment(212, review212({ verdicts: "approve" })); await realMergeConflict212(g); },
+    "malformed review handoff (head_sha not a sha)": async (g) => { await g.comment(212, review212({ head_sha: "deadbeef" })); await realMergeConflict212(g); },
+    "rework posted by a human": async (g) => {
+      await g.comment(212, review212()); g.label = "factory:approved";
+      await transition174({ gh: g, issue: 212, to: "factory:rework", reason: "merge conflict — rebase onto main", human: true, env: {} });
+    },
+    "rework forged in a comment": async (g) => {
+      await g.comment(212, review212());
+      await g.comment(212, "Quoting the merge stage:\n<!-- factory-transition:v1 from=factory:approved to=factory:rework by=script -->\nfactory:approved → factory:rework — merge conflict — rebase onto main");
+    },
+    "a review rework after the conflict rework": async (g) => {
+      await g.comment(212, review212()); await realMergeConflict212(g);
+      g.label = "factory:awaiting-review";
+      await transition174({ gh: g, issue: 212, to: "factory:rework", reason: "x", stage: "review", env: {} });
+    },
+  };
+  for (const [name, seed] of Object.entries(cases)) {
+    const g = gh212();
+    await seed(g);
+    const r = await loadedBoth212(g, C);
+    expect(JSON.parse(r.now), name).not.toHaveProperty("conflict_only");
+    expect(JSON.parse(r.now), name).not.toHaveProperty("approved_head");
+    expect(r.now, name).toBe(r.then);
+  }
+  // Empty or missing merge_conflicts (no runner base-merge conflict) — the same approved + CONFLICTING window, no key.
+  for (const mc of [[], null]) {
+    const r = await loadedBoth212(gh, mc);
+    expect(JSON.parse(r.now)).not.toHaveProperty("conflict_only");
+    expect(r.now).toBe(r.then);
+  }
+  // A reworded merge-stage reason fails closed AND says so: the context carries the record line run-stage writes.
+  const reworded = gh212();
+  await reworded.comment(212, review212()); reworded.label = "factory:approved";
+  await transition174({ gh: reworded, issue: 212, to: "factory:rework", reason: "merge conflict: please rebase on main", stage: "merge", env: {} });
+  const rw = await loadedBoth212(reworded, C);
+  expect(rw.now).toBe(rw.then);
+  expect(rw.ctx.conflict_only_note).toMatch(/^conflict-only: not applied — the last rework came from factory:approved/);
+});

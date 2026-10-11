@@ -1,3 +1,5 @@
+import { CONFLICT_ROUND_EXCLUDED_RUNS } from "../budget.js";
+
 // 이슈 코멘트에서 전이 사실을 뽑는 결정적 파서 — harvest.js(경량 수확 통계)와 quarantine-ops.js
 // (flaky 격리 등록의 사유 문구)가 정확히 같은 규칙으로 같은 사실을 읽어야 한다. 같은 전이 문법을
 // 두 곳에서 다르게 파싱하면 harvest의 needs-human 통계와 quarantine 등록의 판단이 어긋난다 — 그래서
@@ -308,9 +310,10 @@ export function countTransitionsTo(comments, to) {
  * factory 계정의 코멘트 본문이라 에이전트가 쓸 수 있다 — 취소를 따르는 셈은 코멘트 하나로 **줄어든다**. 천장은 코멘트가
  * 더해질수록 늘기만 하는 셈 위에 있어야 위조가 멈춤을 앞당길 뿐 늦추지 못한다. 대가: 진짜 라벨 스왑 실패도 천장의 한 칸을 쓴다.
  */
-export function countedTransitionIndices(comments, to, { honourFailed = true } = {}) {
+export function countedTransitionIndices(comments, to, { honourFailed = true, exemptConflictRounds = true } = {}) {
   const out = [];
-  (Array.isArray(comments) ? comments : []).forEach((c, i) => {
+  const list = Array.isArray(comments) ? comments : [];
+  list.forEach((c, i) => {
     const body = String(c?.body ?? "");
     const f = TRANSITION_FAILED.exec(body);
     if (f) { if (honourFailed && f[2] === to && out.length > 0) out.pop(); return; }
@@ -319,6 +322,64 @@ export function countedTransitionIndices(comments, to, { honourFailed = true } =
     // 자리로 **이미 얻었던 라벨을 되돌리는** 것이지 새 재작업 주기가 아니다. 세면 `rework`로
     // 되돌아가는 재시도 한 번이 K 예산을 한 칸 태운다 — 재시도의 값어치가 그만큼 줄어든다.
     if (m && m[2] === to && m[4] !== "retry") out.push(i);
+  });
+  /**
+   * #212 (ADR-040) — **base가 움직여 생긴 rework는 리뷰 라운드가 아니다.** 승인된 PR이 base와 충돌해 머지 스테이지가 되돌렸고 그 라운드가 충돌만
+   * 풀었으면(러너의 conflict-round 마커), 그 전이는 K로 세지 않는다(`conflictExemptIndices`). 취소를 따르는 셈(K)에만 적용한다 — 천장의 셈
+   * (`honourFailed: false`)은 그대로 늘기만 한다. 충돌 전이가 없는 창은 바이트 하나 다르지 않다.
+   */
+  if (to === "factory:rework" && honourFailed && exemptConflictRounds) {
+    const exempt = conflictExemptIndices(list, out);
+    if (exempt.size) return out.filter((i) => !exempt.has(i));
+  }
+  return out;
+}
+
+/**
+ * ── #212 (ADR-040) — 승인된 PR의 base 충돌 rework와, 그것을 충돌 해소만으로 끝낸 라운드의 러너 마커 ─────────────────────────────
+ *
+ * 머지 스테이지가 CONFLICTING PR을 되돌릴 때 쓰는 전이 코멘트는 정확히 이 모양이다(`merge-stage.js`의 reason을 `transition.js`가 싣는다):
+ * `<!-- factory-transition:v1 from=factory:approved to=factory:rework by=script -->\nfactory:approved → factory:rework — merge conflict — rebase onto <base>`.
+ * `merge-stage.js`는 이 이슈가 건드릴 수 없는 파일이라 문구를 상수로 나눠 쓰지 못한다 — 그래서 **코멘트 전체**를 이 정규식에 맞춘다(마커가 본문
+ * 맨 앞이고 사유 줄로 끝난다; 다른 글 안에 인용된 마커는 맞지 않는다). 문구가 바뀌면 조용히 꺼지지 않고 `conflictExemptionNote`가 그렇게 말한다.
+ * `by=`는 러너(`script`·`factory:run-*`)만 — 사람의 전이(`by=human`)는 이 사건이 아니다. blocked에서의 머지 재시도도 같은 사유로 rework를 낸다.
+ */
+const MERGE_CONFLICT_REWORK = /^<!-- factory-transition:v1 from=(factory:approved|factory:blocked) to=factory:rework by=(script|factory:run-[^\s>]+) -->\n\1 → factory:rework — merge conflict — rebase onto (\S+)$/;
+/** 이 코멘트가 머지 스테이지의 CONFLICTING rework 전이인가 → `{ from, base }` | null. */
+export function mergeConflictRework(body) {
+  const m = MERGE_CONFLICT_REWORK.exec(String(body ?? ""));
+  return m ? { from: m[1], base: m[3] } : null;
+}
+/** 러너가 conflict-only 라운드의 `conflict-scope`가 GREEN일 때만 남기는 마커 — K 면제의 근거다(`countedTransitionIndices`). */
+export const CONFLICT_ROUND_MARKER = /<!-- factory-conflict-round:v1 issue=(\d+) approved=([0-9a-f]{40}) head=([0-9a-f]{40}) -->/;
+export const conflictRoundComment = ({ issue, approvedHead, head }) =>
+  `<!-- factory-conflict-round:v1 issue=${issue} approved=${approvedHead} head=${head} -->\n**conflict-only round** — 승인된 head \`${String(approvedHead).slice(0, 7)}\` 위의 base 병합이 충돌 해소만 담았습니다(\`${String(head).slice(0, 7)}\`). 이 base 충돌 rework는 리뷰 라운드(K)로 세지 않고, 이 런의 비용은 평생 상한에서 빠집니다 — 이슈당 ${CONFLICT_ROUND_EXCLUDED_RUNS}회까지(ADR-040).`;
+/** 창의 마지막 rework가 approved에서 왔는데 머지 스테이지의 충돌 문구와 맞지 않으면, 그 사실을 말하는 기록 한 줄(아니면 null). */
+export function conflictExemptionNote(comments) {
+  const list = Array.isArray(comments) ? comments : [];
+  const idx = countedTransitionIndices(list, "factory:rework", { exemptConflictRounds: false });
+  if (!idx.length) return null;
+  const body = String(list[idx[idx.length - 1]]?.body ?? "");
+  const m = TRANSITION_TO.exec(body);
+  if (!m || m[1] !== "factory:approved" || mergeConflictRework(body)) return null;
+  return "conflict-only: not applied — the last rework came from factory:approved but its reason does not match the merge stage's conflict reason (\"merge conflict — rebase onto <base>\", merge-stage.js); this round is not a conflict-only round and that rework counts as a review round (K)";
+}
+
+/**
+ * K 면제(#212 dw5) — `ids`(살아남은 rework 전이의 인덱스, 오름차순) 중 빼 줄 것. 머지 스테이지의 CONFLICTING rework이고, 그 뒤(다음 rework 전이
+ * 전)에 러너의 conflict-round 마커가 있는 것만 — 마커는 conflict-scope가 GREEN일 때만 나간다. 창에서 앞의 `CONFLICT_ROUND_EXCLUDED_RUNS`개까지다.
+ * 마커도 factory 계정의 코멘트라 에이전트가 쓸 수 있다: 그래서 면제는 진짜 모양의 충돌 전이에만 붙고, 상수로 묶이고, 2K 천장의 셈
+ * (`honourFailed: false`, `kRestartState().attempts`)에는 걸리지 않는다 — 위조는 많아야 그 개수만큼 K를 늦출 뿐 천장을 넘기지 못한다.
+ */
+function conflictExemptIndices(list, ids) {
+  const markers = [];
+  list.forEach((c, i) => { if (CONFLICT_ROUND_MARKER.test(String(c?.body ?? ""))) markers.push(i); });
+  if (!markers.length) return new Set();
+  const out = new Set();
+  ids.forEach((i, n) => {
+    if (out.size >= CONFLICT_ROUND_EXCLUDED_RUNS || !mergeConflictRework(list[i]?.body)) return;
+    const next = ids[n + 1] ?? Infinity;
+    if (markers.some((k) => k > i && k < next)) out.add(i);
   });
   return out;
 }
