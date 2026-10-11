@@ -96,15 +96,15 @@ jobs:
         env:
           APP_SLUG: ${{ steps.factory-token.outputs.app-slug }}
         run: echo "FACTORY_BOT_LOGIN=${APP_SLUG}[bot]" >> "$GITHUB_ENV"
-      # ADR-038 보정(2026-10-11) — **이 잡의 git 자격은 머지 배우의 것이다.** 체크아웃이 심는 토큰은 창 뒤의 `factory/records`
-      # fetch·push와 락 해제가 나가는 유일한 경로인데, App 설치 토큰은 민팅 뒤 60분에 만료되고 거부권 창은 60분이다 — #249·#212의
-      # 머지 런이 창이 닫힌 직후 "could not read Username"으로 죽었다. 두 배우 모드에서는 만료 없는 머지 PAT가 이미 이 스텝 아래
-      # `Run stage`의 `GH_TOKEN`이므로(ADR-021: 머지 권한이 사는 유일한 잡, `claude -p`를 띄우지 않는다) 체크아웃도 같은 자격으로 한다.
-      # 단일 배우 모드(머지 PAT 없음)는 App 토큰 그대로이고, 그때는 아래 `FACTORY_GIT_TOKEN_TTL_MINUTES`가 창이 토큰보다 길면 열지 않게 한다.
+      # ADR-038 보정(2026-10-11) — 체크아웃 토큰은 **에이전트 배우의 것 그대로**다(머지 PAT를 여기 두면 `.git/config`에 admin 자격이
+      # 심기고, 게이트 `[commands]` = PR head의 코드가 그것을 읽을 수 있다 — env 스크럽은 `.git/config`에 닿지 않는다). App 설치 토큰은
+      # 민팅 뒤 60분에 만료되는데 거부권 창은 60분이라 #249·#212의 머지 런이 창 뒤의 records fetch·push에서 죽었다 — 그래서 엔진은
+      # 머지 스테이지에서 **자기 프로세스의 git에만** `GH_TOKEN`(두 배우 모드 = 만료 없는 머지 PAT)으로 인증 헤더를 얹는다
+      # (`exec.js` `gitAuthEnv`, 게이트 자식 env에서는 스크럽). 단일 배우 모드는 아래 `FACTORY_GIT_TOKEN_TTL_MINUTES`가 창을 막는다.
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          token: ${{ secrets.FACTORY_MERGE_TOKEN || steps.factory-token.outputs.token || secrets.FACTORY_BOT_TOKEN }}
+          token: ${{ steps.factory-token.outputs.token || secrets.FACTORY_BOT_TOKEN }}
       # 1.4.19 (L20, own-calendar #28) — **큐에서 기다린 런은 만들어진 시점의 커밋을 체크아웃한다.** 단일 self-hosted 러너
       # 뒤에서 50분을 기다린 implement 런이 그 사이 두 번 올라간 엔진(1.4.12 → 1.4.14)을 전혀 보지 못했고, 옛 검증자
       # 프롬프트로 head를 돌려보냈다. 여기서 origin의 기본 브랜치로 갱신한다 — 런의 headSha는 "어느 main에서 시작하라"가

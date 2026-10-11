@@ -1196,16 +1196,17 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
      * ADR-038 보정(2026-10-11, #249·#212) — 잡의 **git 자격증명**도 창보다 오래 살아야 한다. 체크아웃이 심은 토큰이 GitHub App
      * 설치 토큰이면 민팅 뒤 60분에 만료되는데(GitHub 문서: "The installation access token will expire after 1 hour"), 창은 60분이라
      * 창이 닫힌 뒤의 `factory/records` fetch·push와 락 해제가 전부 "could not read Username"으로 죽었다 — 그리고 그 실패는
-     * "review evidence not bound to a factory run"으로 읽혀 needs-human이 됐다. 워크플로가 `FACTORY_GIT_TOKEN_TTL_MINUTES`로
-     * 그 수명을 싣는다(두 배우 모드 = 만료 없는 머지 PAT가 체크아웃 자격이므로 0/없음 = 만료 없음). 수명이 있으면 잡 시작(민팅은 그
-     * 직후다 — 보수적인 앵커)부터 창 + 여유가 그 안에 들어야 연다. 아니면 창을 열지 않고 blocked — 한 시간 뒤에 알 수 없는 이유로
-     * 죽는 것보다 지금 이유를 말하는 것이 낫다.
+     * "review evidence not bound to a factory run"으로 읽혀 needs-human이 됐다. 두 배우 모드에서는 엔진이 자기 git에 `GH_TOKEN`
+     * (만료 없는 머지 PAT)으로 인증하므로(run-stage `main`의 `gitAuthEnv`) 워크플로가 수명 0을 싣고, 단일 배우 App 모드만 60을
+     * 싣는다(`FACTORY_GIT_TOKEN_TTL_MINUTES`; 0/없음 = 만료 없음). 수명이 있으면 잡 시작(민팅은 그 직후다 — 보수적인 앵커)부터
+     * 창 + 여유가 그 안에 들어야 연다. 아니면 창을 열지 않고 blocked — 한 시간 뒤에 알 수 없는 이유로 죽는 것보다 지금 이유를 말하는
+     * 것이 낫다.
      */
     const ttl = d.gitTokenTtlMinutes;
     if (Number.isFinite(ttl) && ttl > 0) {
       const tokenLeftMs = started + ttl * 60 * 1000 - openedAt;
       if (tokenLeftMs < windowMs + VETO_POST_WINDOW_MARGIN_MS) {
-        const reason = `veto window outlives this job's git credential — the checkout token is a GitHub App installation token that expires ${ttl} min after the job started (${Math.max(0, Math.floor(tokenLeftMs / 60000))} min left), CHARTER self_change.veto_minutes: ${vetoMinutes} plus a ${marginMin} min margin for the post-window re-verify, records sync and merge; set FACTORY_MERGE_TOKEN in the factory-merge environment (two-actor mode — the merge job then checks out with the merge actor's PAT) or lower veto_minutes below ${ttl - marginMin} — no window was opened`;
+        const reason = `veto window outlives this job's git credential — the checkout token is a GitHub App installation token that expires ${ttl} min after the job started (${Math.max(0, Math.floor(tokenLeftMs / 60000))} min left), CHARTER self_change.veto_minutes: ${vetoMinutes} plus a ${marginMin} min margin for the post-window re-verify, records sync and merge; set FACTORY_MERGE_TOKEN in the factory-merge environment (two-actor mode — the engine's own git then authenticates with that non-expiring token) or lower veto_minutes so that the window plus the ${marginMin} min margin fits in what is left of the token when the window opens — no window was opened`;
         const t = await toBlocked(reason);
         record([`merge: veto window not started — ${reason}`, ...refusal(t)]);
         return 2;

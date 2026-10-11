@@ -5003,7 +5003,8 @@ test("test_157_out_of_root_report_is_no_rerun", async () => {
 });
 
 // ── #179 (S4a-2, ADR-033) — merge 스테이지의 자기 변경 deps는 실제 생산자에서 온다 ─────────────────────────────
-import { makeMergeSelfChangeDeps, mergeEngineAtBase } from "../bin/run-stage.js";
+import { makeMergeSelfChangeDeps, mergeEngineAtBase, mergeGitAuth } from "../bin/run-stage.js";
+import { gitAuthEnv } from "../lib/exec.js";
 import { runMergeStage, VETO_WINDOW_CONTEXT } from "../lib/merge-stage.js";
 import { mirrorApplicable } from "../lib/mirror.js";
 import { parseSelfChange } from "../lib/config.js";
@@ -5053,6 +5054,11 @@ test("test_179_run_stage_wires_merge_self_change_deps", async () => {
   for (const [ttl, want] of [["60", 60], ["0", null], ["an hour", null], ["-60", null]]) {
     expect(makeMergeSelfChangeDeps({ gh, issue: 7, getCharter: () => charter, getEngine: () => false, env: { FACTORY_GIT_TOKEN_TTL_MINUTES: ttl } }).gitTokenTtlMinutes, ttl).toBe(want);
   }
+  // ADR-038 보정 — merge 스테이지의 엔진 git은 GH_TOKEN(두 배우 모드 = 만료 없는 머지 PAT)으로 인증한다; 다른 스테이지·토큰 없음 → null
+  expect(mergeGitAuth({ stage: "merge", env: { GH_TOKEN: "ghp_m" } })).toEqual(gitAuthEnv({ token: "ghp_m" }));
+  expect(mergeGitAuth({ stage: "merge", env: { GH_TOKEN: "ghp_m", GITHUB_SERVER_URL: "https://ghe.example.com" } }).GIT_CONFIG_KEY_1).toBe("http.https://ghe.example.com/.extraheader");
+  expect(mergeGitAuth({ stage: "merge", env: {} })).toBeNull();
+  for (const stage of ["triage", "plan", "implement", "review"]) expect(mergeGitAuth({ stage, env: { GH_TOKEN: "ghp_m" } }), stage).toBeNull();
   expect(makeMergeSelfChangeDeps({ gh, issue: 7, getCharter: () => charter, getEngine: () => false, env: { FACTORY_JOB_STARTED: "soon", FACTORY_JOB_TIMEOUT_MINUTES: "-5" } }).jobTimeoutMinutes).toBeNull();
 
   const sha = "b".repeat(40);

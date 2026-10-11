@@ -4521,14 +4521,23 @@ run 기록 push도 같은 줄로 죽었다. 원인은 코드가 아니라 **자�
 not bound to a factory run"으로 읽혔다 — 이슈는 needs-human이 됐고 PR head에는 pending `factory/veto-window` 상태가 남았다.
 
 **결정(운영 세션, ADR-021·ADR-033·ADR-038의 교차점이라 새 번호를 쓰지 않는다).**
-1. **머지 잡의 체크아웃 자격은 `FACTORY_MERGE_TOKEN || App || PAT`다.** 두 배우 모드에서 머지 잡의 `GH_TOKEN`은 이미 머지 PAT이고,
-   그 잡은 `claude -p`를 띄우지 않으며(ADR-021: 머지 권한이 사는 유일한 잡), 스크럽 스텝이 그 리터럴을 지운다 — 같은 잡의 git이 같은
-   자격을 쓰는 것은 노출을 늘리지 않는다. `yml-lint`의 `merge-token-scope`(파일·스텝 범위)는 그대로 통과한다.
-2. **단일 배우 App 모드는 fail-closed.** 워크플로가 `FACTORY_GIT_TOKEN_TTL_MINUTES`(머지 PAT면 `0`, App이면 `60`)를 싣고, merge-stage의
-   창 열기는 잡 예산 검사와 같은 모양으로 "잡 시작 + 수명 − 지금 ≥ 창 + 10분 여유"를 묻는다. 모자라면 창을 열지 않고 blocked로 이유를
-   말한다(머지 PAT를 넣거나 `veto_minutes`를 낮추라고). 한 시간 뒤에 알 수 없는 이유로 죽는 것보다 지금 이유를 말하는 쪽이 낫다.
+1. **체크아웃 자격은 바꾸지 않는다 — 엔진 자신의 git만 `GH_TOKEN`으로 인증한다.** 첫 안은 머지 잡의 체크아웃을 `FACTORY_MERGE_TOKEN`으로
+   하는 것이었고 대역 리뷰가 기각했다: 머지 잡은 거부권 창 **전에** PR head의 게이트 `[commands]`를 실행하며(`merge-stage.js` → `gates.js`
+   `scrubbedRunner`), `exec.js`의 env 스크럽은 `.git/config`에 심긴 체크아웃 헤더에 닿지 않는다 — admin PAT를 거기 두면 게이트 한 줄
+   (`git config --get http.….extraheader`, 또는 그냥 `git push origin HEAD:main`)로 분기 보호를 우회한다. 그래서 체크아웃은 App 설치
+   토큰 그대로 두고, run-stage `main`이 merge 스테이지에서만 `gitAuthEnv(GH_TOKEN)`을 **엔진 프로세스 env**에 얹는다: git의
+   `GIT_CONFIG_COUNT/KEY_n/VALUE_n`(프로세스 한정, `.git/config`에 쓰지 않음)로 체크아웃 헤더 목록을 **비우고**(빈 값 항목) 우리 헤더를
+   올린다. 비우지 않으면 두 `AUTHORIZATION` 헤더가 나가 GitHub이 400을 돌려준다(2026-10-11 스파이크: 가짜 헤더를 심은 bare 클론에서
+   리셋 + 실토큰은 fetch 성공, 리셋 없이는 400, 가짜 헤더만으로는 정확히 그 "could not read Username"). 그 다섯 키는 `MERGE_CAPABLE_ENV`에
+   들어가 게이트 자식에게는 가지 않는다. 두 배우 모드(이 저장소·own-calendar)에서 `GH_TOKEN`은 만료 없는 머지 PAT — 그 값을 이미 들고
+   있는 프로세스가 같은 값을 git에도 쓰는 것이므로 노출면은 그대로다.
+2. **단일 배우 App 모드는 fail-closed.** 거기서는 `GH_TOKEN`도 설치 토큰이라 같은 만료를 겪는다. 워크플로가 `FACTORY_GIT_TOKEN_TTL_MINUTES`
+   (머지 PAT면 `0`, App만이면 `60`)를 싣고, merge-stage의 창 열기는 잡 예산 검사와 같은 모양으로 "잡 시작 + 수명 − 지금 ≥ 창 + 10분
+   여유"를 묻는다. 모자라면 창을 열지 않고 blocked로 이유를 말한다(머지 PAT를 넣거나 `veto_minutes`를 낮추라고). 한 시간 뒤에 알 수 없는
+   이유로 죽는 것보다 지금 이유를 말하는 쪽이 낫다.
 3. **창을 잡 밖으로 내는 재진입 설계(ADR-037 토론 (1)의 stalled 팔 안)는 채택하지 않는다** — ADR-033의 소유자 결정("잡 안 대기")을
-   유지하고, 설치 토큰을 엔진이 재민팅하는 안(개인 키를 스텝 env로 — 노출면 확대)도 택하지 않는다. 템플릿 사본도 같이 바꾼다.
+   유지하고, 설치 토큰을 엔진이 재민팅하는 안(개인 키를 스텝 env로 — 노출면 확대)도, 머신 유저 PAT로 체크아웃하는 안(그 계정은 2026-10-06부터
+   shadow-flag 상태라 신뢰할 수 없다)도 택하지 않는다. 템플릿 사본도 같이 바꾼다.
 
 **남는 것**: #249·#212는 재큐로 다시 돈다(그 head에 남은 pending `factory/veto-window`는 새 런이 새 상태를 올리며 덮는다). 운영 door는
 pending 상태가 있는 PR을 머지하지 않으므로(`operator-merge-check`), 죽은 런이 남긴 창은 door로도 못 연다 — 그것이 맞다.
