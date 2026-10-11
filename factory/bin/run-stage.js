@@ -3304,6 +3304,17 @@ export async function mirrorMatchesBranchHead({ root, run, importer, match = mir
 }
 
 /**
+ * #253 — `assertStageBranch`(아래, 쓰기 스테이지의 세션 뒤 가드)가 돌려주는 오버레이 드리프트 사유. 이 사유는
+ * `undecidable — …`/`branch: FAIL — …`로 운영자와 sweeper의 다음 빌더에게 그대로 간다.
+ * 접두 `factory config changed during the stage: <paths>`는 그대로다(하류가 그 접두를 읽는다). 드리프트한 경로에
+ * mirrorStep의 가족(`inMirrorFamily`)이 하나라도 있으면 처방을 덧붙인다: 미러는 러너가 만들고, self-mirror 테스트는
+ * 빌더 세션 안에서 노트와 함께 통과한다(`factory/test/helpers/builder-session.js`). git diff 실패(`drift.reason`)는 그대로.
+ */
+export const OVERLAY_MIRROR_REMEDY = " — a builder must not write .factory/**; the self-mirror test is the runner's (it passes inside a builder session since #253)";
+export const overlayDriftReason = (drift) =>
+  drift.reason || `factory config changed during the stage: ${drift.paths.join(", ")}${drift.paths.some((p) => inMirrorFamily(p)) ? OVERLAY_MIRROR_REMEDY : ""}`;
+
+/**
  * ADR-023 Task 8b — 세션이 끝난 뒤에도 **여전히 그 브랜치 위인가**, 그리고 팩토리 설정은 여전히
  * 스테이지 커밋의 것인가. 훅이 브랜치 이동을 막지만 훅이 못 보는 철자는 언제나 남는다(런타임 조립) —
  * 이것은 그 뒤에 서는 구조적 백스톱이다. `git rev-parse --abbrev-ref HEAD` 자체가 실패하거나 HEAD가
@@ -3319,7 +3330,7 @@ export async function assertStageBranch({ run, cwd, issue, sha, harnessIssue = f
   // harness 이슈는 overlay가 애초에 덮지 않은 경로(`HARNESS_OPENS`)를 세션 뒤에도 묻지 않는다 —
   // 빌더가 그 파일을 고치는 것이 그 이슈의 일이다(§overlayPathspecs).
   const drift = await overlayDrift({ run, cwd, sha, harnessIssue });
-  if (!drift.ok) return { ok: false, reason: drift.reason || `factory config changed during the stage: ${drift.paths.join(", ")}` };
+  if (!drift.ok) return { ok: false, reason: overlayDriftReason(drift) };
   return { ok: true, branch: at };
 }
 
