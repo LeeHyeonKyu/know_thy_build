@@ -743,3 +743,149 @@ test("test_174_builder_context_takes_the_brief_bound_to_the_restart_transition",
   expect(loaded.k_restart_brief.findings).toEqual(real);
   expect(loaded.k_restart_brief.paths).toEqual(["factory/lib/self-gate.js"]);
 });
+
+/**
+ * ── #227 — implement verifies the handoff's PR number before trusting it ──────────────────────────────────────────────
+ *
+ * 2026-10-10 #207: the PR the factory had opened (#220) was hidden from everyone (ADR-038 — the machine user was flagged). The requeued
+ * implement read `pr: 220` from the handoff and the builder reported pushing to it; review then died on `gh pr view 220`. A PR number is
+ * external state, so the implement context checks it with `gh.prView` first and drops it — from every input the builder reads — only on
+ * proof that the PR is gone or wrong. The gh fixtures are the REAL `gh` texts (captured with gh 2.x against this repository) fed through
+ * the real `makeGh().prView`, so the classifier is pinned to what gh actually prints, not to a guessed string.
+ */
+import { makeGh as makeGh227 } from "../lib/gh.js";
+import { classifyHandoffPr as classifyHandoffPr227 } from "../lib/context.js";
+const GH_NOT_FOUND_227 = "GraphQL: Could not resolve to a PullRequest with the number of 220. (repository.pullRequest)";
+const GH_401_227 = "HTTP 401: Bad credentials (https://api.github.com/graphql)\nTry authenticating with:  gh auth login -h github.com";
+const GH_502_227 = "HTTP 502: Bad Gateway (https://api.github.com/graphql)";
+/** The production `prView` (lib/gh.js) over a fake `gh` process: `{ stderr }` exits 1 with that text, otherwise prints the PR view JSON. */
+const prView227 = (o) => makeGh227({
+  repo: "LeeHyeonKyu/know_thy_build",
+  run: makeFakeRun([{
+    match: (c, a) => c === "gh" && a[0] === "pr" && a[1] === "view",
+    result: o.stderr
+      ? { code: 1, stdout: "", stderr: o.stderr }
+      : { code: 0, stdout: JSON.stringify({ number: 220, state: o.state, mergeable: "MERGEABLE", headRefName: o.headRefName, headRefOid: "e".repeat(40), baseRefName: "main", labels: [] }), stderr: "" },
+  }]),
+}).prView;
+const H227 = "b".repeat(40);
+const reworkResponse227 = "```json\n" + JSON.stringify({ schema: "factory.rework-response.v1", issue: 227, responses: [{ id: "cf1", status: "disputed", reason: "out of scope" }] }) + "\n```";
+/** An implement round of #227 whose latest implement handoff names PR #220 (head H227), plus a rework-response on that PR. */
+function implement227(view) {
+  const r = root();
+  const issueComments = [
+    { id: 1, body: renderHandoff({ stage: "implement", issue: 227, summary: "s", data: { schema: "factory.implement.v1", issue: 227, pr: 220, head_sha: H227 } }), createdAt: "2026-10-10T00:00:00Z" },
+    // a rework round's review handoff names the same PR — the builder reads it in the full context too
+    { id: 2, body: renderHandoff({ stage: "review", issue: 227, summary: "s", data: { schema: "factory.review.v1", issue: 227, pr: 220, head_sha: H227, round: 1, decision: "rework", verdicts: [{ role: "correctness", verdict: "reject", confidence: "high", must_fix: [{ id: "cf1", where: "a.js:1", claim: "c", evidence: "e" }], should_fix: [], verified: [] }] } }), createdAt: "2026-10-10T00:30:00Z" },
+  ];
+  const gh = {
+    issue: vi.fn(async () => ({ number: 227, title: "T", body: "", labels: ["factory:in-progress"] })),
+    comments: vi.fn(async (n) => (n === 220 ? [{ id: 9, body: reworkResponse227, createdAt: "2026-10-10T01:00:00Z" }] : issueComments.slice())),
+    prView: prView227(view),
+  };
+  return { r, gh };
+}
+const read227 = (r, f) => JSON.parse(readFileSync(join(r, ".factory/out", f), "utf8"));
+/** The whole implement front half through the production wiring: runStage → makeBuildContextDep → buildContext. Returns what the builder read + the run record. */
+async function round227(view) {
+  const { r, gh } = implement227(view);
+  const lines = [];
+  const seen = {};
+  const deps = {
+    charterReady: async () => true, trustWorkspace: async () => {}, claim: async () => ({ ok: true }),
+    heartbeat: async () => ({ stop() {} }), assertHandoff: async () => ({ ok: true }),
+    buildContext: makeBuildContextDep({ root: r, gh, issue: 227, stage: "implement", run: null, mergeBase: async () => null, recordLine: (l) => lines.push(l) }),
+    resetAgentsLog: async () => {},
+    claudeP: vi.fn(async () => {
+      seen.loaded = read227(r, "loaded.json");
+      seen.builder = read227(r, "context.builder.json");
+      seen.full = read227(r, "context.json");
+      return { is_error: false, result: "{}" };
+    }),
+    gates: async () => null, verifyStage: () => ({ ok: true, reasons: [], data: {} }), writeHandoff: async () => {},
+    transition: vi.fn(async ({ to }) => ({ ok: true, to })), runRecord: (l) => lines.push(...l), release: async () => true,
+  };
+  const code = await runStage({ stage: "implement", issue: 227, deps });
+  return { code, lines, seen, gh, deps };
+}
+const DROPPED_227 = "pr: #220 not visible/not this branch — the builder opens a new PR";
+
+test("test_227_implement_drops_an_invisible_pr_number_and_the_builder_opens_a_new_one", async () => {
+  // Not found (the #207 shape): the stale number is gone from everything the builder reads.
+  const gone = await round227({ stderr: GH_NOT_FOUND_227 });
+  expect(gone.deps.claudeP).toHaveBeenCalledTimes(1);
+  expect(gone.seen.loaded.pr).toBeUndefined();
+  expect(gone.seen.loaded.head_sha).toBeUndefined();
+  expect(gone.seen.loaded.disputed).toEqual([]);
+  expect(gone.gh.comments.mock.calls.map((c) => c[0])).not.toContain(220);   // the PR's comments are never read
+  expect(gone.seen.builder.handoffs.implement.pr ?? null).toBe(null);
+  expect(gone.seen.full.handoffs.implement.pr ?? null).toBe(null);
+  expect(gone.seen.builder.handoffs.review.pr ?? null).toBe(null);
+  expect(gone.seen.loaded.must_fix.map((m) => m.id)).toEqual(["cf1"]);   // the review's findings still reach the builder — only the number goes
+  expect(JSON.stringify(gone.seen.loaded)).not.toContain("220");
+  expect(JSON.stringify(gone.seen.builder.handoffs)).not.toContain("220");
+  expect(gone.lines.filter((l) => l.startsWith(DROPPED_227))).toHaveLength(1);
+  expect(gone.lines.find((l) => l.startsWith(DROPPED_227))).toMatch(/Could not resolve to a PullRequest/);
+
+  // Visible, OPEN, on claude/fq-227: the number reaches the builder unchanged, and no such line.
+  const ok = await round227({ state: "OPEN", headRefName: "claude/fq-227" });
+  expect(ok.seen.loaded.pr).toBe(220);
+  expect(ok.seen.loaded.head_sha).toBe(H227);
+  expect(ok.seen.loaded.disputed).toEqual([{ id: "cf1", status: "disputed", reason: "out of scope" }]);
+  expect(ok.seen.builder.handoffs.implement.pr).toBe(220);
+  expect(ok.seen.builder.handoffs.review.pr).toBe(220);
+  expect(ok.lines.some((l) => /not visible\/not this branch/.test(l))).toBe(false);
+});
+
+test("test_227_implement_drops_a_pr_on_another_branch_or_closed", async () => {
+  // The expected branch comes from run-stage's stageBranch — a PR on any other head branch is not this issue's PR.
+  const other = await round227({ state: "OPEN", headRefName: "claude/fq-207" });
+  expect(other.seen.loaded.pr).toBeUndefined();
+  expect(other.seen.loaded.head_sha).toBeUndefined();
+  expect(other.seen.loaded.disputed).toEqual([]);
+  expect(other.seen.builder.handoffs.implement.pr ?? null).toBe(null);
+  expect(other.gh.comments.mock.calls.map((c) => c[0])).not.toContain(220);
+  const otherLine = other.lines.find((l) => l.startsWith(DROPPED_227));
+  expect(otherLine).toContain("claude/fq-207");
+  expect(otherLine).toContain("claude/fq-227");
+
+  // CLOSED on the right branch: dropped the same way, and the line names the state.
+  const closed = await round227({ state: "CLOSED", headRefName: "claude/fq-227" });
+  expect(closed.seen.loaded.pr).toBeUndefined();
+  expect(closed.seen.loaded.head_sha).toBeUndefined();
+  expect(closed.seen.loaded.disputed).toEqual([]);
+  expect(closed.seen.builder.handoffs.implement.pr ?? null).toBe(null);
+  expect(closed.gh.comments.mock.calls.map((c) => c[0])).not.toContain(220);
+  expect(closed.lines.find((l) => l.startsWith(DROPPED_227))).toContain("CLOSED");
+});
+
+test("test_227_a_transient_gh_failure_or_merged_pr_never_triggers_a_rebuild — implement context", async () => {
+  // A gh failure that is not a not-found (auth, 5xx) proves nothing about the PR: the number stays, no 'not visible' line.
+  for (const stderr of [GH_401_227, GH_502_227]) {
+    const t = await round227({ stderr });
+    expect(t.seen.loaded.pr, stderr).toBe(220);
+    expect(t.seen.loaded.head_sha, stderr).toBe(H227);
+    expect(t.seen.loaded.disputed, stderr).toEqual([{ id: "cf1", status: "disputed", reason: "out of scope" }]);
+    expect(t.lines.some((l) => /not visible/.test(l)), stderr).toBe(false);
+    expect(t.deps.transition.mock.calls.map((c) => c[0].to), stderr).not.toContain("factory:planned");
+  }
+  // A thrown timeout (no gh stderr at all) is the same: unknown, keep the number.
+  const { r, gh } = implement227({ state: "OPEN", headRefName: "claude/fq-227" });
+  gh.prView = async () => { throw new Error("gh pr view timed out after 30000ms"); };
+  const ctx = await buildContext({ root: r, gh, issue: 227, stage: "implement", prBranch: "claude/fq-227" });
+  expect(ctx.loaded.pr).toBe(220);
+  // A view the rule does not recognise (no head branch reported) proves nothing either.
+  expect(classifyHandoffPr227({ view: { number: 220, state: "OPEN" }, branch: "claude/fq-227" }).state).toBe("unknown");
+
+  // MERGED: never cleared, the builder never starts, and implement stops at needs-human naming the merged PR.
+  const merged = await round227({ state: "MERGED", headRefName: "claude/fq-227" });
+  expect(merged.code).toBe(2);
+  expect(merged.deps.claudeP).not.toHaveBeenCalled();
+  const tos = merged.deps.transition.mock.calls.map((c) => c[0]);
+  expect(tos.map((x) => x.to)).not.toContain("factory:planned");
+  expect(tos.at(-1)).toEqual(expect.objectContaining({ to: "factory:needs-human", reason: expect.stringMatching(/#220.*MERGED|MERGED.*#220/) }));
+  expect(merged.lines.some((l) => /not visible/.test(l))).toBe(false);
+  const m = implement227({ state: "MERGED", headRefName: "claude/fq-227" });
+  await buildContext({ root: m.r, gh: m.gh, issue: 227, stage: "implement", prBranch: "claude/fq-227" });
+  expect(read227(m.r, "loaded.json").pr).toBe(220);   // the number is unchanged in what was written
+});
