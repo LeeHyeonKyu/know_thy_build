@@ -271,6 +271,17 @@ export function makeGh({ run, repo, sleep = realSleep }) {
     return r.stdout;
   }
   /**
+   * #217 — the engine's one REST PATCH of a `body` field (test_195_one_patch_path_across_the_engine), shared by `patchComment`
+   * (issue comments) and `editPrBody` (the PR body) so there is no second copy. The body travels only as `{"body": …}` JSON on
+   * stdin (`--input -`), never in argv: `-f`/`-F` read a leading "@" as a file reference and `-F` converts "true"/"123". REST
+   * needs only `repo` scope. A failure names the method and the resource (gh()'s message would say only "gh api -X"). No retry.
+   */
+  async function patchBody(path, body, opts = {}) {
+    const args = ["api", "-X", "PATCH", path, "--input", "-"];
+    const r = await run("gh", args, { ...opts, input: JSON.stringify({ body }) });
+    if (r.code !== 0) throw new Error(`gh api ${args[2]} ${path} failed (${r.code}): ${r.stderr.trim() || r.stdout.trim()}`);
+  }
+  /**
    * 라벨 변경 하나를 끝까지 밀어붙인다: `gh issue edit`을 1s·3s·9s 간격으로 네 번(첫 시도 + 재시도 3회)
    * 시도하고, 그래도 안 되면 **REST 엔드포인트**로 같은 변경을 한 번 더 시도한다. 둘 다 실패하면
    * 처음 에러를 그대로 던진다(사람이 보는 것은 원인이지 폴백의 증상이 아니다 — REST 쪽 메시지는
@@ -453,8 +464,7 @@ export function makeGh({ run, repo, sleep = realSleep }) {
      * optional `signal` kills the gh child when the caller's bound fires; absent → exactly the old call. No retry.
      */
     async patchComment(commentId, body, { signal = null } = {}) {
-      // --input stdin JSON avoids -f treating a leading "@" in body as a file reference
-      await gh(["api", "-X", "PATCH", `repos/${repo}/issues/comments/${commentId}`, "--input", "-"], { input: JSON.stringify({ body }), ...(signal ? { signal } : {}) });
+      await patchBody(`repos/${repo}/issues/comments/${commentId}`, body, signal ? { signal } : {});
     },
     /**
      * 이 라벨이 붙은 이슈들. 기본은 **열린 것만** — sweeper의 모든 팔과 back-pressure가 묻는 것은
@@ -668,17 +678,22 @@ export function makeGh({ run, repo, sleep = realSleep }) {
     /**
      * #195 — the PR body, read right before the runner rewrites its evidence section (read-modify-write). Bounded by a
      * timeout and never retried: the caller sits right before a merge or a hand-off, and a slow GitHub must not hold it.
+     * #217 — REST (`GET repos/<repo>/pulls/<n>`), which needs only `repo` scope: `gh pr view` goes through GraphQL and needs
+     * `read:org`, which the bot token lacks (run 37348881584). The JSON is parsed here, not with `--jq .body` — `--jq` prints
+     * a null body as the word "null" and adds a newline. The resource path is argv[1] so gh's failure message names it.
      */
     async prBody(pr, { timeoutMs = PR_BODY_TIMEOUT_MS, signal = null } = {}) {
-      const out = await bounded((s) => gh(["pr", "view", String(pr), "-R", repo, "--json", "body"], { signal: s }), { ms: timeoutMs, what: "gh pr view --json body", signal });
+      const out = await bounded((s) => gh(["api", `repos/${repo}/pulls/${pr}`], { signal: s }), { ms: timeoutMs, what: `gh api GET repos/${repo}/pulls/${pr}`, signal });
       return JSON.parse(out).body ?? "";
     },
     /**
-     * #195 — replace the PR body. The body goes on stdin (`--body-file -`), never into argv. Timeout, no retry. A timeout or
-     * the caller's abort kills the `gh` child (so the edit cannot land after the caller moved on).
+     * #195 — replace the PR body. Timeout, no retry. A timeout or the caller's abort kills the `gh` child (so the edit cannot
+     * land after the caller moved on).
+     * #217 — REST `PATCH repos/<repo>/pulls/<n>` through `patchBody`, the same path as `patchComment` (`repo` scope only;
+     * `gh pr edit` resolves the viewer over GraphQL and needs `read:org`). The body is stdin JSON, never argv.
      */
     async editPrBody(pr, body, { timeoutMs = PR_BODY_TIMEOUT_MS, signal = null } = {}) {
-      await bounded((s) => gh(["pr", "edit", String(pr), "-R", repo, "--body-file", "-"], { input: body, signal: s }), { ms: timeoutMs, what: "gh pr edit --body-file", signal });
+      await bounded((s) => patchBody(`repos/${repo}/pulls/${pr}`, body, { signal: s }), { ms: timeoutMs, what: `gh api PATCH repos/${repo}/pulls/${pr}`, signal });
     },
     /**
      * ADR-021 — 두 배우 모드의 승인 한 번. **머지 배우의 토큰으로만** 의미가 있다: PR을 연 계정
