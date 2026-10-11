@@ -25,7 +25,7 @@ import { makeQueueAdmission } from "../lib/admission.js";
 import { mirrorStep, mirrorMatchesHead, inMirrorFamily, regenerateMirror, mirrorApplicable, isUnionMergePath, MIRROR_FAMILIES } from "../lib/mirror.js";
 import { REHEARSAL_UNWIRED } from "../lib/transition.js";
 export { HARNESS_LABEL };   // 재수출 — retro.js와 이 값이 같은 소스에서 왔다는 것을 테스트가 import equality로 확인한다
-import { buildContext, resolveTier, contextManifestLines } from "../lib/context.js";
+import { buildContext, resolveTier, contextManifestLines, checkHandoffPr } from "../lib/context.js";
 import { resolveReviewRoster } from "../lib/review-roster.js";
 import { startHeartbeat } from "../lib/heartbeat.js";
 import { readProgress, progressMarker } from "../lib/progress.js";
@@ -36,7 +36,7 @@ import { matchesAny } from "../lib/glob.js";
 import { aggregateReview } from "../lib/aggregate.js";
 import { renderHandoff, latestHandoff, parseHandoffs } from "../lib/handoff.js";
 import { validate } from "../lib/schemas.js";
-import { blockedOrigin, commentsSinceRequeue, commentsSinceCycleStart, countTransitionsTo, TRANSITION_TO, countSelfGateRetries, countAllSelfGateRetries, SELF_GATE_RETRY_BACKSTOP, selfGateRetryComment, kRestartState, kRestartComment, kRestartBriefOf, sameKRestartBrief, wherePaths } from "../lib/retro/issue-comments.js";
+import { blockedOrigin, commentsSinceRequeue, commentsSinceCycleStart, countTransitionsTo, countedTransitionIndices, TRANSITION_TO, countSelfGateRetries, countAllSelfGateRetries, SELF_GATE_RETRY_BACKSTOP, selfGateRetryComment, kRestartState, kRestartComment, kRestartBriefOf, sameKRestartBrief, wherePaths } from "../lib/retro/issue-comments.js";
 import { transition } from "../lib/transition.js";
 import { appendRunRecord, appendRunRecordLine, runRecordPath, reviewEvidenceLine, parseReviewEvidence, runIdOfRunner } from "../lib/run-record.js";
 import { engineCrashLine, quoteEngineCrashLines } from "../lib/usage.js";
@@ -588,6 +588,19 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runAt
     // 얹혀도(force-push, 추가 커밋) 검증하지 않은 코드를 검증한 것으로 착각하지 않도록 detach해서 고정한다.
     if ((stage === "review" || stage === "merge") && d.checkoutHead) {
       const co = await d.checkoutHead();
+      /**
+       * #227 (ADR-039) — a handoff PR that is definitely gone (not found, another head branch, CLOSED) is not a review/merge failure a
+       * person can act on: the code is on the branch and only the PR is missing, so the issue goes back to `factory:planned` and
+       * implement opens a new PR (no session here). Once per requeue window — the second goes to needs-human (`co.again`, read from
+       * the marker `prNotVisibleReason` wrote). Every other checkout failure (head moved, a transient gh error, MERGED) is below, unchanged.
+       */
+      if (!co.ok && co.gone) {
+        const to = co.again ? "factory:needs-human" : "factory:planned";
+        const reason = co.again ? prNotVisibleAgainReason(co) : prNotVisibleReason(co);
+        const t = await d.transition({ to, reason });
+        record([`checkout: PR #${co.pr} ${co.why} → ${to}${co.again ? " (second not-visible result in this requeue window)" : " (implement opens a new PR)"}`, ...(t.ok ? [`transition: ${t.to}`] : refusal(t))]);
+        return t.ok && to === "factory:planned" ? 0 : 2;
+      }
       if (!co.ok) {
         const t = await d.transition({ to: "factory:needs-human", reason: co.reason });
         record([`checkout: FAIL — ${co.reason}`, ...refusal(t)]);
@@ -762,6 +775,18 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runAt
     // KTB-43 — 기준선(1.5)은 컨텍스트에도 실린다: 빌더 프롬프트의 "커밋하지 말 것" 목록이 그것이다.
     // #143 — 빌더에게 넘긴 충돌 경로는 `loaded.merge_conflicts`로 간다(넘긴 것이 없으면 키도 없다).
     const ctx = await d.buildContext({ setupDirty, ...(pendingMerge ? { mergeConflicts: pendingMerge.paths } : {}) });
+    /**
+     * #227 — what the implement context did with the handoff's PR (lib/context.js `prCheck`, non-enumerable so the dropped number never
+     * reaches a file the builder reads). A MERGED handoff PR is never rebuilt over: stop for a human before the builder starts.
+     */
+    if (stage === "implement" && ctx?.prCheck?.line) {
+      record([ctx.prCheck.line]);
+      if (ctx.prCheck.state === "merged") {
+        const t = await d.transition({ to: "factory:needs-human", reason: `implement handoff PR #${ctx.prCheck.pr} is already MERGED — not rebuilding over a merged PR; a human must decide (#227)` });
+        record(refusal(t));
+        return 2;
+      }
+    }
     /**
      * Feedback loop Task 1 (리뷰 provenance) — 두 새 줄은 **자기를 쓴 런을 지목한다**. `docs/factory/runs/**`는
      * 에이전트 세션이 덧붙일 수 있는 경로이고 harvester는 정규식의 첫 매치를 집으므로, 런에 묶이지 않은
@@ -1082,6 +1107,25 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runAt
       const t = await d.transition({ to, reason: `${reasonPrefix}: ${v.reasons.join("; ")}`, ...(qaPath ? { cause: "undecidable" } : {}) });
       record(["verify: FAIL", ...v.reasons.map((r) => `- ${r}`), ...refusal(t), ...gatesNote, usage]);
       return 2;
+    }
+    /**
+     * #227 — **the builder's PR is checked before anything writes it into a handoff.** `loaded.pr` does not decide open-or-push (the
+     * builder does, in its session), so dropping a stale number in the context is not enough: in the #207 shape the builder reported
+     * the hidden PR back. Here, before the harness branch, the self-gate and the awaiting-review transition — every path that writes the
+     * implement handoff — a builder PR that is not found, not on claude/fq-<n>, or not OPEN stops the round at needs-human, with no
+     * handoff carrying that number. A transient gh failure proves nothing and hands off as before. (A builder that returned no PR
+     * number at all already failed verify above — `pr` is required by implement.v1 — and that reason is in the record.)
+     */
+    if (stage === "implement" && d.prView) {
+      const pr = v.data?.pr;
+      const c = await checkHandoffPr({ prView: d.prView, pr, branch: stageBranch(issue) });
+      if (c.state === "unknown") record([`pr: builder PR #${pr} could not be checked — ${c.why} (handing off as before)`]);
+      else if (c.state !== "ok") {
+        const reason = `builder PR #${pr} ${c.why} — not handing off to review; the number is not written into an implement handoff (#227)`;
+        const t = await d.transition({ to: "factory:needs-human", reason });
+        record(["verify: ok", `pr: REFUSED — ${reason}`, ...refusal(t), ...gatesNote, usage]);
+        return 2;
+      }
     }
     // 감사 M1 — 스크립트가 에이전트의 판정을 덮었다면 그 사실이 run 기록의 1차 증거다(다음 조사가
     // 이 줄로 grep한다). handoff에도 `never_automate_hit`으로 같은 내용이 실린다.
@@ -2771,12 +2815,44 @@ export function makeTransitionDep({ gh, issue, stage, rehearsal, admission, buil
   };
 }
 
+/**
+ * #227 (ADR-039) — **the not-visible return's marker, written and read here.** review/merge send a definitely gone handoff PR back to
+ * `factory:planned` with a reason that starts with this tag; the transition comment carries the reason verbatim, so the next
+ * not-visible result finds the first one in the issue's comments. One return per requeue window (`commentsSinceRequeue`, the same
+ * window K uses); the second goes to needs-human, so review → planned → implement → review cannot loop.
+ */
+export const PR_NOT_VISIBLE_TAG = "pr-not-visible:";
+export const prNotVisibleReason = ({ pr, why }) => `${PR_NOT_VISIBLE_TAG} PR #${pr} ${why} — back to factory:planned so implement opens a new PR (once per requeue window, #227)`;
+export const prNotVisibleAgainReason = ({ pr, why }) => `PR #${pr} ${why} — not visible again after this requeue window's one return to factory:planned; a human must decide (#227)`;
+/**
+ * How many not-visible returns to planned happened since the last requeue. Only a completed `→ factory:planned` transition counts: the
+ * transition comment is written before the label swap, and a swap that failed is cancelled by the `factory-transition-failed:v1` marker
+ * that follows it — the same cancellation rule K uses (`countedTransitionIndices`, one rule, not a second parser), then filtered to the
+ * transitions whose reason carries the tag.
+ */
+export function prNotVisibleReturns(comments) {
+  const win = commentsSinceRequeue(comments);
+  return countedTransitionIndices(win, "factory:planned").filter((i) => String(win[i]?.body ?? "").includes(PR_NOT_VISIBLE_TAG)).length;
+}
+
 export function makeCheckoutHead({ gh, run, root, issue }) {
   return async () => {
-    const handoff = latestHandoff(await gh.comments(issue), "implement");
+    const comments = await gh.comments(issue);
+    const handoff = latestHandoff(comments, "implement");
     if (!handoff?.data?.head_sha) return { ok: false, reason: "implement handoff missing" };
     const { head_sha, pr } = handoff.data;
     if (pr == null) return { ok: false, reason: "implement handoff has no PR number" };
+    /**
+     * #227 — before the head-sha check, ask whether the handoff's PR is still this issue's PR (lib/context.js `checkHandoffPr`, the
+     * rule implement uses too). `gone` returns a typed refusal runStage routes to planned (or needs-human on the window's second);
+     * `merged` is never a rebuild; `unknown` (5xx, auth, timeout) falls through to today's path unchanged. A gh client without
+     * `prView` (older test doubles) is today's path as well.
+     */
+    if (typeof gh.prView === "function") {
+      const c = await checkHandoffPr({ prView: (n) => gh.prView(n), pr, branch: stageBranch(issue) });
+      if (c.state === "gone") return { ok: false, gone: true, pr, why: c.why, again: prNotVisibleReturns(comments) > 0, reason: `implement handoff PR #${pr} ${c.why}` };
+      if (c.state === "merged") return { ok: false, reason: `implement handoff PR #${pr} is already MERGED — not rebuilding over a merged PR; a human must decide (#227)` };
+    }
     let currentSha;
     try { currentSha = await gh.prHeadSha(pr); }
     catch (e) { return { ok: false, reason: `gh pr view failed: ${e?.message || e}` }; }
@@ -3070,7 +3146,8 @@ export const makeBuildContextDep = ({ root, gh, issue, stage, run, mergeBase, re
     let base = null;
     try { base = await mergeBase(); }
     catch (e) { if (!isMergeBaseError(e)) throw e; recordLine("tier: merge-base unresolved — tier floor not computed (gates will block)"); }
-    const ctx = await produce({ root, gh, issue, stage, run, base, setupDirty, planRepair, mergeConflicts });
+    // #227 — implement checks the handoff's PR against this issue's branch (lib/context.js); the name comes from here, not from lib.
+    const ctx = await produce({ root, gh, issue, stage, run, base, setupDirty, planRepair, mergeConflicts, ...(stage === "implement" ? { prBranch: stageBranch(issue) } : {}) });
     onBuilt(ctx);
     return ctx;
   };
@@ -3819,6 +3896,8 @@ async function main() {
     },
     /** triage 전용(KTB-9): 판정된 tier를 라벨로 내보낸다 — 다른 `factory:tier-*`는 같은 호출에서 떨어진다. */
     setTierLabel: (tier) => gh.setTierLabel(issue, tierLabel(tier)),
+    /** #227 — implement: the builder's returned PR, checked before the hand-off (visible, on claude/fq-<n>, OPEN). */
+    prView: (pr) => gh.prView(pr),
     /** merge stage 전용: PR이 열려 있는지, 충돌은 없는지 — implement handoff에 적힌 PR을 조회한다. */
     prInfo: async () => {
       const h = latestHandoff(await gh.comments(issue), "implement");
