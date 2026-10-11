@@ -3028,6 +3028,35 @@ test("test_179_job_budget_keeps_a_post_window_margin", async () => {
   expect(fits.mergePr).toHaveBeenCalledTimes(1);
 });
 
+// ADR-038 보정(2026-10-11, #249·#212) — 잡 예산만이 아니라 잡의 **git 자격증명**도 창보다 오래 살아야 한다. App 설치 토큰은 민팅 뒤
+// 60분에 만료되는데 창이 60분이라, 창이 닫힌 뒤의 records fetch·push·락 해제가 전부 인증 실패로 죽었고 그것이 "review evidence not
+// bound to a factory run"으로 읽혀 needs-human이 됐다. 워크플로가 `FACTORY_GIT_TOKEN_TTL_MINUTES`로 수명을 싣고, 창 + 여유가 그 안에
+// 들어야 연다 — 아니면 열지 않고 blocked로 이유를 말한다. 만료 없는 머지 PAT(두 배우 모드)는 null/0 = 검사 없음.
+test("test_adr038_veto_window_refuses_when_the_checkout_token_expires_before_it_closes", async () => {
+  // 잡 시작 2분 뒤에 창을 연다(clock179 기본값). 수명 60 → 남은 58분 < 창 60 + 여유 10: 열지 않는다. 수명 71 → 남은 69분도 모자란다.
+  for (const [ttl, left] of [[60, 58], [71, 69]]) {
+    const d = selfD179({ jobTimeoutMinutes: 90, gitTokenTtlMinutes: ttl });
+    const r = await run179(d);
+    const at = `ttl ${ttl}`;
+    expect(r.code, at).toBe(2);
+    const last = d.transition.mock.calls.at(-1)[0];
+    expect(last.to, at).toBe("factory:blocked");
+    expect(last.reason, at).toMatch(/veto window outlives this job's git credential/);
+    expect(last.reason, at).toMatch(new RegExp(`expires ${ttl} min after the job started \\(${left} min left\\)`));
+    expect(last.reason, at).toMatch(/veto_minutes: 60/);
+    expect(last.reason, at).toMatch(/set FACTORY_MERGE_TOKEN in the factory-merge environment/);
+    for (const dep of [d.vetoWindow.open, d.comment, d.sleep, d.mergePr]) expect(dep, at).not.toHaveBeenCalled();
+    expect(r.lines.some((l) => /^merge: veto window not started — .*git credential/.test(l)), at).toBe(true);
+  }
+  // 남은 70분 = 창 60 + 여유 10 → 연다(경계는 포함). 수명 없음(null·0 — 만료 없는 머지 PAT)도 연다.
+  for (const [label, ttl] of [["ttl 72", 72], ["no ttl", null], ["ttl 0", 0]]) {
+    const fits = selfD179({ jobTimeoutMinutes: 90, gitTokenTtlMinutes: ttl });
+    expect((await run179(fits)).code, label).toBe(0);
+    expect(fits.vetoWindow.open, label).toHaveBeenCalledTimes(1);
+    expect(fits.mergePr, label).toHaveBeenCalledTimes(1);
+  }
+});
+
 // 창 뒤에 검증한 head가 곧 머지되는 head다 — 자기 변경 경로는 `mergePr`에 그 sha를 넘겨(`--match-head-commit`) 재검증과
 // 머지 사이의 push가 검증 없이 머지되지 못하게 한다.
 test("test_179_self_change_merge_pins_the_verified_head", async () => {

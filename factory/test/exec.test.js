@@ -1,5 +1,25 @@
 import { test, expect } from "vitest";
-import { run, makeFakeRun, scrubEnv, scrubbedRunner, MERGE_CAPABLE_ENV } from "../lib/exec.js";
+import { run, makeFakeRun, scrubEnv, scrubbedRunner, MERGE_CAPABLE_ENV, gitAuthEnv } from "../lib/exec.js";
+
+// ── ADR-038 보정(2026-10-11, #249·#212): 엔진 자신의 git만 GH_TOKEN으로 인증한다 — `.git/config`에는 쓰지 않고, 게이트 자식에게는 가지 않는다 ──
+test("test_adr038_git_auth_env_resets_the_checkout_header_then_adds_the_token_and_never_reaches_a_gate_child", () => {
+  // 토큰이 없으면 아무것도 얹지 않는다(로컬 실행은 사람의 자격으로 돈다)
+  expect(gitAuthEnv()).toBeNull();
+  expect(gitAuthEnv({ token: "  " })).toBeNull();
+  const e = gitAuthEnv({ token: "ghp_merge" });
+  // 같은 키로 두 항목: 첫 항목의 빈 값이 `.git/config`의 헤더 목록을 비우고(두 AUTHORIZATION 헤더면 GitHub이 400 — 2026-10-11 실측), 둘째가 우리 것
+  expect(e).toEqual({
+    GIT_CONFIG_COUNT: "2",
+    GIT_CONFIG_KEY_0: "http.https://github.com/.extraheader", GIT_CONFIG_VALUE_0: "",
+    GIT_CONFIG_KEY_1: "http.https://github.com/.extraheader", GIT_CONFIG_VALUE_1: `AUTHORIZATION: basic ${Buffer.from("x-access-token:ghp_merge").toString("base64")}`,
+  });
+  // 키는 actions/checkout이 심는 모양 그대로(`http.<server>/.extraheader`) — GHES도 같은 모양, 끝 슬래시는 하나
+  expect(gitAuthEnv({ token: "t", serverUrl: "https://ghe.example.com/" }).GIT_CONFIG_KEY_0).toBe("http.https://ghe.example.com/.extraheader");
+  // 게이트 자식 env에서는 다섯 키 전부 빠진다 — 값에 토큰이 base64로 들어 있다
+  const scrubbed = scrubEnv({ PATH: "/usr/bin", GH_TOKEN: "ghp_merge", ...e });
+  expect(scrubbed).toEqual({ PATH: "/usr/bin" });
+  for (const k of Object.keys(e)) expect(MERGE_CAPABLE_ENV, k).toContain(k);
+});
 
 test("run executes a real command and captures stdout/code", async () => {
   const r = await run("node", ["-e", "process.stdout.write('hi'); process.exit(3)"]);

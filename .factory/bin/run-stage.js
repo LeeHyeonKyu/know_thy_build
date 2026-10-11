@@ -3,7 +3,7 @@ import { mkdirSync, writeFileSync, readFileSync, existsSync, realpathSync, rmSyn
 import { homedir, hostname, tmpdir } from "node:os";
 import { dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { run } from "../lib/exec.js";
+import { run, gitAuthEnv } from "../lib/exec.js";
 import { makeGh, allChecksGreen, resolveFactoryLogins, PR_BODY_TIMEOUT_MS, bounded } from "../lib/gh.js";
 import { buildEvidence, applyEvidenceSection, evidenceComment, hasEvidenceComment, PR_BODY_MAX_CHARS } from "../lib/evidence.js";
 import { loadCharter, loadHarness, loadRoles, breakerThresholds } from "../lib/config.js";
@@ -2593,6 +2593,8 @@ export function makePrEvidenceDeps({ gh, issue, repo = null, readRecord = null, 
 export function makeMergeSelfChangeDeps({ gh, issue, getCharter, getEngine, env = {}, now = () => Date.now() }) {
   const started = String(env.FACTORY_JOB_STARTED ?? "").trim();
   const timeout = String(env.FACTORY_JOB_TIMEOUT_MINUTES ?? "").trim();
+  // ADR-038 보정 — 워크플로가 싣는 체크아웃 토큰의 수명(분). App 설치 토큰이면 60, 만료 없는 머지 PAT면 0; 없거나 모양이 틀리면 null(= 만료 없음).
+  const ttl = String(env.FACTORY_GIT_TOKEN_TTL_MINUTES ?? "").trim();
   return {
     get selfChange() { return getCharter()?.self_change; },
     get engine() { return getEngine() === true; },
@@ -2603,6 +2605,7 @@ export function makeMergeSelfChangeDeps({ gh, issue, getCharter, getEngine, env 
     now,
     jobStartedAt: /^[0-9]+$/.test(started) && Number(started) > 0 ? Number(started) * 1000 : null,
     jobTimeoutMinutes: /^[0-9]+$/.test(timeout) && Number(timeout) > 0 ? Number(timeout) : null,
+    gitTokenTtlMinutes: /^[0-9]+$/.test(ttl) && Number(ttl) > 0 ? Number(ttl) : null,
     vetoWindow: {
       open: async ({ sha, description }) => {
         try { await gh.setStatus({ sha, context: VETO_WINDOW_CONTEXT, state: "pending", description }); return { ok: true }; }
@@ -3554,10 +3557,22 @@ export function makeLocalEntry({ gh, issue, stage, env, rehearsal = null }) {
 }
 
 /** CLI 진입: 실제 의존성 조립 */
+/**
+ * ADR-038 보정(2026-10-11, #249·#212) — merge 스테이지의 **엔진 git**은 `GH_TOKEN`으로 인증한다(`lib/exec.js` `gitAuthEnv`).
+ * 체크아웃의 App 설치 토큰은 60분에 만료되는데 거부권 창은 60분을 잡 안에서 기다리므로, 창 뒤의 records fetch·push·락 해제는
+ * 두 배우 모드의 만료 없는 머지 PAT(= 이 잡의 `GH_TOKEN`)로 나가야 한다. merge 밖에서는 null — 다른 스테이지의 `GH_TOKEN`은
+ * 체크아웃과 같은 토큰이라 얻는 것이 없고, `claude -p`가 도는 자리에 env를 더 얹지 않는다. 게이트 자식은 `scrubEnv`가 이 키들을 뺀다.
+ */
+export function mergeGitAuth({ stage, env }) {
+  if (stage !== "merge") return null;
+  return gitAuthEnv({ token: env?.GH_TOKEN, serverUrl: env?.GITHUB_SERVER_URL || undefined });
+}
+
 async function main() {
   const argv = process.argv.slice(2);
   const [stage, issueArg] = argv;
   const issue = Number(issueArg);
+  Object.assign(process.env, mergeGitAuth({ stage, env: process.env }) ?? {});   // ADR-038 보정 — merge의 엔진 git 인증(위)
   // KTB-24 — `--aborted <job.status>`. 값이 빠지면(`--aborted`만) "cancelled"로 읽는다: 이 스텝은
   // 취소된 잡의 짧은 유예 안에서만 도는데, 인자 하나 때문에 usage로 죽으면 정리가 통째로 사라진다.
   const abortedAt = argv.indexOf("--aborted");

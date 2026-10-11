@@ -9,7 +9,33 @@ import { spawn } from "node:child_process";
  * 걸리지 벤더 스크립트가 부르는 하위 프로세스에는 걸리지 않으므로, 환경에서 빼는 것이 유일하게
  * 확실한 방법이다.
  */
-export const MERGE_CAPABLE_ENV = ["GH_TOKEN", "GITHUB_TOKEN", "FACTORY_BOT_TOKEN", "FACTORY_MERGE_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY"];
+export const MERGE_CAPABLE_ENV = ["GH_TOKEN", "GITHUB_TOKEN", "FACTORY_BOT_TOKEN", "FACTORY_MERGE_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY",
+  // ADR-038 보정 — `gitAuthEnv`가 엔진 프로세스에 얹는 git 인증 헤더(아래). 값에 토큰이 base64로 들어 있으므로 게이트 자식에게는 같은 이유로 가지 않는다.
+  ...["GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0", "GIT_CONFIG_KEY_1", "GIT_CONFIG_VALUE_1"]];
+
+/**
+ * ADR-038 보정(2026-10-11, #249·#212) — **엔진 자신의 git만** 주어진 토큰으로 인증하는 env 조각. `.git/config`에는 아무것도 쓰지 않는다.
+ *
+ * 왜 체크아웃 자격을 바꾸지 않는가: `actions/checkout`이 `.git/config`에 심는 `AUTHORIZATION` 헤더는 env 스크럽이 닿지 않는 자리라,
+ * 거기 머지 배우의 admin PAT를 두면 게이트 `[commands]`(PR head의 코드)가 `git config --get http.….extraheader` 한 줄로 분기 보호를
+ * 우회한다. 그래서 체크아웃은 에이전트 배우(App 설치 토큰, 60분 만료)로 두고, 거부권 창(60분, 잡 안 대기) **뒤**에도 살아 있어야 하는
+ * 엔진의 fetch·push(records·락)만 이 env로 `GH_TOKEN`(두 배우 모드 = 만료 없는 머지 PAT)을 쓴다. git의 `GIT_CONFIG_COUNT/KEY_n/VALUE_n`은
+ * 그 프로세스 하나에만 적용되는 설정이다(git ≥ 2.31). 첫 항목의 빈 값이 `.git/config`의 헤더 목록을 **비우고**(git: "An empty value will
+ * reset the extra headers to the empty list") 둘째가 우리 것을 올린다 — 비우지 않으면 두 `AUTHORIZATION` 헤더가 나가고 GitHub은 400을
+ * 돌려준다(2026-10-11 실측). 키는 체크아웃이 쓰는 모양 그대로 `http.<server>/.extraheader`다.
+ *
+ * 토큰이 없으면 null — 호출자는 아무것도 얹지 않는다(로컬 실행은 사람의 자격으로 돈다).
+ */
+export function gitAuthEnv({ token, serverUrl = "https://github.com" } = {}) {
+  const t = String(token ?? "").trim();
+  if (!t) return null;
+  const key = `http.${String(serverUrl || "https://github.com").replace(/\/+$/, "")}/.extraheader`;
+  return {
+    GIT_CONFIG_COUNT: "2",
+    GIT_CONFIG_KEY_0: key, GIT_CONFIG_VALUE_0: "",
+    GIT_CONFIG_KEY_1: key, GIT_CONFIG_VALUE_1: `AUTHORIZATION: basic ${Buffer.from(`x-access-token:${t}`, "utf8").toString("base64")}`,
+  };
+}
 
 /**
  * `scrubEnv(source, extra) → env 사본` — 자격증명 키만 뺀 **완전한** 환경이다(`PATH`·`HOME`·`CI`·
