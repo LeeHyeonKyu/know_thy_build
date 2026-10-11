@@ -1,4 +1,6 @@
+// Scope change (#230): dw1·dw4 require the triage-entry and local-entry refusals to carry the same text this door produces — the sentence now has one producer (`admissionRefusedReason` in admission.js) instead of a copy.
 import { canTransition, factoryLabelOf, HUMAN_RETRY_FROM, HUMAN_RETRY_TARGETS } from "./labels.js";
+import { admissionRefusedReason } from "./admission.js";
 import { requirementFor } from "./requirements.js";
 import { blockedCause, blockedOriginMarker, engineVersionMarker, lastHumanDecision, RELEASE_PRINCIPAL, resumePoint, retryOnReleaseMarker, transitionFailedMarker, transitionRefusedComment, transitionRefusedMarker } from "./retro/issue-comments.js";
 
@@ -120,7 +122,7 @@ export async function transition({ gh, issue, to, ctxExtra = {}, human = false, 
      */
     if (typeof admission !== "function") return { ok: false, from: null, to, reason: ADMISSION_UNWIRED };
     const a = await admission({ issue });
-    if (a?.ok !== true) return { ok: false, from: null, to, reason: `queue admission refused — ${(Array.isArray(a?.reasons) && a.reasons.length ? a.reasons : [a?.reason || "unknown"]).join("; ")}` };
+    if (a?.ok !== true) return { ok: false, from: null, to, reason: admissionRefusedReason(a) };
   }
   // 리뷰 aab3db8 — 세 번째 자물쇠. 훅(셸 경계)과 `bin/transition.js`(CLI 래퍼)를 둘 다 지나치는 길이
   // 하나 남아 있었다: `node -e "import('…/lib/transition.js').then(m => m.transition({human:true,…}))"`.

@@ -233,6 +233,77 @@ test("test_136_harness_flaky_alternation_is_bounded", async () => {
   for (const n of [50, 60, 70, 80]) expect((await admit({ issue: n })).ok, `#${n}`).toBe(false);
 });
 
+// ── #230 — refusals carry structured codes, and the triage entry maps them without reading reason text ──────────────
+import { entryRecheck, admissionRefusedReason } from "../lib/admission.js";
+
+test("test_230_admission_codes_classify_per_issue_vs_capacity_refusals", async () => {
+  const noJob = { ...person, body: "## Impact paths\n- `auth/login.ts`" };                     // no done_when + NEVER_AUTOMATE
+  const r = queueAdmission({ issue: noJob, charter: charter(), ...base, queued: [{ number: 1 }, { number: 2 }, { number: 3 }] });
+  expect(r.codes).toEqual(["no-done-when", "never-automate", "queue-max"]);
+  expect(r.codes).toHaveLength(r.reasons.length);
+  // the entry re-check keeps the per-issue facts only, in transition()'s wording; NEVER_AUTOMATE wins the target
+  expect(entryRecheck(r)).toEqual({ verdict: "refuse", to: "factory:wont-do", reason: admissionRefusedReason({ reasons: r.reasons.slice(0, 2) }) });
+  expect(admissionRefusedReason({ reasons: r.reasons.slice(0, 2) })).toBe(`queue admission refused — ${r.reasons[0]}; ${r.reasons[1]}`);
+  const missing = queueAdmission({ issue: { ...person, body: "please" }, charter: charter(), ...base });
+  expect(entryRecheck(missing)).toEqual({ verdict: "refuse", to: "factory:needs-info", reason: `queue admission refused — ${missing.reasons[0]}` });
+  // capacity alone is not re-judged at the entry
+  const full = queueAdmission({ issue: person, charter: charter(), ...base, queued: [{ number: 1 }, { number: 2 }, { number: 3 }] });
+  expect(full.codes).toEqual(["queue-max"]);
+  expect(entryRecheck(full)).toEqual({ verdict: "pass" });
+  expect(entryRecheck({ ok: true, reasons: [] })).toEqual({ verdict: "pass" });
+  // an unreadable read — or a refusal that does not say why in codes — is never a verdict
+  const broken = await makeQueueAdmission({ gh: { issue: async () => { throw new Error("boom"); } }, charter: charter() })({ issue: 10 });
+  expect(broken.codes).toEqual(["unreadable"]);
+  expect(entryRecheck(broken)).toMatchObject({ verdict: "unreadable", reason: expect.stringContaining("boom") });
+  expect(entryRecheck({ ok: false, reasons: ["something"] })).toMatchObject({ verdict: "unreadable" });
+  expect(entryRecheck(null)).toMatchObject({ verdict: "unreadable" });
+});
+
+// ── #247 — the triage re-entry re-judges queue_max only when its caller asks (a fresh entry), never by default ─────────
+test("test_247_entry_recheck_rejudges_queue_max_only_when_asked", () => {
+  // person is #10; queue_max is 3. The judged issue sitting in the queue list does not count against itself…
+  const inQueue = (others) => queueAdmission({ issue: person, charter: charter(), ...base, queued: [{ number: 10 }, ...others.map((number) => ({ number }))] });
+  expect(inQueue([1, 2])).toMatchObject({ ok: true });                                      // 3 of 3, itself included: admitted
+  const over = inQueue([1, 2, 3]);                                                          // 4 of 3, itself included: refused
+  expect(over.codes).toEqual(["queue-max"]);
+  expect(over.reasons).toEqual(["queue 3 ≥ 3 (back_pressure.queue_max)"]);
+  // …so a fresh triage entry that asks for it refuses only the N+1th, to needs-human (a legal factory:queue exit), with the cap's sentence
+  expect(entryRecheck(over, { queueMax: true })).toEqual({ verdict: "refuse", to: "factory:needs-human", reason: "queue admission refused — queue 3 ≥ 3 (back_pressure.queue_max)" });
+  expect(entryRecheck(inQueue([1, 2]), { queueMax: true })).toEqual({ verdict: "pass" });
+  // the default (and the blocked-retry hop, which restores a label already earned) still does not re-judge capacity
+  expect(entryRecheck(over)).toEqual({ verdict: "pass" });
+  expect(entryRecheck(over, { queueMax: false })).toEqual({ verdict: "pass" });
+  // the other caps are never re-judged at the entry, asked or not
+  expect(entryRecheck({ ok: false, reasons: ["self-generated open 2 ≥ 2 (self_generated.open_max)"], codes: ["self-open-max"] }, { queueMax: true })).toEqual({ verdict: "pass" });
+  // an issue's own fact still wins the target when the cap is hit too
+  const both = queueAdmission({ issue: { ...person, body: "please" }, charter: charter(), ...base, queued: [{ number: 10 }, { number: 1 }, { number: 2 }, { number: 3 }] });
+  expect(both.codes).toEqual(["no-done-when", "queue-max"]);
+  expect(entryRecheck(both, { queueMax: true })).toEqual({ verdict: "refuse", to: "factory:needs-info", reason: `queue admission refused — ${both.reasons[0]}` });
+  // a backlog issue (not in the list) is judged as before: three others fill a queue_max of 3
+  expect(queueAdmission({ issue: person, charter: charter(), ...base, queued: [1, 2, 3].map((number) => ({ number })) }).ok).toBe(false);
+});
+
+// ── #247 (skeptic) — which member of an over-full queue is the over-cap one. A queue can hold N+1 legitimately (the blocked-retry
+// hop restores a seat without re-judging the cap); a fresh triage entry of each member must not count every sibling, or each
+// of them is refused in turn and the whole queue drains to needs-human. Members are ranked by issue number; only those ranked
+// after the first N are over the cap. A backlog issue (not in the list) still counts every member.
+test("test_247_queue_max_refuses_only_members_ranked_after_the_first_n", () => {
+  const judge = (n, queued) => queueAdmission({ issue: { ...person, number: n }, charter: charter(), ...base, queued: queued.map((number) => ({ number })) });
+  // queue_max 3, four members: #10 is the one ranked after the first three — and the list order the search returns is irrelevant
+  for (const order of [[10, 1, 2, 3], [3, 10, 2, 1], [1, 2, 3, 10]]) {
+    for (const n of [1, 2, 3]) expect(judge(n, order), `#${n} in ${order}`).toMatchObject({ ok: true });
+    expect(judge(10, order).reasons, `#10 in ${order}`).toEqual(["queue 3 ≥ 3 (back_pressure.queue_max)"]);
+  }
+  // five members over a cap of three: exactly the two ranked last are over it, never more
+  const five = [7, 4, 30, 12, 5];
+  expect(five.filter((n) => !judge(n, five).ok).sort((a, b) => a - b)).toEqual([12, 30]);
+  // at or under the cap nobody is over it
+  expect([1, 2, 3].filter((n) => !judge(n, [1, 2, 3]).ok)).toEqual([]);
+  // a backlog issue — even one with a lower number than every member — is judged by the whole queue, as the door always did
+  expect(judge(0, [1, 2, 3]).reasons).toEqual(["queue 3 ≥ 3 (back_pressure.queue_max)"]);
+  expect(judge(0, [1, 2]).ok).toBe(true);
+});
+
 // ── #231 — admission의 두 파서 결함(허점 원장 E-5·E-6, P-3·P-5) ──────────────────────────────────────────────
 // (1) Impact paths 파서는 백틱 안 토큰만 읽었다 — `:issue` 템플릿은 백틱이 없어서 템플릿대로 쓴 이슈는 NEVER_AUTOMATE
 //     조기 차단에 아무 경로도 보이지 않았다. (2) 본문에 `Detected while implementing #N.` 한 줄을 붙여 넣으면 done_when 요구가
@@ -625,4 +696,31 @@ test("test_260_app_mode_self_generated_cap_applies_through_real_login_resolver",
   expect(capped).toEqual({ ok: false, reasons: ["self-generated open 2 ≥ 2 (self_generated.open_max)"], self_generated: true });
   // 같은 상한 아래에서도 사람의 이슈는 막히지 않는다(작성자 갈래가 사람을 봇으로 세지 않는다)
   expect(await appModeAdmission260(issues, { lists })({ issue: 91 })).toEqual({ ok: true, reasons: [], self_generated: false });
+});
+
+// ── #249 (main merge) — #231's "factory logins could not be resolved" refusal is a failed read, not a fact about the issue ─────
+// Since #230 the triage entry re-check maps refusal codes to an end state: `no-done-when` demotes a queued issue to needs-info.
+// A marker-only issue the factory opened is refused at the door only because the login lookup failed this time — a transient
+// read. Coded as `no-done-when`, every queued factory issue would be pushed to needs-info by one failed `gh api` call. It is
+// `unreadable`: the doors still refuse it (fail closed, same sentence), and the entry re-check keeps it retryable instead.
+test("test_249_unresolved_factory_logins_refusal_is_unreadable_at_the_entry_recheck", () => {
+  const markerOnly = { number: 61, body: "Detected while implementing #7. evidence: {}", labels: ["backlog"], author: "bot-hk" };
+  const unresolved = queueAdmission({ issue: markerOnly, charter: charter(), ...base, factoryLogins: [], factoryLoginsResolved: false });
+  expect(unresolved.ok).toBe(false);
+  expect(unresolved.reasons).toHaveLength(1);
+  expect(unresolved.reasons[0]).toMatch(/factory logins could not be resolved/);
+  expect(unresolved.codes).toEqual(["unreadable"]);
+  expect(entryRecheck(unresolved, { queueMax: true })).toMatchObject({ verdict: "unreadable", reason: expect.stringContaining("factory logins could not be resolved") });
+  // the same issue with the logins resolved is admitted — and the other #231 marker refusals stay facts about the issue
+  expect(queueAdmission({ issue: markerOnly, charter: charter(), ...base, factoryLoginsResolved: true }).ok).toBe(true);
+  const stranger = queueAdmission({ issue: { ...markerOnly, author: "mallory" }, charter: charter(), ...base, factoryLoginsResolved: true });
+  expect(stranger.codes).toEqual(["no-done-when"]);
+  expect(entryRecheck(stranger)).toMatchObject({ verdict: "refuse", to: "factory:needs-info" });
+  // `codes` is a non-enumerable property (the #231/#260 refusal shapes stay as pinned): a spread or a JSON trip drops it, and
+  // the entry re-check then treats the refusal as unreadable — it never demotes on a refusal whose codes it cannot see
+  expect(Object.keys(stranger)).toEqual(["ok", "reasons", "self_generated"]);
+  expect(entryRecheck({ ...stranger })).toMatchObject({ verdict: "unreadable" });
+  expect(entryRecheck(JSON.parse(JSON.stringify(stranger)))).toMatchObject({ verdict: "unreadable" });
+  const anonymous = queueAdmission({ issue: { ...markerOnly, author: null }, charter: charter(), ...base, factoryLoginsResolved: true });
+  expect(anonymous.codes).toEqual(["no-done-when"]);
 });
