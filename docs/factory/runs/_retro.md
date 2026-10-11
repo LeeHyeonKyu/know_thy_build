@@ -1,6 +1,6 @@
 # Retro State
 
-- last retro: 2026-10-11T16:22:45.790Z
+- last retro: 2026-10-11T21:30:10.231Z
 - merges since last retro: 0
 - current N: 1
 
@@ -8,31 +8,37 @@
 
 | at | yield | n_before | n_after | needs_human_since |
 | --- | --- | --- | --- | --- |
-| 2026-10-03T10:55:51.477Z | 1 | 1 | 1 | 16 |
 | 2026-10-03T14:31:31.999Z | 1 | 1 | 1 | 10 |
 | 2026-10-04T02:59:59.565Z | 0 | 1 | 1 | 5 |
 | 2026-10-10T15:06:00.744Z | 0 | 1 | 1 | 4 |
 | 2026-10-11T16:22:45.790Z | 1 | 1 | 1 | 24 |
+| 2026-10-11T21:30:10.231Z | 1 | 1 | 1 | 2 |
 
 ## Stats
 
 | metric | this window | cumulative |
 | --- | --- | --- |
-| merged | 0 | 20 |
-| review rounds avg | 0 | 1.75 |
-| rounds/issue (plan/impl/review) | 0 / 0 / 0 | 0.9 / 2 / 1.75 |
-| escaped defects | 0 | 25 |
-| revert rate | 없음 | 0.00 (0/20) |
-| needs-human | 2 | 84 |
-| rejects by role | 없음 | spec-conformance 10, qa 4, correctness 13, architecture 7, security 4 |
-| reviewer overlap | 없음 | 0.50 (21/42, runs 46) |
-| unique findings by role | 없음 | spec-conformance 4, qa 4, correctness 6, architecture 4, security 3 |
-| qa na ratio | 0.33 (4/12 claims, na-heavy 1/2 approvals) | 0.24 (57/242 claims, na-heavy 8/34 approvals) |
-| cost (usd) | 38.57 | 1271.17 |
-| tokens | input 416423 / output 42108 | input 31252229 / output 2568342 |
-| retro cost (usd) | 0.00 | 11.56 |
-| retro tokens | input 0 / output 0 | input 34 / output 29746 |
-| full retros | — | 10 |
+| merged | 1 | 21 |
+| review rounds avg | 1 | 1.71 |
+| rounds/issue (plan/impl/review) | 4 / 4 / 1 | 1.05 / 2.1 / 1.71 |
+| escaped defects | 1 (#249×1) | 26 |
+| revert rate | 0.00 (0/1) | 0.00 (0/21) |
+| needs-human | 2 | 86 |
+| rejects by role | security 1 | spec-conformance 10, qa 4, correctness 13, architecture 7, security 5 |
+| reviewer overlap | 0.00 (0/1, runs 4) | 0.49 (21/43, runs 50) |
+| unique findings by role | security 1 | spec-conformance 4, qa 4, correctness 6, architecture 4, security 4 |
+| qa na ratio | 0.15 (4/26 claims, na-heavy 1/4 approvals) | 0.23 (61/268 claims, na-heavy 9/38 approvals) |
+| cost (usd) | 74.98 | 1346.15 |
+| tokens | input 1453250 / output 125811 | input 32705479 / output 2694153 |
+| retro cost (usd) | 1.34 | 12.90 |
+| retro tokens | input 4 / output 3835 | input 38 / output 33581 |
+| full retros | — | 11 |
+
+### Rounds per issue (this window)
+
+| issue | plan | implement | review | escaped |
+| --- | --- | --- | --- | --- |
+| #249 | 4 | 4 | 1 | 1 |
 
 ### Phase-2 gate baseline (this session)
 
@@ -46,7 +52,7 @@
 ```json
 {
   "cursor": {
-    "last_retro_at": "2026-10-11T16:22:45.790Z",
+    "last_retro_at": "2026-10-11T21:30:10.231Z",
     "last_record_offsets": {}
   },
   "merges_since": 0,
@@ -584,6 +590,78 @@
           "reason": "gh pr merge failed (1): X Pull request LeeHyeonKyu/know_thy_build#224 is not mergeable: the base branch policy prohibits the merge.\nTo have the pull request merged after all the requirements have been met, add the `--auto` flag.\nTo use administrator privileges to immediately merge the pull request, add the `--admin` flag.",
           "files": [
             ".factory/lessons/factory-builder.md"
+          ]
+        },
+        {
+          "step": "publish-proposal",
+          "pr": 276,
+          "reason": null,
+          "proposals": [
+            "gate"
+          ]
+        }
+      ],
+      "n_before": 1,
+      "n_after": 1
+    },
+    {
+      "at": "2026-10-11T21:30:10.231Z",
+      "yield": 1,
+      "needs_human_since": 2,
+      "applied": [
+        {
+          "step": "feedback-route",
+          "issues": [
+            249
+          ],
+          "actions": [
+            {
+              "kind": "warning",
+              "step": "feedback-route",
+              "login": "LeeHyeonKyu",
+              "current": "ktb-factory[bot]",
+              "reason": "current factory identity: ktb-factory[bot] (machine user/app, FACTORY_BOT_LOGIN); older runs in this window ran under a shared identity (LeeHyeonKyu) — their human decisions are unverifiable, nothing to register"
+            }
+          ]
+        },
+        {
+          "step": "lessons:reviewer-security",
+          "added": [
+            "L-2026-10-11-01"
+          ],
+          "rejected": [],
+          "evicted": [],
+          "cited": []
+        },
+        {
+          "step": "lessons:factory-builder",
+          "added": [
+            "L-2026-10-11-01"
+          ],
+          "rejected": [],
+          "evicted": [],
+          "cited": []
+        },
+        {
+          "step": "role:reviewer-correctness",
+          "added": [
+            {
+              "section": "### 좋은 발견",
+              "text": "위치: 이 diff가 새 입력을 추가한 함수의 프로덕션 호출부. #233에서는 `resolveTier`에 `raised`가 생겼는데 `buildContext`(context.js:259)만 넘기고 merge-stage의 `reviewRoster` dep은 `resolveTier({ run, cwd, base, harness, tier })` 그대로였다. #168에서는 새 'dispatched run never started' 에스컬레이션이 `transition()`을 `engineVersion` 없이 불렀고, 바로 아래의 기본 에…"
+            }
+          ],
+          "skipped": [],
+          "deferred": []
+        },
+        {
+          "step": "publish-lessons",
+          "pr": 224,
+          "merged": false,
+          "reason": "gh pr merge failed (1): X Pull request LeeHyeonKyu/know_thy_build#224 is not mergeable: the base branch policy prohibits the merge.\nTo have the pull request merged after all the requirements have been met, add the `--auto` flag.\nTo use administrator privileges to immediately merge the pull request, add the `--admin` flag.",
+          "files": [
+            ".factory/lessons/reviewer-security.md",
+            ".factory/lessons/factory-builder.md",
+            ".claude/agents/reviewer-correctness.md"
           ]
         },
         {
@@ -1560,6 +1638,46 @@
           206
         ],
         "source": "must_fix"
+      },
+      {
+        "role": "correctness",
+        "text": "For any approved PR whose branch also changed a non-conflicted mirror-family path, a round that only resolves the conflict comes out RED, so the cost and K exemption never applies. That covers every factory/** PR in this repo that touches more files than the conflicted one, which is the #196 incident shape. The check compares the merge commit M against git's auto-merge. But the implement overlay runs after the runner's base merge and before the builder's session, and it does `git checkout <stage sha = base> -- .factory .claude …`. That rewrites both the index and the worktree of the in-progress merge. M therefore carries base's copy of every branch-own .factory/** mirror path. The runner's mirror commit only puts them back after M. Those paths are neither conflicted nor in runnerMirror, so conflictScopeInput names them `outside the merge` even though approved..HEAD never touches them. This falsifies dw2 ('a merge commit that only resolves C's conflict, followed by a runner mirror commit, is GREEN') and ADR-040 item 2 in the realistic case.",
+        "runs": [
+          212
+        ],
+        "source": "must_fix"
+      },
+      {
+        "role": "correctness",
+        "text": "dw6 says a conflict round whose following review 'ends anywhere other than factory:approved' counts its cost as today. If the review approves but the transition to factory:approved is refused, transition.js moves the issue to factory:needs-human. In that case the review section records `transition refused: <reason>` (refusal(t)) and no `transition: factory:…` line. review_rejected therefore stays unset, and the conflict round's cost stays excluded even though the review ended in needs-human. The K side is not revoked either, because no next rework exists.",
+        "runs": [
+          212
+        ],
+        "source": "must_fix"
+      },
+      {
+        "role": "qa",
+        "text": "Round 1 approved on fixtures only. I have now run cf1's repro against real git. A conflict round on a PR that also changed a non-conflicted mirror path (.factory/lib/b.js) reports that path as outside the merge, so conflict-scope is not GREEN. The conflict-round exemption (dw2, dw5) then does not apply in the realistic #196 shape.",
+        "runs": [
+          212
+        ],
+        "source": "must_fix"
+      },
+      {
+        "role": "correctness",
+        "text": "The cost side cancels a conflict round's exemption only when it finds a rejecting review section before the next `implement` section, and it treats any `implement` section as the start of the next round. The runner itself writes implement sections that are not rounds. One of these landing between the tagged section and the review hides the rejection, so the cost stays excluded from the cap. The K side reads issue comments and does cancel, so cost and K disagree. This breaks dw6 ('where the following review rejects … counts cost and K as today') and ADR-040 4 ('both or neither').",
+        "runs": [
+          212
+        ],
+        "source": "must_fix"
+      },
+      {
+        "role": "spec-conformance",
+        "text": "dw6 says a rejecting review means cost and K are counted as today, and ADR-040 says both sides or neither. The cost side stops at any implement-stage section, including runner-written non-round sections such as duplicate-run, a 'nothing to do' entry-state record, or a lock-release record. A rejection after such a section is hidden, so the cost stays excluded while K cancels the exemption. This is the contract break correctness reported as cf1.",
+        "runs": [
+          212
+        ],
+        "source": "must_fix"
       }
     ],
     "examples": [
@@ -1877,6 +1995,24 @@
           249
         ],
         "source": "dissent"
+      },
+      {
+        "role": "skeptic",
+        "kind": "good",
+        "text": "Do not build anything new. This is the fourth plan for one diff... So the honest plan is a refresh, not a build. (1) Merge the one new base commit, 1020cc7, into claude/fq-249. (2) Resolve conflicts with main's code winning. (3) Make no semantic change to the PR #250 diff. (4) Re-run the same test ids. (5) Let the fixed merge stage take it. The issue body's 'open a new PR' should give way to PR #250, because a new PR restarts evidence and status binding for no gain. [proposed dw5: commits added after bef13bf are only the merge of origin/main plus the runner mirror regeneration; builder edits confined to run-stage.js and run-stage.test.js.] (Raised in R1. R2 was empty, so no role answered it.)",
+        "runs": [
+          249
+        ],
+        "source": "dissent"
+      },
+      {
+        "role": "product-advocate",
+        "kind": "good",
+        "text": "The real user-facing failure is that this cycle never reaches users... The plan should say outright that the merge path is the operator door (CHARTER operator_merge_judge plus a stand-in review, per .claude/CLAUDE.md). It is a delivery precondition, not a design choice. (Operator: 'The operator door with a stand-in review is the way out.')",
+        "runs": [
+          249
+        ],
+        "source": "dissent"
       }
     ],
     "flaky": [],
@@ -2124,42 +2260,65 @@
     ]
   },
   "stats": {
-    "merged": 0,
-    "review_rounds_avg": 0,
-    "plan_rounds_avg": 0,
-    "implement_rounds_avg": 0,
-    "rounds_per_issue": [],
-    "escaped_defects": 0,
-    "escaped_defects_detail": [],
+    "merged": 1,
+    "review_rounds_avg": 1,
+    "plan_rounds_avg": 4,
+    "implement_rounds_avg": 4,
+    "rounds_per_issue": [
+      {
+        "issue": 249,
+        "plan": 4,
+        "implement": 4,
+        "review": 1
+      }
+    ],
+    "escaped_defects": 1,
+    "escaped_defects_detail": [
+      {
+        "issue": 249,
+        "count": 1
+      }
+    ],
     "reverts": 0,
     "reverted_issues": [],
-    "revert_rate": null,
-    "rejects_by_role": {},
-    "review_runs": 0,
-    "findings_total": 0,
+    "revert_rate": 0,
+    "rejects_by_role": {
+      "security": 1
+    },
+    "review_runs": 4,
+    "findings_total": 1,
     "overlapping_findings": 0,
-    "unique_findings_by_role": {},
+    "unique_findings_by_role": {
+      "security": 1
+    },
     "overlap_ratio": 0,
     "needs_human": 2,
-    "qa_approvals": 2,
-    "qa_claims_total": 8,
+    "qa_approvals": 4,
+    "qa_claims_total": 22,
     "qa_na_total": 4,
-    "qa_na_ratio": 0.33,
+    "qa_na_ratio": 0.15,
     "qa_na_heavy_approvals": 1,
     "usage": {
-      "cost_usd": 38.574308,
+      "cost_usd": 74.980331,
       "tokens": {
-        "input": 416423,
-        "output": 42108
+        "input": 1453250,
+        "output": 125811
+      }
+    },
+    "retro_usage": {
+      "cost_usd": 1.337362,
+      "tokens": {
+        "input": 4,
+        "output": 3835
       }
     }
   },
   "stats_total": {
-    "merged": 20,
-    "review_rounds_avg": 1.75,
-    "plan_rounds_avg": 0.9,
-    "implement_rounds_avg": 2,
-    "escaped_defects": 25,
+    "merged": 21,
+    "review_rounds_avg": 1.71,
+    "plan_rounds_avg": 1.05,
+    "implement_rounds_avg": 2.1,
+    "escaped_defects": 26,
     "reverts": 0,
     "reverted_issues": [],
     "revert_rate": 0,
@@ -2168,40 +2327,40 @@
       "qa": 4,
       "correctness": 13,
       "architecture": 7,
-      "security": 4
+      "security": 5
     },
-    "review_runs": 46,
-    "findings_total": 42,
+    "review_runs": 50,
+    "findings_total": 43,
     "overlapping_findings": 21,
     "unique_findings_by_role": {
       "spec-conformance": 4,
       "qa": 4,
       "correctness": 6,
       "architecture": 4,
-      "security": 3
+      "security": 4
     },
-    "overlap_ratio": 0.5,
-    "needs_human": 84,
-    "qa_approvals": 34,
-    "qa_claims_total": 185,
-    "qa_na_total": 57,
-    "qa_na_ratio": 0.24,
-    "qa_na_heavy_approvals": 8,
+    "overlap_ratio": 0.49,
+    "needs_human": 86,
+    "qa_approvals": 38,
+    "qa_claims_total": 207,
+    "qa_na_total": 61,
+    "qa_na_ratio": 0.23,
+    "qa_na_heavy_approvals": 9,
     "usage": {
-      "cost_usd": 1271.167794,
+      "cost_usd": 1346.148125,
       "tokens": {
-        "input": 31252229,
-        "output": 2568342
+        "input": 32705479,
+        "output": 2694153
       }
     },
     "retro_usage": {
-      "cost_usd": 11.561299,
+      "cost_usd": 12.898661,
       "tokens": {
-        "input": 34,
-        "output": 29746
+        "input": 38,
+        "output": 33581
       }
     },
-    "retros": 10
+    "retros": 11
   },
   "deferred_proposals": [],
   "deletion_candidates": []
