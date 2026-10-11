@@ -4529,8 +4529,11 @@ doctor-ci의 토큰 검사는 `continue-on-error`라 잡을 죽이지 않지만 
    `claude -p`로 띄운다"**이다. 토론 스테이지(plan·implement·review)는 그 값에서도 `/factory-<stage>` 워크플로를 그대로 탄다.
    실효값은 스테이지마다 `lib/config.js`의 `orchestrationFor`가 한 번 정하고, `lib/context.js`가 그것을 `context.json`·`loaded.json`에
    싣는다 — run-stage와 `bin/verify-stage.js`가 같은 값을 읽는다(`test_237_agent_mode_leaves_debate_stages_passing`).
-2. 직접 세션의 모양: 시스템 프롬프트 = 역할 md의 본문, 역할 md 경로와 모델 = roles.toml의 `[triage]`·`[retro.analyst]`(워크플로의
-   `agent()`와 같은 출처, 없으면 `.claude/agents/factory-triage.md`·`factory-retro.md`와 그 frontmatter), 쓸 수 있는 도구는 `--tools`로
+2. 직접 세션의 모양: 시스템 프롬프트 = 역할 md의 본문, 역할 md 경로와 모델 = roles.toml의 `[triage]`·`[retro.analyst]`(없으면
+   `.claude/agents/factory-triage.md`·`factory-retro.md`와 그 frontmatter). triage에서는 이것이 워크플로의 `agent()`와 같은 출처다
+   (`factory-triage.js`가 `loaded.roster`의 `[triage]`를 쓴다). **retro는 아니다**: `.claude/workflows/factory-retro.js`는
+   `agentType: 'factory-retro'`·`model: 'opus'`를 하드코딩하고 roles.toml을 읽지 않으므로, `[retro.analyst]`를 바꾸면 직접 경로만
+   따라가고 `workflow` 모드의 분석가는 그대로 factory-retro/opus다. 쓸 수 있는 도구는 `--tools`로
    역할의 `tools:` 목록에 한정(워크플로 경로에서 그 목록은 화이트리스트이고, `--allowedTools`는 승인일 뿐 제한이 아니다), 쓰기 도구
    (`Edit`·`Write`·`MultiEdit`·`NotebookEdit`·`Bash`)와 다른 세션을 띄우는 도구(`Agent`·`Task`·`Workflow`)는 `--disallowedTools`로 거부, 나머지 가드(`dontAsk`·`--settings`·
    `--max-turns`·예산·`FACTORY_STAGE`)는 디스패처 세션과 같다. `workflow`일 때의 argv·env는 예전과 바이트 단위로 같다
