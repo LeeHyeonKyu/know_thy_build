@@ -4510,3 +4510,30 @@ merge `timeout-minutes: 90`도 템플릿에 처음 반영한다(테스트 표의
 doctor-ci의 토큰 검사는 `continue-on-error`라 잡을 죽이지 않지만 **WARN으로 남는다**(후속: App 토큰이면 그 검사를 "해당 없음"으로).
 `gh pr edit`류의 GraphQL `viewer` 조회가 App 토큰에서 어떻게 되는지는 #217(REST PATCH)이 비켜 간다. own-calendar는 다음 릴리스로
 업그레이드하고 같은 두 시크릿을 넣는다. `bot-hk`가 복구되면 숨겨진 PR·코멘트가 다시 보이고, 그 계정은 PAT 폴백으로만 남는다.
+
+## ADR-039 소유자는 거부권이다 — 판정 경로 자동 머지 ON, 운영 세션이 자기 PR을 머지한다 — 2026-10-10 (소유자 결정)
+
+**소유자(원문)**: "이거 사람역할 하는 agent를 하나 띄워서 나한테 pr 검토 받지 않고 merge하도록 해. 이거 때문에 너무 블로커가 심하다."
+2026-10-04~10 일주일의 사람 머지 요청은 PR #193·#204·#192·#203·#190·#215·#216·#218·#219·#221·#222·#223·#225 — 열셋이었고, 그중
+사람의 판단이 든 것은 0건이었다(전부 "체크 GREEN이면 머지"). ADR-037 §6이 2주 두기로 한 `auto_merge_judge`의 유예는 그 2주가
+**사람 머지 대기**로 채워진다는 뜻이었다.
+
+**결정**:
+1. CHARTER `self_change.auto_merge_judge: true` — 공장이 만든 판정 경로 PR은 ADR-033의 조건(만장일치 + GREEN + 거부권 창 60분 +
+   차단기 닫힘)으로 공장이 머지한다. ADR-037 §6의 유예는 철회.
+2. CHARTER `self_change.operator_merge_judge: true`(새 키, 기본 false) — 운영 세션(소유자 계정의 Claude 세션)은 판정 경로가 든
+   **자기 PR**(`.github/**`·templates·CHARTER·엔진 핫픽스)도 운영 door(`operator-merge-check.js` → 운영 머지 명령 `--squash --admin`)로
+   머지한다. door의 나머지 자물쇠(draft·mergeable·기본 브랜치·체크 GREEN)는 그대로이고, 판정 경로 목록은 사유 줄에 소리내어 적힌다.
+3. **대역 리뷰어**: 운영 세션은 판정 경로 PR을 머지하기 전에 작성자와 다른 컨텍스트의 리뷰어 에이전트(fresh `general-purpose`,
+   읽기 전용)에게 PR diff·이슈·ADR을 cold read 시켜 `approve | reject(must_fix)`를 받는다. 기계적 검증(전체 스위트, 워크플로면
+   actionlint)은 그 앞이다. 이것은 훅이 검증하지 못하는 **절차 규칙**이다(`.claude/CLAUDE.md` "운영 머지").
+4. 소유자에게 남는 것은 거부권(revert·`factory:veto`·차단기 리셋)과 사람만 할 수 있는 일(토큰·시크릿·계정·GitHub Support)이다.
+
+**검증**: `test_adr039_operator_door_passes_judge_paths_only_when_the_charter_switch_is_on`(operator-merge.test.js) —
+스위치 꺼짐은 오늘과 같고, 켜짐은 판정 경로를 허용하되 목록을 돌려주며 다른 자물쇠는 그대로. `config.test.js`는 새 키의 기본값·
+불리언 검증을 핀한다. **되돌리기**: CHARTER의 두 값을 false로 — 코드는 그대로 두어도 ADR-032/033의 모양으로 돌아간다.
+
+**대역 리뷰 1회차(이 PR)**: fresh 리뷰어가 reject 2건을 냈다 — (1) 설치본 미러(`.factory/lib/config.js`)가 새 CHARTER 키를 모르면
+`loadCharter`가 던져 **모든 스테이지가 멈춘다** → 미러를 이 PR에서 재생성(러너와 같은 `regenerateMirror`); (2) bin의 새 경로에 테스트가
+없다 → 스위치 on/off·깨진 CHARTER·door 자기 파일을 bin 호출로 핀. 또한 **문은 자기 자신을 열지 못한다**(`DOOR_FILES`: door의 판정
+코드·양의 목록·bin·훅과 그 설치본)는 리뷰어의 blast-radius 지적에서 왔다. 이 PR 자체는 door 파일을 바꾸므로 마지막 사람 머지다.
