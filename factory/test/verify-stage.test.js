@@ -509,3 +509,17 @@ test("test_233_triage_tier_is_raised_when_impact_paths_hit_load_bearing", () => 
   expect(forged.data.tier_effective).toBeUndefined();
   expect(forged.data.tier_source).toBeUndefined();
 });
+
+test("test_233_agent_written_load_bearing_hit_is_scrubbed", () => {
+  // load_bearing_hit도 러너의 필드다 — 스크립트가 계산하지 않은 "hit"이 검증된 handoff에 남으면 안 된다(miss·이미 load-bearing 둘 다)
+  const forgedHit = [{ path: "factory/lib/context.js", glob: "factory/lib/**" }];
+  const miss = verifyStage({ stage: "triage", out: triage233({ tier: "standard", impact_paths: ["factory/lib/context.js"], load_bearing_hit: forgedHit }), agentsLog: log([]), loadBearing: LB233 });
+  expect(miss.ok).toBe(true);
+  expect(miss.data.load_bearing_hit).toBeUndefined();
+  expect(miss.data.tier_effective).toBeUndefined();
+  const lb = verifyStage({ stage: "triage", out: triage233({ tier: "load-bearing", impact_paths: ["factory/bin/run-stage.js"], load_bearing_hit: forgedHit }), agentsLog: log([]), loadBearing: LB233 });
+  expect(lb.data.load_bearing_hit).toBeUndefined();
+  // 실제 hit에서는 에이전트 값이 아니라 스크립트가 계산한 값만 남는다
+  const hit = verifyStage({ stage: "triage", out: triage233({ tier: "standard", impact_paths: ["factory/bin/run-stage.js"], load_bearing_hit: forgedHit }), agentsLog: log([]), loadBearing: LB233 });
+  expect(hit.data.load_bearing_hit).toEqual([{ path: "factory/bin/run-stage.js", glob: "factory/bin/run-stage.js" }]);
+});

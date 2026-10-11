@@ -404,12 +404,13 @@ export function verifyStage({ stage, out, transcriptText, agentsLog, roster = []
      * #233 (gap P-12 / ledger M-6) — 같은 자리, 같은 방식으로 `[load_bearing].paths`도 다시 댄다. plan 시점에는
      * diff가 없어 `tierFloor`가 docs를 내므로, 이 재확인이 없으면 plan 모드(단일/토론)는 triage의 자기 신고 tier가
      * 정했다. 걸리면 **실효 tier**만 load-bearing으로 올린다 — 신고(`tier`)는 그대로 두고(둘이 갈린 것이 기록이다),
-     * 이미 load-bearing이면 손대지 않는다(내리는 쪽은 없다). `tier_effective`/`tier_source`는 러너의 필드라
+     * 이미 load-bearing이면 손대지 않는다(내리는 쪽은 없다). `tier_effective`/`tier_source`/`load_bearing_hit`은 러너의 필드라
      * 에이전트가 적은 값은 먼저 지운다: `"impact-paths"`를 쓰는 것은 이 스크립트뿐이어야 그 출처가 뜻을 가진다.
      * 글롭 대조는 NEVER_AUTOMATE와 같은 함수(`neverAutomateHits`)다 — 규칙이 둘로 갈라지지 않게.
      */
     delete data.tier_effective;
     delete data.tier_source;
+    delete data.load_bearing_hit;
     const lbHits = neverAutomateHits(data.impact_paths, loadBearing);
     if (lbHits.length && data.tier !== "load-bearing") {
       data.tier_effective = "load-bearing";
