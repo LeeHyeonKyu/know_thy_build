@@ -124,7 +124,7 @@ export const GATES_SELF_REPORTED = "gates: self-reported by workflow (no gates.j
 export const GATES_DIFFER_FROM_IMPLEMENT = "gates: verdict differs from the implement gate on the same head — environmental";
 /**
  * 줄을 낼지 정하는 순수 함수. `implementGates`는 makeCheckoutHead가 implement handoff에서 읽어 온 `{ status, level, head_sha }`
- * (head_sha = `builder_head_sha ?? head_sha` — 미러 커밋이 head를 바꾼 라운드는 sha가 갈라져 줄이 서지 않는다), `gates`는
+ * (head_sha = handoff의 `head_sha` — 미러 커밋은 implement 게이트 앞에서 일어나므로 게이트가 잰 sha 그대로다), `gates`는
  * 이번 리뷰의 게이트 파일. 어느 한쪽이라도 비면, head·level이 다르면, status가 같으면 null이다.
  */
 export function implementGateDiffersLine(implementGates, gates, reviewedHead = null) {
@@ -2812,9 +2812,10 @@ export function makeCheckoutHead({ gh, run, root, issue }) {
     const checkout = await run("git", ["checkout", "--detach", head_sha], { cwd: root });
     if (checkout.code !== 0) return { ok: false, reason: `git checkout failed: ${checkout.stderr.trim()}` };
     // #257 — implement 게이트 판정을 함께 돌려준다(선택 필드: handoff에 gates가 없으면 키 자체가 없다 — 기존 소비자는 그대로).
-    // 그 게이트가 돈 sha는 빌더의 head다(`builder_head_sha ?? head_sha`): 미러 커밋이 head를 바꿨으면 리뷰 head와 갈라진다.
+    // 그 게이트가 돈 sha는 handoff의 `head_sha`다: implement는 미러 커밋을 게이트 **앞**에서 하므로(runStage의 mirror("commit") →
+    // gates) 미러 라운드에서도 게이트가 잰 것은 mirror_sha = head_sha, 곧 리뷰가 체크아웃하는 head다(`builder_head_sha`가 아니다).
     const g = handoff.data.gates;
-    const implement_gates = g && typeof g === "object" ? { status: g.status ?? null, level: g.level ?? null, head_sha: handoff.data.builder_head_sha ?? head_sha } : null;
+    const implement_gates = g && typeof g === "object" ? { status: g.status ?? null, level: g.level ?? null, head_sha } : null;
     return { ok: true, sha: head_sha, pr, ...(implement_gates ? { implement_gates } : {}) };
   };
 }
