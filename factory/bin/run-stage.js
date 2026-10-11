@@ -1088,10 +1088,6 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runAt
     if (stage === "triage" && v.data?.never_automate_hit?.length) {
       record([`never_automate_hit: ${v.data.never_automate_hit.map((h) => `${h.path} (${h.glob})`).join(", ")} — disposition forced to wont-do by CHARTER NEVER_AUTOMATE`]);
     }
-    // #254 — 같은 모양: 스크립트가 impact_paths로 tier를 올렸다면 그 사실이 run 기록에 한 줄로 남는다(handoff에는 tier_declared·load_bearing_hit).
-    if (stage === "triage" && v.data?.load_bearing_hit?.length) {
-      record([`tier: raised ${v.data.tier_declared} → load-bearing — impact path ${v.data.load_bearing_hit.map((h) => h.path).join(", ")} matches [load_bearing].paths`]);
-    }
     // tier 라벨은 triage가 붙인다(스펙 §3.2, KTB-9). `label-catalog.js`가 세 라벨을 만들어 두는데
     // 붙이는 코드가 어디에도 없었고, tier는 handoff JSON 안에만 있어서 사람이 이슈 목록에서 볼 수
     // 없었다. **handoff가 검증된 뒤**에만 붙인다 — 검증 전의 tier는 에이전트의 자기 신고일 뿐이다.
@@ -2314,7 +2310,7 @@ export function makeVerifyStageDep({ root, stage, getCtx, getCharter, getHarness
     const v = verifyStage({ stage, out, transcriptText: transcriptTextFor(root, out), agentsLog: readAgentsLog(join(root, ".factory/out/agents.jsonl")), roster: ctx.roster, rolePrefix: ROLE_PREFIX[stage] || "", expectedRounds: ctx.rounds, orchestration: ctx.orchestration, gates, planLimits: ctx.plan, issueBody: ctx.issue?.body, neverAutomate: getCharter()?.never_automate, loadBearing: getHarness()?.load_bearing?.paths ?? [], qaManifest: stage === "review" ? qaEvidenceSummary() : null });
     // 추출에 성공했으면 `<stage>.json`을 **산출물**로 덮는다 — 사람과 다음 도구가 여는 파일이
     // 디스패처의 산문 섞인 envelope이 아니라 스테이지가 실제로 쓴 객체이도록(envelope은 옆에 남아 있다).
-    if (v.ok && v.data) { try { mkdirSync(join(root, ".factory/out"), { recursive: true }); writeFileSync(join(root, ".factory/out", `${stage}.json`), JSON.stringify(v.data, null, 2)); } catch { /* 기록 실패가 스테이지를 죽이지 않는다 */ } }
+    if (v.ok && v.data) { try { writeFileSync(join(root, ".factory/out", `${stage}.json`), JSON.stringify(v.data, null, 2)); } catch { /* 기록 실패가 스테이지를 죽이지 않는다 */ } }
     return v;
   };
 }
