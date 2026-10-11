@@ -4511,6 +4511,64 @@ doctor-ci의 토큰 검사는 `continue-on-error`라 잡을 죽이지 않지만 
 `gh pr edit`류의 GraphQL `viewer` 조회가 App 토큰에서 어떻게 되는지는 #217(REST PATCH)이 비켜 간다. own-calendar는 다음 릴리스로
 업그레이드하고 같은 두 시크릿을 넣는다. `bot-hk`가 복구되면 숨겨진 PR·코멘트가 다시 보이고, 그 계정은 PAT 폴백으로만 남는다.
 
+### ADR-038 보정 — 머지 잡의 git 자격은 머지 배우의 것이다; 창은 토큰보다 짧아야 열린다 — 2026-10-11
+
+**실측(#249·#212, 머지 런 38160716604·38160719884).** ADR-039 뒤 처음으로 판정 경로 자동 머지가 창까지 갔다. 창은 17:42에 열려 18:42에
+닫혔고, 그 직후 리뷰 재검증의 `factory/records` fetch가 죽었다 — `fatal: could not read Username for 'https://github.com'`. 락 해제와
+run 기록 push도 같은 줄로 죽었다. 원인은 코드가 아니라 **자격증명의 수명**이다: ADR-038 뒤 체크아웃이 심는 토큰은 App 설치 토큰이고
+그것은 민팅 뒤 60분에 만료된다(GitHub 문서 "Generating an installation access token": *The installation access token will expire after
+1 hour*). ADR-033이 정한 창은 60분, **잡 안 대기**다. 그 둘은 양립하지 않았고, 만료는 401 뒤 사용자명 프롬프트로 나타나 "review evidence
+not bound to a factory run"으로 읽혔다 — 이슈는 needs-human이 됐고 PR head에는 pending `factory/veto-window` 상태가 남았다.
+
+**결정(운영 세션, ADR-021·ADR-033·ADR-038의 교차점이라 새 번호를 쓰지 않는다).**
+1. **체크아웃 자격은 바꾸지 않는다 — 엔진 자신의 git만 `GH_TOKEN`으로 인증한다.** 첫 안은 머지 잡의 체크아웃을 `FACTORY_MERGE_TOKEN`으로
+   하는 것이었고 대역 리뷰가 기각했다: 머지 잡은 거부권 창 **전에** PR head의 게이트 `[commands]`를 실행하며(`merge-stage.js` → `gates.js`
+   `scrubbedRunner`), `exec.js`의 env 스크럽은 `.git/config`에 심긴 체크아웃 헤더에 닿지 않는다 — admin PAT를 거기 두면 게이트 한 줄
+   (`git config --get http.….extraheader`, 또는 그냥 `git push origin HEAD:main`)로 분기 보호를 우회한다. 그래서 체크아웃은 App 설치
+   토큰 그대로 두고, run-stage `main`이 merge 스테이지에서만 `gitAuthEnv(GH_TOKEN)`을 **엔진 프로세스 env**에 얹는다: git의
+   `GIT_CONFIG_COUNT/KEY_n/VALUE_n`(프로세스 한정, `.git/config`에 쓰지 않음)로 체크아웃 헤더 목록을 **비우고**(빈 값 항목) 우리 헤더를
+   올린다. 비우지 않으면 두 `AUTHORIZATION` 헤더가 나가 GitHub이 400을 돌려준다(2026-10-11 스파이크: 가짜 헤더를 심은 bare 클론에서
+   리셋 + 실토큰은 fetch 성공, 리셋 없이는 400, 가짜 헤더만으로는 정확히 그 "could not read Username"). 그 다섯 키는 `MERGE_CAPABLE_ENV`에
+   들어가 게이트 자식에게는 가지 않는다. 두 배우 모드(이 저장소·own-calendar)에서 `GH_TOKEN`은 만료 없는 머지 PAT — 그 값을 이미 들고
+   있는 프로세스가 같은 값을 git에도 쓰는 것이므로 노출면은 그대로다.
+2. **단일 배우 App 모드는 fail-closed.** 거기서는 `GH_TOKEN`도 설치 토큰이라 같은 만료를 겪는다. 워크플로가 `FACTORY_GIT_TOKEN_TTL_MINUTES`
+   (머지 PAT면 `0`, App만이면 `60`)를 싣고, merge-stage의 창 열기는 잡 예산 검사와 같은 모양으로 "잡 시작 + 수명 − 지금 ≥ 창 + 10분
+   여유"를 묻는다. 모자라면 창을 열지 않고 blocked로 이유를 말한다(머지 PAT를 넣거나 `veto_minutes`를 낮추라고). 한 시간 뒤에 알 수 없는
+   이유로 죽는 것보다 지금 이유를 말하는 쪽이 낫다.
+3. **창을 잡 밖으로 내는 재진입 설계(ADR-037 토론 (1)의 stalled 팔 안)는 채택하지 않는다** — ADR-033의 소유자 결정("잡 안 대기")을
+   유지하고, 설치 토큰을 엔진이 재민팅하는 안(개인 키를 스텝 env로 — 노출면 확대)도, 머신 유저 PAT로 체크아웃하는 안(그 계정은 2026-10-06부터
+   shadow-flag 상태라 신뢰할 수 없다)도 택하지 않는다. 템플릿 사본도 같이 바꾼다.
+
+**남는 것**: #249·#212는 재큐로 다시 돈다(그 head에 남은 pending `factory/veto-window`는 새 런이 새 상태를 올리며 덮는다). 운영 door는
+pending 상태가 있는 PR을 머지하지 않으므로(`operator-merge-check`), 죽은 런이 남긴 창은 door로도 못 연다 — 그것이 맞다.
+
+## ADR-039 소유자는 거부권이다 — 판정 경로 자동 머지 ON, 운영 세션이 자기 PR을 머지한다 — 2026-10-10 (소유자 결정)
+
+**소유자(원문)**: "이거 사람역할 하는 agent를 하나 띄워서 나한테 pr 검토 받지 않고 merge하도록 해. 이거 때문에 너무 블로커가 심하다."
+2026-10-04~10 일주일의 사람 머지 요청은 PR #193·#204·#192·#203·#190·#215·#216·#218·#219·#221·#222·#223·#225 — 열셋이었고, 그중
+사람의 판단이 든 것은 0건이었다(전부 "체크 GREEN이면 머지"). ADR-037 §6이 2주 두기로 한 `auto_merge_judge`의 유예는 그 2주가
+**사람 머지 대기**로 채워진다는 뜻이었다.
+
+**결정**:
+1. CHARTER `self_change.auto_merge_judge: true` — 공장이 만든 판정 경로 PR은 ADR-033의 조건(만장일치 + GREEN + 거부권 창 60분 +
+   차단기 닫힘)으로 공장이 머지한다. ADR-037 §6의 유예는 철회.
+2. CHARTER `self_change.operator_merge_judge: true`(새 키, 기본 false) — 운영 세션(소유자 계정의 Claude 세션)은 판정 경로가 든
+   **자기 PR**(`.github/**`·templates·CHARTER·엔진 핫픽스)도 운영 door(`operator-merge-check.js` → 운영 머지 명령 `--squash --admin`)로
+   머지한다. door의 나머지 자물쇠(draft·mergeable·기본 브랜치·체크 GREEN)는 그대로이고, 판정 경로 목록은 사유 줄에 소리내어 적힌다.
+3. **대역 리뷰어**: 운영 세션은 판정 경로 PR을 머지하기 전에 작성자와 다른 컨텍스트의 리뷰어 에이전트(fresh `general-purpose`,
+   읽기 전용)에게 PR diff·이슈·ADR을 cold read 시켜 `approve | reject(must_fix)`를 받는다. 기계적 검증(전체 스위트, 워크플로면
+   actionlint)은 그 앞이다. 이것은 훅이 검증하지 못하는 **절차 규칙**이다(`.claude/CLAUDE.md` "운영 머지").
+4. 소유자에게 남는 것은 거부권(revert·`factory:veto`·차단기 리셋)과 사람만 할 수 있는 일(토큰·시크릿·계정·GitHub Support)이다.
+
+**검증**: `test_adr039_operator_door_passes_judge_paths_only_when_the_charter_switch_is_on`(operator-merge.test.js) —
+스위치 꺼짐은 오늘과 같고, 켜짐은 판정 경로를 허용하되 목록을 돌려주며 다른 자물쇠는 그대로. `config.test.js`는 새 키의 기본값·
+불리언 검증을 핀한다. **되돌리기**: CHARTER의 두 값을 false로 — 코드는 그대로 두어도 ADR-032/033의 모양으로 돌아간다.
+
+**대역 리뷰 1회차(이 PR)**: fresh 리뷰어가 reject 2건을 냈다 — (1) 설치본 미러(`.factory/lib/config.js`)가 새 CHARTER 키를 모르면
+`loadCharter`가 던져 **모든 스테이지가 멈춘다** → 미러를 이 PR에서 재생성(러너와 같은 `regenerateMirror`); (2) bin의 새 경로에 테스트가
+없다 → 스위치 on/off·깨진 CHARTER·door 자기 파일을 bin 호출로 핀. 또한 **문은 자기 자신을 열지 못한다**(`DOOR_FILES`: door의 판정
+코드·양의 목록·bin·훅과 그 설치본)는 리뷰어의 blast-radius 지적에서 왔다. 이 PR 자체는 door 파일을 바꾸므로 마지막 사람 머지다.
+
 ## ADR-040 큐로 들어오는 문은 하나다 — triage 진입 재심사, 로컬 진입 심사, retro 승격 이슈 — 2026-10-10 (#230, 재착륙 #247·#249)
 
 (#230 브랜치 `claude/fq-230`이 한 칸 앞 번호로 쓴 항목이다. 그 번호는 PR #229의 것이므로 #247이 재착륙하며 040으로 바꿨다. #249는 #247 브랜치
@@ -4610,6 +4668,8 @@ doctor-ci의 토큰 검사는 `continue-on-error`라 잡을 죽이지 않지만 
   `factory:blocked`에 남고 exit 2, 런 기록에 그 상한이 적힌다(`test_249_blocked_retry_hop_is_refused_by_queue_caps`). sweeper가 재시도
   한도 뒤에 needs-human으로 올리고, 큐가 비면 사람이 되돌린다. 마커 자체의 신뢰(위조 마커로 재시도 스테이지를 고르는 상태 되감기)는
   이 항목이 닫지 않는다 — 후속 **#251**.
+  sweeper가 그 거부된 hop을 needs-human으로 올릴 때의 사유는 `blocked (API quota/outage)`(`lib/sweeper.js`)라 원인을 잘못 말한다(리뷰 cf-s3) —
+  이 항목은 고치지 않고 후속 **#280**으로 남긴다. 큐 상한 거부의 진짜 사유는 런 기록에만 있다.
 
 **배포 뒤 사람이 보는 변화**(소급 적용):
 - 이미 `factory:queue`에 있는 이슈도 **다음 triage 진입에서 다시 심사된다.** 손으로 큐 라벨을 붙였고 본문에 done_when이 없는 이슈는
@@ -4648,62 +4708,6 @@ doctor-ci의 토큰 검사는 `continue-on-error`라 잡을 죽이지 않지만 
 #249 sec1: `test_249_blocked_retry_hop_is_refused_by_queue_caps`(작성자가 팩토리가 아닌 마커, 진짜 심사기 — `queue_max`·`depth_max`에서 hop 거부,
 blocked·exit 2·상한이 적힌 기록, 구성원 그대로), `test_249_blocked_retry_hop_with_room_still_reaches_triage`(자리가 있으면 hop이 같은 문으로 큐에 넣고
 에이전트에 닿는다), `test_249_hop_restored_entry_recheck_enforces_queue_max`(hop으로 복구된 진입도 `queue_max` 재심사에서 `transition()`과 같은 문장으로 거부).
+#249 main 병합(#278 위로): `test_249_merge_git_auth_survives_the_base_merge`(main()이 첫 git/gh 호출 전에 `mergeGitAuth({ stage, env: process.env })`를 `process.env`에 얹는 그 한 줄을 소스에서 읽어 그대로 실행한다 — merge + `GH_TOKEN`이면 `gitAuthEnv`의 extraheader 설정, 다른 스테이지면 아무것도 더하지 않는다. ADR-038 보정의 #278 단언은 고치지 않았다).
 
 **#249 main 병합(#261 위로)**: 거부 코드 `codes`는 거부 결과의 **열거되지 않는** 속성이다 — #231·#260 테스트가 `toEqual`로 핀한 거부 결과의 모양을 바꾸지 않고, 같은 프로세스의 `entryRecheck`는 그대로 읽는다(펼치거나 JSON을 지나면 코드가 사라지고 `unreadable`로 남는다 — 내보내지 않는 쪽). #231의 "factory logins could not be resolved" 거부는 `no-done-when`이 아니라 `unreadable`이다: 문은 같은 문장으로 거부하지만 triage 진입 재심사는 로그인 조회 한 번의 실패로 큐의 공장 이슈를 needs-info로 내리지 않는다. 검증: `test_249_unresolved_factory_logins_refusal_is_unreadable_at_the_entry_recheck`, `test_249_local_entry_production_wiring_passes_admission`(main()의 심사기 바인딩이 `factoryLogins: () => resolveFactoryLogins({ gh, env: process.env })` 그대로이고, App 모드에서 마커만 있는 공장 이슈는 들어가며 작성자만 공장인 이슈는 `open_max`에 세진다).
-### ADR-038 보정 — 머지 잡의 git 자격은 머지 배우의 것이다; 창은 토큰보다 짧아야 열린다 — 2026-10-11
-
-**실측(#249·#212, 머지 런 38160716604·38160719884).** ADR-039 뒤 처음으로 판정 경로 자동 머지가 창까지 갔다. 창은 17:42에 열려 18:42에
-닫혔고, 그 직후 리뷰 재검증의 `factory/records` fetch가 죽었다 — `fatal: could not read Username for 'https://github.com'`. 락 해제와
-run 기록 push도 같은 줄로 죽었다. 원인은 코드가 아니라 **자격증명의 수명**이다: ADR-038 뒤 체크아웃이 심는 토큰은 App 설치 토큰이고
-그것은 민팅 뒤 60분에 만료된다(GitHub 문서 "Generating an installation access token": *The installation access token will expire after
-1 hour*). ADR-033이 정한 창은 60분, **잡 안 대기**다. 그 둘은 양립하지 않았고, 만료는 401 뒤 사용자명 프롬프트로 나타나 "review evidence
-not bound to a factory run"으로 읽혔다 — 이슈는 needs-human이 됐고 PR head에는 pending `factory/veto-window` 상태가 남았다.
-
-**결정(운영 세션, ADR-021·ADR-033·ADR-038의 교차점이라 새 번호를 쓰지 않는다).**
-1. **체크아웃 자격은 바꾸지 않는다 — 엔진 자신의 git만 `GH_TOKEN`으로 인증한다.** 첫 안은 머지 잡의 체크아웃을 `FACTORY_MERGE_TOKEN`으로
-   하는 것이었고 대역 리뷰가 기각했다: 머지 잡은 거부권 창 **전에** PR head의 게이트 `[commands]`를 실행하며(`merge-stage.js` → `gates.js`
-   `scrubbedRunner`), `exec.js`의 env 스크럽은 `.git/config`에 심긴 체크아웃 헤더에 닿지 않는다 — admin PAT를 거기 두면 게이트 한 줄
-   (`git config --get http.….extraheader`, 또는 그냥 `git push origin HEAD:main`)로 분기 보호를 우회한다. 그래서 체크아웃은 App 설치
-   토큰 그대로 두고, run-stage `main`이 merge 스테이지에서만 `gitAuthEnv(GH_TOKEN)`을 **엔진 프로세스 env**에 얹는다: git의
-   `GIT_CONFIG_COUNT/KEY_n/VALUE_n`(프로세스 한정, `.git/config`에 쓰지 않음)로 체크아웃 헤더 목록을 **비우고**(빈 값 항목) 우리 헤더를
-   올린다. 비우지 않으면 두 `AUTHORIZATION` 헤더가 나가 GitHub이 400을 돌려준다(2026-10-11 스파이크: 가짜 헤더를 심은 bare 클론에서
-   리셋 + 실토큰은 fetch 성공, 리셋 없이는 400, 가짜 헤더만으로는 정확히 그 "could not read Username"). 그 다섯 키는 `MERGE_CAPABLE_ENV`에
-   들어가 게이트 자식에게는 가지 않는다. 두 배우 모드(이 저장소·own-calendar)에서 `GH_TOKEN`은 만료 없는 머지 PAT — 그 값을 이미 들고
-   있는 프로세스가 같은 값을 git에도 쓰는 것이므로 노출면은 그대로다.
-2. **단일 배우 App 모드는 fail-closed.** 거기서는 `GH_TOKEN`도 설치 토큰이라 같은 만료를 겪는다. 워크플로가 `FACTORY_GIT_TOKEN_TTL_MINUTES`
-   (머지 PAT면 `0`, App만이면 `60`)를 싣고, merge-stage의 창 열기는 잡 예산 검사와 같은 모양으로 "잡 시작 + 수명 − 지금 ≥ 창 + 10분
-   여유"를 묻는다. 모자라면 창을 열지 않고 blocked로 이유를 말한다(머지 PAT를 넣거나 `veto_minutes`를 낮추라고). 한 시간 뒤에 알 수 없는
-   이유로 죽는 것보다 지금 이유를 말하는 쪽이 낫다.
-3. **창을 잡 밖으로 내는 재진입 설계(ADR-037 토론 (1)의 stalled 팔 안)는 채택하지 않는다** — ADR-033의 소유자 결정("잡 안 대기")을
-   유지하고, 설치 토큰을 엔진이 재민팅하는 안(개인 키를 스텝 env로 — 노출면 확대)도, 머신 유저 PAT로 체크아웃하는 안(그 계정은 2026-10-06부터
-   shadow-flag 상태라 신뢰할 수 없다)도 택하지 않는다. 템플릿 사본도 같이 바꾼다.
-
-**남는 것**: #249·#212는 재큐로 다시 돈다(그 head에 남은 pending `factory/veto-window`는 새 런이 새 상태를 올리며 덮는다). 운영 door는
-pending 상태가 있는 PR을 머지하지 않으므로(`operator-merge-check`), 죽은 런이 남긴 창은 door로도 못 연다 — 그것이 맞다.
-
-## ADR-039 소유자는 거부권이다 — 판정 경로 자동 머지 ON, 운영 세션이 자기 PR을 머지한다 — 2026-10-10 (소유자 결정)
-
-**소유자(원문)**: "이거 사람역할 하는 agent를 하나 띄워서 나한테 pr 검토 받지 않고 merge하도록 해. 이거 때문에 너무 블로커가 심하다."
-2026-10-04~10 일주일의 사람 머지 요청은 PR #193·#204·#192·#203·#190·#215·#216·#218·#219·#221·#222·#223·#225 — 열셋이었고, 그중
-사람의 판단이 든 것은 0건이었다(전부 "체크 GREEN이면 머지"). ADR-037 §6이 2주 두기로 한 `auto_merge_judge`의 유예는 그 2주가
-**사람 머지 대기**로 채워진다는 뜻이었다.
-
-**결정**:
-1. CHARTER `self_change.auto_merge_judge: true` — 공장이 만든 판정 경로 PR은 ADR-033의 조건(만장일치 + GREEN + 거부권 창 60분 +
-   차단기 닫힘)으로 공장이 머지한다. ADR-037 §6의 유예는 철회.
-2. CHARTER `self_change.operator_merge_judge: true`(새 키, 기본 false) — 운영 세션(소유자 계정의 Claude 세션)은 판정 경로가 든
-   **자기 PR**(`.github/**`·templates·CHARTER·엔진 핫픽스)도 운영 door(`operator-merge-check.js` → 운영 머지 명령 `--squash --admin`)로
-   머지한다. door의 나머지 자물쇠(draft·mergeable·기본 브랜치·체크 GREEN)는 그대로이고, 판정 경로 목록은 사유 줄에 소리내어 적힌다.
-3. **대역 리뷰어**: 운영 세션은 판정 경로 PR을 머지하기 전에 작성자와 다른 컨텍스트의 리뷰어 에이전트(fresh `general-purpose`,
-   읽기 전용)에게 PR diff·이슈·ADR을 cold read 시켜 `approve | reject(must_fix)`를 받는다. 기계적 검증(전체 스위트, 워크플로면
-   actionlint)은 그 앞이다. 이것은 훅이 검증하지 못하는 **절차 규칙**이다(`.claude/CLAUDE.md` "운영 머지").
-4. 소유자에게 남는 것은 거부권(revert·`factory:veto`·차단기 리셋)과 사람만 할 수 있는 일(토큰·시크릿·계정·GitHub Support)이다.
-
-**검증**: `test_adr039_operator_door_passes_judge_paths_only_when_the_charter_switch_is_on`(operator-merge.test.js) —
-스위치 꺼짐은 오늘과 같고, 켜짐은 판정 경로를 허용하되 목록을 돌려주며 다른 자물쇠는 그대로. `config.test.js`는 새 키의 기본값·
-불리언 검증을 핀한다. **되돌리기**: CHARTER의 두 값을 false로 — 코드는 그대로 두어도 ADR-032/033의 모양으로 돌아간다.
-
-**대역 리뷰 1회차(이 PR)**: fresh 리뷰어가 reject 2건을 냈다 — (1) 설치본 미러(`.factory/lib/config.js`)가 새 CHARTER 키를 모르면
-`loadCharter`가 던져 **모든 스테이지가 멈춘다** → 미러를 이 PR에서 재생성(러너와 같은 `regenerateMirror`); (2) bin의 새 경로에 테스트가
-없다 → 스위치 on/off·깨진 CHARTER·door 자기 파일을 bin 호출로 핀. 또한 **문은 자기 자신을 열지 못한다**(`DOOR_FILES`: door의 판정
-코드·양의 목록·bin·훅과 그 설치본)는 리뷰어의 blast-radius 지적에서 왔다. 이 PR 자체는 door 파일을 바꾸므로 마지막 사람 머지다.
