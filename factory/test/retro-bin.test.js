@@ -1499,7 +1499,7 @@ test("test_249_retro_history_records_queued_false_with_the_refusal_reason", asyn
   expect(ok.step).toEqual([{ step: "harness", title: PROMO_230, issue: ok.promo.number }]);
 });
 
-// ── #249 dw5 (skeptic) — retro's admission checker carries the factory logins retro resolves from ITS env ─────────────────────
+// ── #249 dw4 (skeptic) — retro's admission checker carries the factory logins retro resolves from ITS env ─────────────────────
 // test_230/test_249 above vary only queue_max and a throwing door; neither outcome depends on logins, so a retro that built its
 // checker as `makeQueueAdmission({ gh, charter })` (no logins) still passed them. Here the request is one whose admission DOES
 // depend on logins: a factory marker, no `done_when`, and no factory label (the label alone would exempt it, lib/admission.js

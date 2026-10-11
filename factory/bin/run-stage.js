@@ -2888,6 +2888,8 @@ export function makeTransitionDep({ gh, issue, stage, rehearsal, admission, buil
    * #249 sec1 — **triage의 blocked 재시도 hop(blocked → factory:queue)도 같은 문을 지난다.** 상한(queue_max·open_max·depth_max)을 포함한
    * 심사 전부다. 그 hop을 허락하는 것은 작성자를 확인하지 않는 blocked-origin 마커뿐이라(ADR-040의 후속 이슈), hop만의 상한 면제는 그
    * 마커를 쓸 수 있는 누구에게나 큐 문을 비켜 가는 길이었다. 대가: 꽉 찬 큐에서의 진짜 재시도는 factory:blocked에 남고 exit 2, 기록에 상한이 적힌다.
+   * 이 PR은 이 자리의 코드를 바꾸지 않는다 — main의 이 함수와 `transition()`이 이미 `prerequisite`과 무관하게 상한까지 심사한다. 위 문장은
+   * 그 불변식의 기록이고, `test_249_blocked_retry_hop_is_refused_by_queue_caps`는 그것을 지키는 회귀 가드다(hop에 상한 면제를 되살리면 RED).
    */
   return async (args) => {
     const { to, reason, cause, by = null } = args;
@@ -3626,7 +3628,7 @@ export function makeLocalEntry({ gh, issue, stage, env, rehearsal = null, admiss
  * main()의 큐 진입 심사기(#230에서 추출 — 테스트가 프로덕션 배선을 그대로 부르게). CHARTER는 `charterReady`가 나중에 읽으므로
  * 호출 시점에 `getCharter()`로 늦게 본다. 없으면 거부하되(fail closed) 그 거부는 `unreadable`이다 — 이슈에 대한 판정이 아니다.
  */
-// #249 (dw5) — 두 번째 심사기가 아니다: main()이 이것을 **한 번** 부르고 그 한 심사기를 큐 문·로컬 진입·triage 재심사에 나눠 준다
+// #249 (dw3) — 두 번째 심사기가 아니다: main()이 이것을 **한 번** 부르고 그 한 심사기를 큐 문·로컬 진입·triage 재심사에 나눠 준다
 // (아래 `const admission = makeStageAdmission(…)`). main() 조립의 추출도 아니다 — main의 `deps`는 여전히 main 안에서 조립된다.
 // 이 함수는 main에 있던 인라인 클로저(`charter ? makeQueueAdmission(…) : 거부`)를 이름만 붙여 옮긴 것이고, 9f6dc7a 브랜치 테스트
 // (test_230_*, test_247_*)가 이 이름으로 import해 프로덕션 심사기를 그대로 부른다(non_goal "no new design" — 브랜치 그대로).
