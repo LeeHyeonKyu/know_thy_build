@@ -982,3 +982,79 @@ test("test_212_conflict_scope_deleting_or_rewriting_a_content_conflict_is_outsid
   expect(conflictScopeGreen212(other.sg)).toBe(false);
   expect(other.sg.ok).toBe(true);
 });
+
+test("test_212_overlay_reverted_branch_mirror_path_restored_by_the_mirror_commit_is_inside_the_merge", async () => {
+  // cf1/qa1 (round 2) — the realistic #196 shape: the approved branch changed TWO sources with their mirrors; only one conflicts with base.
+  // The implement overlay (`git checkout <stage sha> -- .factory …`) runs while the base merge is pending, so the merge commit M carries
+  // base's copy of the branch's OTHER mirror path too (.factory/lib/b.js), which git's auto-merge would have kept as the branch's. The
+  // runner's mirror commit regenerates it from factory/** — the net change on that path is nil, so it is not "outside the merge".
+  const A = "factory/lib/a.js", B = "factory/lib/b.js", MA = ".factory/lib/a.js", MB = ".factory/lib/b.js";
+  const setup = async () => {
+    const root = mkdtempSync212(join212(tmpdir212(), "fq212ov-"));
+    const git = (...args) => realRun212("git", ["-c", "user.email=t@example.invalid", "-c", "user.name=t", "-c", "commit.gpgsign=false", ...args], { cwd: root });
+    const ok = async (...args) => { const x = await git(...args); expect(x.code, `git ${args.join(" ")}: ${x.stderr}`).toBe(0); return x.stdout.trim(); };
+    const put = (p, t) => { mkdirSync212(dirname212(join212(root, p)), { recursive: true }); writeFileSync212(join212(root, p), t); };
+    const read = (p) => readFileSync212(join212(root, p), "utf8");
+    const r = { root, git, ok, put, read };
+    const both = (src, mir, ls) => { put(src, ls.join("\n") + "\n"); put(mir, ls.join("\n") + "\n"); };
+    await ok("init", "-q", "-b", "main");
+    both(A, MA, lines212("a")); both(B, MB, lines212("b"));
+    await ok("add", "-A"); await ok("commit", "-q", "-m", "base");
+    await ok("checkout", "-q", "-b", "claude/fq-212");
+    const ba = lines212("a"); ba[5] = "export const a5 = 'branch';";
+    const bb = lines212("b"); bb[10] = "export const b10 = 'branch';";
+    both(A, MA, ba); both(B, MB, bb);
+    await ok("add", "-A"); await ok("commit", "-q", "-m", "approved: a.js + b.js with their mirrors");
+    const approved = await ok("rev-parse", "HEAD");
+    await ok("checkout", "-q", "main");
+    const ma = lines212("a"); ma[5] = "export const a5 = 'main';";
+    both(A, MA, ma); await ok("add", "-A"); await ok("commit", "-q", "-m", "main: a.js + its mirror");
+    const base = await ok("rev-parse", "HEAD");
+    await ok("checkout", "-q", "claude/fq-212");
+    expect((await git("merge", "--no-edit", base)).code).not.toBe(0);
+    expect(await ok("diff", "--name-only", "--diff-filter=U")).toBe([MA, A].join("\n"));
+    await ok("checkout", base, "--", MA);                               // the runner's resolution of the conflicted mirror path
+    await ok("checkout", base, "--", ".factory");                       // the implement overlay (makeFactoryOverlay), merge still pending
+    expect(read(MB)).not.toContain("'branch'");                         // the overlay really reverted the branch's own mirror path b.js
+    const res = ba.slice(); res.splice(5, 1, "export const a5 = 'branch';", "export const a5b = 'main';");
+    put(A, res.join("\n") + "\n");                                      // the builder resolves the source conflict only
+    await ok("add", "-A"); await ok("commit", "-q", "--no-edit");
+    return { r, approved, base };
+  };
+  const ctx = (approved) => ({ issue: { number: 212 }, loaded: { conflict_only: true, approved_head: approved, merge_conflicts: [A] } });
+  const regen = async (r, mutate = () => {}) => {                       // the runner's mirror commit: .factory/lib/** regenerated from factory/lib/**
+    r.put(MA, r.read(A)); r.put(MB, r.read(B)); mutate(r); await r.ok("add", "-A");
+    await r.ok("-c", "user.name=factory-runner", "-c", "user.email=factory-runner@users.noreply.github.com", "commit", "-q", "-m", "mirror: regenerate");
+    return r.ok("rev-parse", "HEAD");
+  };
+
+  // GREEN: approved..HEAD touches only a.js and its mirror — exactly the merge.
+  const g = await setup();
+  const mirrorSha = await regen(g.r);
+  expect((await g.r.ok("diff", "--name-only", g.approved, "HEAD")).split("\n").sort()).toEqual([MA, A].sort());
+  const green = await dep212(g.r, ctx(g.approved))({ gates: GREEN212, mirrorSha, mergedBase: g.base, runnerMirror: [MA] });
+  expect(conflictFindings212(green)).toEqual([]);
+  expect(conflictScopeGreen212(green)).toBe(true);
+
+  // RED: no mirror commit put b.js's mirror back — M's base copy of it stands, so the round really changed it. Named.
+  const unrestored = await dep212(g.r, ctx(g.approved))({ gates: GREEN212, mirrorSha: null, mergedBase: g.base, runnerMirror: [MA] });
+  expect(conflictFindings212(unrestored).map((f) => f.detail)).toContain(`conflict round changed ${MB} outside the merge`);
+  expect(conflictScopeGreen212(unrestored)).toBe(false);
+
+  // RED: the mirror commit left b.js's mirror different from git's merge result (not what factory/** generates) → named.
+  const w = await setup();
+  const wrongSha = await regen(w.r, (r) => r.put(MB, r.read(B).replace("export const b20 = 20;", "export const b20 = 'smuggled';")));
+  const wrong = await dep212(w.r, ctx(w.approved))({ gates: GREEN212, mirrorSha: wrongSha, mergedBase: w.base, runnerMirror: [MA] });
+  expect(conflictFindings212(wrong).map((f) => f.detail)).toEqual([`conflict round changed ${MB} outside the merge`]);
+  expect(conflictScopeGreen212(wrong)).toBe(false);
+
+  // Fail closed: a failed read of the mirror commit's copy is "could not be measured", never GREEN.
+  const failMirror = (cmd, args, opts) => (cmd === "git" && args[0] === "show" && String(args[1]) === `${mirrorSha}:${MB}` ? Promise.resolve({ code: 128, stdout: "", stderr: "fatal: injected show failure" }) : realRun212(cmd, args, opts));
+  const closed = await dep212(g.r, ctx(g.approved), failMirror)({ gates: GREEN212, mirrorSha, mergedBase: g.base, runnerMirror: [MA] });
+  expect(conflictScopeGreen212(closed)).toBe(false);
+  expect(conflictFindings212(closed).map((f) => f.detail)).toEqual([expect.stringMatching(/^conflict scope could not be measured — .*injected show failure/)]);
+
+  // A mirror sha that is not on HEAD's chain restores nothing (the walk never passed it): RED, not GREEN.
+  const foreign = await dep212(w.r, ctx(w.approved))({ gates: GREEN212, mirrorSha, mergedBase: w.base, runnerMirror: [MA] });
+  expect(conflictScopeGreen212(foreign)).toBe(false);
+});

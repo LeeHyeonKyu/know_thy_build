@@ -2481,14 +2481,15 @@ export async function conflictScopeInput({ run, cwd, approvedHead, mergedBase = 
   const outside = new Set();
   const head = await git(["rev-parse", "HEAD"]);
   if (head.code !== 0) return fail(`git rev-parse HEAD failed — ${why(head)}`);
-  let cur = head.stdout.trim(), merge = null;
+  let cur = head.stdout.trim(), merge = null, sawMirror = false;
   for (let n = 0; n < CONFLICT_WALK_MAX && !merge; n++) {
     const r = await git(["rev-list", "--parents", "-n", "1", cur]);
     if (r.code !== 0) return fail(`git rev-list failed — ${why(r)}`);
     const [sha, ...parents] = r.stdout.trim().split(/\s+/);
     if (parents.length >= 2) { merge = { sha, parents }; break; }
     if (sha === approvedHead || !parents.length) return fail(`no base merge between the approved head ${approvedHead.slice(0, 7)} and HEAD`);
-    if (sha !== mirrorSha) {
+    if (sha === mirrorSha) sawMirror = true;
+    else {
       const ch = await git(["diff-tree", "--no-commit-id", "--name-only", "--no-renames", "-r", "-z", sha]);
       if (ch.code !== 0) return fail(`git diff-tree failed — ${why(ch)}`);
       names(ch).forEach((p) => outside.add(p));
@@ -2528,7 +2529,22 @@ export async function conflictScopeInput({ run, cwd, approvedHead, mergedBase = 
     return { text: String(s.stdout ?? ""), oid };
   };
   for (const p of names(diff)) {
-    if (!allowed.includes(p)) { outside.add(p); continue; }
+    if (!allowed.includes(p)) {
+      // cf1/qa1 — the implement overlay (`makeFactoryOverlay`: `git checkout <stage sha> -- .factory …`) runs while the base merge is
+      // pending, so M carries base's copy of every mirror-family path the BRANCH changed, not only the conflicted ones. Those paths are
+      // generated: the runner's mirror commit (`mirrorSha`, which the walk above must have passed) regenerates them from factory/**. A
+      // mirror-family path is inside the merge exactly when that commit holds git's own merge result for it, by object id — the round's
+      // net change on it is nil. Without this run's mirror commit, or with any other copy there, it stays outside.
+      if (sawMirror && inMirrorFamily(p)) {
+        const a = await side(auto, p);
+        if (a.error) return fail(a.error);
+        const r = await side(mirrorSha, p);
+        if (r.error) return fail(r.error);
+        if (a.absent ? r.absent : !r.absent && r.oid === a.oid) continue;
+      }
+      outside.add(p);
+      continue;
+    }
     const a = await side(auto, p);
     if (a.error) return fail(a.error);
     const m = await side(merge.sha, p);
