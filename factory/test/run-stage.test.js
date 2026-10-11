@@ -6684,6 +6684,30 @@ test("test_206_gate_red_finding_never_carries_an_unscrubbed_secret_into_the_issu
   expect(unset.detail).toContain("[REDACTED:gh-token]");
 });
 
+// The helper test above injects `env`; this one pins the PRODUCTION wiring — runStage's gates-RED branch must hand the
+// job's own env to gateRedFindings, or every real self-gate retry comment publishes literal secrets (only shape rules left).
+test("test_206_run_stage_gate_red_retry_scrubs_the_job_env_secret_end_to_end", async () => {
+  const secret = "j0b-Env-Secret-9876543210-qrstuvWXYZ";
+  expect(SECRET_ENV).toContain("FACTORY_BOT_TOKEN");
+  vi.stubEnv("FACTORY_BOT_TOKEN", secret);
+  try {
+    expect(process.env.FACTORY_BOT_TOKEN).toBe(secret);
+    const log = `lint failed\nPOST https://api.example/y?auth=${secret} → 403\n`;
+    expect(log).toContain(secret);
+    const findings = await findingsVia({ lint: { status: "RED", code: 1, duration_ms: 1, log } });
+    const [f] = findings;
+    expect(f.check).toBe("gate:lint");
+    expect(f.detail.startsWith("gate lint RED — lint failed")).toBe(true);
+    expect(f.detail).not.toContain(secret);
+    expect(f.detail).toContain("[REDACTED:env-value]");
+    const body = selfGateRetryComment({ issue: 206, head: "d".repeat(40), attempt: 1, findings });
+    expect(body).not.toContain(secret);
+  } finally {
+    vi.unstubAllEnvs();
+  }
+  expect(process.env.FACTORY_BOT_TOKEN).not.toBe(secret);
+});
+
 test("test_206_gate_log_in_finding_is_single_line_and_capped_at_300", async () => {
   expect(GATE_LOG_FINDING_MAX).toBe(300);
   const lines = Array.from({ length: 40 }, (_, i) => `L${String(i).padStart(2, "0")} problem in src/file${i}.js`);
