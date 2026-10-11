@@ -290,6 +290,24 @@ export function makeGh({ run, repo, sleep = realSleep }) {
       throw first;
     }
   }
+  /**
+   * #234 — 이 클라이언트에서 `gh variable get`을 부르는 **유일한** 자리. `{state: "set", value}` | `{state: "unset"}` |
+   * `{state: "unreadable", detail}`. gh는 없는 변수를 `variable <n> was not found`로 답한다(404) — 그 문구와 빈 값만 unset이고,
+   * 그 밖의 0 아닌 종료(403·네트워크)는 unreadable이다. doctor의 `actions.hosted-minutes-metered`는 둘을 갈라야 한다(없으면
+   * 워크플로가 `ubuntu-latest`로 떨어지므로 판정할 수 있고, 못 읽으면 "unverified"다). `getVariable`·`variableGet`은 이것을
+   * "값 아니면 null"로 접는 얇은 래퍼다 — 호출자 여섯이 그 계약에 기댄다(plan s4).
+   */
+  async function variableState(name) {
+    const r = await run("gh", ["variable", "get", name, "-R", repo]);
+    if (r.code === 0) {
+      const value = String(r.stdout ?? "").trim();
+      return value ? { state: "set", value } : { state: "unset" };
+    }
+    const msg = String(r.stderr || r.stdout || "").trim();
+    if (/\bwas not found\b/i.test(msg)) return { state: "unset" };
+    return { state: "unreadable", detail: msg || `exit ${r.code}` };
+  }
+  const variableValue = async (name) => { const s = await variableState(name); return s.state === "set" ? s.value : null; };
   return {
     /** #208 dw2 — the `owner/name` every call here targets; the PR evidence builds its fixing-commit links from it. */
     repo,
@@ -573,8 +591,8 @@ export function makeGh({ run, repo, sleep = realSleep }) {
      * 연다 — 대화의 자리는 옮기지 않는다.
      */
     async reopenIssue(n) { await gh(["issue", "reopen", String(n), "-R", repo]); },
-    // gh variable get exits non-zero for a missing variable — go through run() directly, not the gh() helper that throws on non-zero.
-    async getVariable(name) { const r = await run("gh", ["variable", "get", name, "-R", repo]); return r.code === 0 ? r.stdout.trim() : null; },
+    // 값, 아니면 null(없음·빈 값·못 읽음) — `variableState`의 래퍼다(#234 arch1).
+    getVariable: variableValue,
 
     /** targetUrl은 옵션 필드 그대로 target_url로 나간다. description은 GitHub API 제한(140자)으로 자른다. */
     async setStatus({ sha, context, state, description, targetUrl }) {
@@ -711,9 +729,57 @@ export function makeGh({ run, repo, sleep = realSleep }) {
       try { return (await gh(["api", `users/${login}`, "--jq", ".type"])).trim() || null; }
       catch { return null; }
     },
+    /** #234 — 변수 하나의 세 상태(set·unset·unreadable). 본체는 위의 지역 함수다(`gh variable get`의 유일한 호출자). */
+    variableState,
+    /**
+     * #234 — 저장소 **소유자**의 플랜 이름(`free`|`pro`|`team`|…), 읽을 수 없으면 null. GitHub은 `plan`을 두 자리에서만 준다:
+     * 인증된 사용자 자신의 `GET /user`, 그리고 조직 멤버·관리자에게의 `GET /orgs/<org>`. 그래서 뷰어가 소유자일 때만 `/user`의
+     * 플랜을 쓰고(**남의 플랜을 소유자의 것으로 읽지 않는다**), 아니면 조직으로 묻는다. GitHub App 토큰은 대개 둘 다 못 읽는다
+     * — 그때 null이고 doctor는 그것을 "unverified"로 말한다(plan d3).
+     */
+    async ownerPlan(owner) {
+      const want = String(owner ?? "").toLowerCase();
+      if (!want) return null;
+      try {
+        const u = JSON.parse(await gh(["api", "user"]));
+        if (String(u?.login ?? "").toLowerCase() === want && u?.plan?.name) return String(u.plan.name);
+      } catch { /* 뷰어 조회 실패 — 조직 경로로 넘어간다 */ }
+      try {
+        const o = JSON.parse(await gh(["api", `orgs/${owner}`]));
+        if (o?.plan?.name) return String(o.plan.name);
+      } catch { /* 조직이 아니거나(사용자 소유) 플랜을 볼 권한이 없다 */ }
+      return null;
+    },
+    /**
+     * #234 — 저장소 전체의 최근 워크플로 런(최신순). `factory status`의 `ACTIONS BLOCKED?` 줄이 읽는다. `startedAt`은 싣지
+     * 않는다: GitHub의 `run_started_at`은 큐에 앉은 런에도 `created_at`과 같게 채워져 "러너를 받았다"를 말하지 않는다.
+     * 런이 실제로 돌았는가는 잡의 스텝으로만 안다(`runJobs`).
+     */
+    async recentRuns(limit = 20) {
+      const j = JSON.parse(await gh(["run", "list", "-R", repo, "--limit", String(limit), "--json", "databaseId,status,conclusion,createdAt,updatedAt,workflowName,event"]));
+      return (Array.isArray(j) ? j : []).map((r) => ({
+        id: r.databaseId, status: r.status ?? null, conclusion: r.conclusion || null,
+        createdAt: r.createdAt ?? null, updatedAt: r.updatedAt ?? null, workflowName: r.workflowName ?? null, event: r.event ?? null,
+      }));
+    },
+    /** #234 — 한 런의 잡들. `steps`는 그 잡이 실행한 스텝 수다 — 0이면 러너가 한 스텝도 돌리지 않았다. */
+    async runJobs(runId) {
+      const j = JSON.parse(await gh(["run", "view", String(runId), "-R", repo, "--json", "jobs"]));
+      return (j?.jobs || []).map((x) => ({
+        id: x.databaseId, status: x.status ?? null, conclusion: x.conclusion || null, steps: Array.isArray(x.steps) ? x.steps.length : 0,
+      }));
+    },
+    /**
+     * #234 — 잡(check run)의 annotation 메시지들. "spending limit"·"billing" 문구는 `gh run list`의 어떤 필드에도 없고
+     * 여기에만 온다(`gh run view`가 ANNOTATIONS로 찍는 바로 그 텍스트다).
+     */
+    async jobAnnotations(jobId) {
+      const j = JSON.parse(await gh(["api", `repos/${repo}/check-runs/${jobId}/annotations`]));
+      return (Array.isArray(j) ? j : []).map((a) => String(a?.message ?? "")).filter(Boolean);
+    },
     /** 1.4.2 — 저장소 변수 하나(없으면 null). 값이 시크릿이 아닌 변수(`FACTORY_BOT_LOGIN`)에만 쓴다. */
     async variableGet(name) {
-      try { return (await gh(["variable", "get", name, "-R", repo])).trim() || null; }
+      try { return await variableValue(name); }
       catch { return null; }
     },
     /** 이 클라이언트가 가리키는 `owner/repo` — `resolveFactoryLogins`가 소유자를 알아내는 데 쓴다. */
