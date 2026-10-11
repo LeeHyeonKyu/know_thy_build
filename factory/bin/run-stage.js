@@ -2148,7 +2148,11 @@ export function reviewR1Line(r1, final) {
   if (!before.length) return REVIEW_R1_NOT_CARRIED;
   const after = new Map((Array.isArray(final) ? final : []).filter((x) => x?.role).map((x) => [x.role, x.verdict]));
   const flipped = before.filter((x) => after.has(x.role) && after.get(x.role) !== x.verdict).length;
-  return `review-r1: ${normalizeVerdicts(before)} r2_flipped=${flipped}`;
+  // sec1 (rework): role/verdict are agent text and this line lands in the agent-unwritable run record, ahead of (on the
+  // incomplete exit: instead of) the real `review-evidence:` line. Any whitespace/control run — line terminators included —
+  // becomes `_`, so the line stays ONE line and agent text can never start a parseable evidence line of its own.
+  const oneLine = (t) => String(t ?? "?").replace(/[\s\u0000-\u001f\u007f-\u009f]+/g, "_");
+  return `review-r1: ${normalizeVerdicts(before.map((x) => ({ role: oneLine(x.role), verdict: oneLine(x.verdict) })))} r2_flipped=${flipped}`;
 }
 
 export const K_TWICE = "K exhausted twice (one self-restart used)";
