@@ -19,6 +19,8 @@ import { appendRunRecord, appendRunRecordLine } from "../lib/run-record.js";
 import { parseRunRecord } from "../lib/usage.js";
 import { makeStageClaudeP, makeStageVerifyDep, DIRECT_GUARANTEE } from "../bin/run-stage.js";
 import { copyFileSync } from "node:fs";
+import { directTriagePrompt } from "../bin/run-stage.js";
+import { runWorkflow } from "./helpers/run-workflow.js";
 
 test("run-stage executes the §4.2.1 skeleton in order and transitions on success", async () => {
   const calls = [];
@@ -6771,6 +6773,37 @@ test("test_237_direct_triage_prompt_carries_charter_default_and_submission", asy
   const okRun = claudeRun237(envelope237(JSON.stringify(VERDICT_237)));
   await makeStageClaudeP({ root: ok, stage: "triage", issue: 7, run: okRun, getHarness: () => ({ factory: { orchestration: "agent" } }), getCharter: () => ({}) })({ orchestration: "agent", loaded: triageLoaded237() });
   expect(okRun.calls).toHaveLength(1);
+});
+
+// dw3 parity (skeptic f1): the direct prompt is a hand-kept copy of the workflow's verdict table (plan open_risks
+// "prompt drift"). Run BOTH the shipped workflow (templates/) and the installed one (.claude/) through the real
+// vm harness and require the verdict table — from "Judge whether issue" to the factory.triage.v1 field list — to be
+// the same text, for every input shape that changes it (submitted or not, each charter default, default unset).
+test("test_237_direct_triage_prompt_matches_the_workflow_verdict_table", async () => {
+  const table = (prompt) => {
+    const from = prompt.indexOf("Judge whether issue");
+    const to = prompt.indexOf("reason, summary.");
+    expect(from).toBeGreaterThan(-1);
+    expect(to).toBeGreaterThan(from);
+    return prompt.slice(from, to + "reason, summary.".length);
+  };
+  const variants = [
+    { default: "needs-info", never_automate: [], explicit_submission: true, submitted_by: "alice" },
+    { default: "ready", never_automate: [], explicit_submission: false, submitted_by: null },
+    { default: "needs-info", never_automate: [], explicit_submission: true, submitted_by: null },
+    { never_automate: [] },
+  ];
+  for (const wf of ["templates/factory/claude/workflows/factory-triage.js", ".claude/workflows/factory-triage.js"]) {
+    for (const triage of variants) {
+      const loaded = triageLoaded237({ triage, orchestration: "workflow" });
+      const { calls } = await runWorkflow(join(REPO_237, wf), {
+        agent: async () => VERDICT_237,
+        args: { issue: "7", context: ".factory/out/context.json", loaded },
+      });
+      expect(calls).toHaveLength(1);
+      expect(table(directTriagePrompt({ issue: 7, loaded }))).toBe(table(calls[0].prompt));
+    }
+  }
 });
 
 test("test_237_direct_agent_failure_lands_on_the_same_invalid_artifact_path", async () => {
