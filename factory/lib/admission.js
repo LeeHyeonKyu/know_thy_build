@@ -60,7 +60,8 @@ export function doneWhenExemption(issue, factoryLogins = [], { loginsResolved = 
   const author = authorOf(issue);
   const only = "a marker exempts only an issue the factory itself opened";
   if (!author) return { exempt: false, why: `${NO_DONE_WHEN}; it carries a factory marker but the author could not be read — ${only}, so add a \`done_when\` section` };
-  if (!loginsResolved) return { exempt: false, why: `${NO_DONE_WHEN}; it carries a factory marker but the factory logins could not be resolved, so author \`${author}\` cannot be checked — fix the login lookup (FACTORY_BOT_LOGIN) or add a \`done_when\` section` };
+  // #249 — `unreadable`: 이 거부는 이슈의 사실이 아니라 읽지 못한 로그인이다(`queueAdmission`이 코드를 `unreadable`로 단다).
+  if (!loginsResolved) return { exempt: false, why: `${NO_DONE_WHEN}; it carries a factory marker but the factory logins could not be resolved, so author \`${author}\` cannot be checked — fix the login lookup (FACTORY_BOT_LOGIN) or add a \`done_when\` section`, unreadable: true };
   if (isFactoryLogin(author, factoryLogins)) return { exempt: true, why: null };
   return { exempt: false, why: `${NO_DONE_WHEN}; it carries a factory marker but its author \`${author}\` is not a factory login — ${only}, so add a \`done_when\` section` };
 }
@@ -152,7 +153,9 @@ export function queueAdmission({ issue, charter, queued = [], openSelfGenerated 
   // #231 — done_when 면제는 상한의 판정(`self`)보다 좁다: 마커는 공장 로그인이 연 이슈에서만 면제한다(`doneWhenExemption`).
   if (!DONE_WHEN_RE.test(body)) {
     const ex = doneWhenExemption(issue, factoryLogins, factoryLoginsResolved === undefined ? {} : { loginsResolved: !!factoryLoginsResolved });
-    if (!ex.exempt) refuse(ADMISSION_CODES.noDoneWhen, ex.why);
+    // #249 (main 병합) — 로그인을 읽지 못한 거부는 `unreadable`이다: 문은 그대로 거부하지만(fail closed, 같은 문장), triage 진입 재심사가
+    // 큐에 있는 공장 이슈를 `gh api` 한 번의 실패로 needs-info로 내리지 않는다(`entryRecheck`).
+    if (!ex.exempt) refuse(ex.unreadable ? ADMISSION_CODES.unreadable : ADMISSION_CODES.noDoneWhen, ex.why);
   }
 
   const hits = neverAutomateHits(impactPathsOf(body), charter?.never_automate ?? []);

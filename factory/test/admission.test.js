@@ -697,3 +697,25 @@ test("test_260_app_mode_self_generated_cap_applies_through_real_login_resolver",
   // 같은 상한 아래에서도 사람의 이슈는 막히지 않는다(작성자 갈래가 사람을 봇으로 세지 않는다)
   expect(await appModeAdmission260(issues, { lists })({ issue: 91 })).toEqual({ ok: true, reasons: [], self_generated: false });
 });
+
+// ── #249 (main merge) — #231's "factory logins could not be resolved" refusal is a failed read, not a fact about the issue ─────
+// Since #230 the triage entry re-check maps refusal codes to an end state: `no-done-when` demotes a queued issue to needs-info.
+// A marker-only issue the factory opened is refused at the door only because the login lookup failed this time — a transient
+// read. Coded as `no-done-when`, every queued factory issue would be pushed to needs-info by one failed `gh api` call. It is
+// `unreadable`: the doors still refuse it (fail closed, same sentence), and the entry re-check keeps it retryable instead.
+test("test_249_unresolved_factory_logins_refusal_is_unreadable_at_the_entry_recheck", () => {
+  const markerOnly = { number: 61, body: "Detected while implementing #7. evidence: {}", labels: ["backlog"], author: "bot-hk" };
+  const unresolved = queueAdmission({ issue: markerOnly, charter: charter(), ...base, factoryLogins: [], factoryLoginsResolved: false });
+  expect(unresolved.ok).toBe(false);
+  expect(unresolved.reasons).toHaveLength(1);
+  expect(unresolved.reasons[0]).toMatch(/factory logins could not be resolved/);
+  expect(unresolved.codes).toEqual(["unreadable"]);
+  expect(entryRecheck(unresolved, { queueMax: true })).toMatchObject({ verdict: "unreadable", reason: expect.stringContaining("factory logins could not be resolved") });
+  // the same issue with the logins resolved is admitted — and the other #231 marker refusals stay facts about the issue
+  expect(queueAdmission({ issue: markerOnly, charter: charter(), ...base, factoryLoginsResolved: true }).ok).toBe(true);
+  const stranger = queueAdmission({ issue: { ...markerOnly, author: "mallory" }, charter: charter(), ...base, factoryLoginsResolved: true });
+  expect(stranger.codes).toEqual(["no-done-when"]);
+  expect(entryRecheck(stranger)).toMatchObject({ verdict: "refuse", to: "factory:needs-info" });
+  const anonymous = queueAdmission({ issue: { ...markerOnly, author: null }, charter: charter(), ...base, factoryLoginsResolved: true });
+  expect(anonymous.codes).toEqual(["no-done-when"]);
+});
