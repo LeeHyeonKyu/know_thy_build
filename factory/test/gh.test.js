@@ -870,10 +870,10 @@ const appEnv260 = (...args) => {
   const bot = args.length ? args[0] : `${APP_SLUG_260}[bot]`;   // appEnv260(undefined) = FACTORY_BOT_LOGIN 키 자체가 없다
   return { GITHUB_ACTIONS: "true", ...(bot === undefined ? {} : { FACTORY_BOT_LOGIN: bot }) };
 };
-/** `gh api user`가 설치 토큰에서 내는 실패(403) + `gh issue view`(작성자 모양은 gh CLI `Author.MarshalJSON`). */
+/** `gh api user`가 설치 토큰에서 내는 실패(403 — gh 2.102.0을 로컬 가짜 서버에 붙여 기록한 종료 코드·stdout·stderr 그대로) + `gh issue view`(작성자 모양은 gh CLI `Author.MarshalJSON`). */
 function appModeGh260({ issueAuthor = undefined } = {}) {
   const run = makeFakeRun([
-    { match: (c, a) => c === "gh" && a[0] === "api" && a[1] === "user", result: { code: 1, stdout: "", stderr: "gh: Resource not accessible by integration (HTTP 403)" } },
+    { match: (c, a) => c === "gh" && a[0] === "api" && a[1] === "user", result: { code: 1, stdout: JSON.stringify({ message: "Resource not accessible by integration", documentation_url: "https://docs.github.com/rest/users/users#get-the-authenticated-user", status: "403" }), stderr: "gh: Resource not accessible by integration (HTTP 403)" } },
     { match: (c, a) => c === "gh" && a[0] === "issue" && a[1] === "view", result: () => ({ code: 0, stdout: JSON.stringify({ number: 5, title: "T", body: "B", labels: [], ...(issueAuthor === undefined ? {} : { author: issueAuthor }) }), stderr: "" }) },
   ]);
   return { run, gh: makeGh({ run, repo: "LeeHyeonKyu/know_thy_build" }) };
@@ -939,5 +939,41 @@ test("test_260_gh_issue_app_author_matches_workflow_factory_bot_login", async ()
     expect(it.author).toBe(login);
     expect(sameLogin(it.author, env.FACTORY_BOT_LOGIN), login).toBe(false);
     expect(lg.logins.some((l) => sameLogin(l, it.author)), login).toBe(false);
+  }
+});
+
+test("test_260_viewer_403_is_tolerated_only_for_the_app_install_token", async () => {
+  // 뷰어 403을 견디는 문은 **App 설치 토큰의 403**만이다: ①이 `<slug>[bot]`(App만 갖는 로그인 모양 — 사람·머신 유저 로그인에는
+  // `[`가 올 수 없다)이고, gh가 낸 오류가 설치 토큰의 문구 "Resource not accessible by integration"과 HTTP 403을 함께 실을 때.
+  // stderr는 gh 2.102.0이 실제로 낸 것이다: 로컬 가짜 서버가 `GET /user`에 403 + 그 JSON을 돌려주게 하고
+  // (GH_HOST=github.localhost, HTTP_PROXY로 127.0.0.1에 묶음) `gh api user`를 돌려 받은 stdout·stderr·종료 코드 1 그대로다.
+  const body403 = JSON.stringify({ message: "Resource not accessible by integration", documentation_url: "https://docs.github.com/rest/users/users#get-the-authenticated-user", status: "403" });
+  const viewerFails = (stderr, stdout = "") => makeGh({ run: makeFakeRun([{ match: (c, a) => a[0] === "api" && a[1] === "user", result: { code: 1, stdout, stderr } }]), repo: "LeeHyeonKyu/know_thy_build" });
+  const INSTALL_403 = "gh: Resource not accessible by integration (HTTP 403)";
+
+  // App 모드: 통과한다
+  const app = await resolveFactoryLogins({ gh: viewerFails(INSTALL_403, body403), env: { GITHUB_ACTIONS: "true", FACTORY_BOT_LOGIN: "ktb-factory[bot]" } });
+  expect(app.ok).toBe(true);
+  expect(app.logins).toEqual(["ktb-factory[bot]"]);
+
+  // PAT(두 배우 모드, ADR-021)의 403 — SAML SSO·2차 rate limit·권한 없는 토큰 — 은 설치 토큰이 아니다: 머지 배우를 조용히 빼지 않는다
+  for (const stderr of [
+    "gh: Resource protected by organization SAML enforcement. You must grant your Personal Access token access to this organization. (HTTP 403)",
+    "gh: You have exceeded a secondary rate limit. Please wait a few minutes before you try again. (HTTP 403)",
+    INSTALL_403,
+  ]) {
+    const pat = await resolveFactoryLogins({ gh: viewerFails(stderr), env: { GITHUB_ACTIONS: "true", FACTORY_BOT_LOGIN: "factory-bot" } });
+    expect(pat.ok, stderr).toBe(false);
+    expect(pat.reason, stderr).toMatch(/gh api user failed/);
+  }
+  // ①이 App 모양이어도 설치 토큰의 문구가 아닌 403(예: App 폴백 뒤 PAT 머지 토큰의 SSO 403)은 fail closed다
+  for (const stderr of [
+    "gh: Resource protected by organization SAML enforcement. You must grant your Personal Access token access to this organization. (HTTP 403)",
+    "gh: You have exceeded a secondary rate limit. Please wait a few minutes before you try again. (HTTP 403)",
+    "gh: Resource not accessible by integration (HTTP 404)",
+  ]) {
+    const mixed = await resolveFactoryLogins({ gh: viewerFails(stderr), env: { GITHUB_ACTIONS: "true", FACTORY_BOT_LOGIN: "ktb-factory[bot]" } });
+    expect(mixed.ok, stderr).toBe(false);
+    expect(mixed.reason, stderr).toMatch(/gh api user failed/);
   }
 });

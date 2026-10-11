@@ -584,10 +584,10 @@ test("test_231_factory_flaky_issue_under_pat_author_still_admitted", async () =>
 // 설치 토큰의 `gh api user`는 403으로 실패한다. env는 명시 주입이다(process.env를 읽지 않는다).
 import { resolveFactoryLogins as resolveFactoryLogins260 } from "../lib/gh.js";
 const APP_ENV260 = Object.freeze({ GITHUB_ACTIONS: "true", FACTORY_BOT_LOGIN: "ktb-factory[bot]" });
-/** ghOver와 같은 배선 + `gh api user` → 403(설치 토큰). 반환한 admit은 프로덕션 진입점과 같은 모양으로 resolver를 감싼다. */
+/** ghOver와 같은 배선 + `gh api user` → 403(설치 토큰 — gh 2.102.0을 로컬 가짜 서버에 붙여 기록한 종료 코드·stdout·stderr 그대로). 반환한 admit은 프로덕션 진입점과 같은 모양으로 resolver를 감싼다. */
 function appModeAdmission260(issues, { lists = {}, charter: ch = charter(), env = APP_ENV260 } = {}) {
   const run = makeFakeRun231([
-    { match: (c, a) => c === "gh" && a[0] === "api" && a[1] === "user", result: { code: 1, stdout: "", stderr: "gh: Resource not accessible by integration (HTTP 403)" } },
+    { match: (c, a) => c === "gh" && a[0] === "api" && a[1] === "user", result: { code: 1, stdout: JSON.stringify({ message: "Resource not accessible by integration", documentation_url: "https://docs.github.com/rest/users/users#get-the-authenticated-user", status: "403" }), stderr: "gh: Resource not accessible by integration (HTTP 403)" } },
     { match: (c, a) => c === "gh" && a[0] === "issue" && a[1] === "view", result: (c, a) => (issues[a[2]] ? { code: 0, stdout: ghIssueJson(issues[a[2]]), stderr: "" } : { code: 1, stdout: "", stderr: "Could not resolve to an issue" }) },
     { match: (c, a) => c === "gh" && a[0] === "issue" && a[1] === "list", result: (c, a) => ({ code: 0, stdout: JSON.stringify(lists[a[a.indexOf("--label") + 1]] ?? []), stderr: "" }) },
   ]);

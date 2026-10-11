@@ -103,8 +103,8 @@ export function bounded(start, { ms, what, signal = null }) {
  *
  * 두 배우 모드에서 이 잡의 `GH_TOKEN`은 머지 배우이지만 `factory/review` 상태를 올린 것은 **에이전트
  * 배우**다 — 그래서 둘 다 받는다. 봇 로그인은 워크플로가 `FACTORY_BOT_LOGIN`으로 넘긴다(이름은
- * 비밀이 아니라 env로 옮겨도 사본이 늘지 않는다). 잡 토큰의 로그인이 해석되지 않으면 `ok:false`다 — 봇 로그인이 있고 실패가
- * 설치 토큰의 403(ADR-038 §2)일 때만 예외다. `ok:false`면
+ * 비밀이 아니라 env로 옮겨도 사본이 늘지 않는다). 잡 토큰의 로그인이 해석되지 않으면 `ok:false`다 — 봇 로그인이 App 모양(`<slug>[bot]`)이고
+ * 실패가 설치 토큰의 403(ADR-038 §2)일 때만 예외다. `ok:false`면
  * 호출자는 fail closed 한다(누가 올렸는지 모르는 상태는 통과가 아니다).
  *
  * KTB-46에 `bin/sweep.js`가 두 번째 호출자로 붙으면서 `bin/run-stage.js`의 클로저에서 여기로 옮겼다 —
@@ -159,17 +159,22 @@ export async function resolveFactoryLogins({ gh, env, comments = null, repo = gh
    *
    * #260 — App 모드에서 워크플로는 민팅 직후 `<app-slug>[bot]`을 ①로 넘기고 뷰어는 403이다: 예전에는 그 403이 이미 손에 든 ①을
    * 가리고 `ok:false`를 돌려줘, 이 함수의 모든 호출자가 Actions의 App 런마다 "공장 로그인을 모른다"로 떨어졌다. 이제 뷰어의 실패는
-   * **①이 있고 그 실패가 HTTP 403(설치 토큰은 `GET /user`를 부를 수 없다)일 때만** 치명적이지 않다 — 그 후보가 없을 뿐이고 종류도
-   * 모른다(`identity`는 ①만으로 `personal: null`). 그 밖의 실패(502·401·네트워크)는 ①이 있어도 예전 그대로 fail closed다: 두 배우
-   * 모드(ADR-021)에서 머지 배우의 로그인은 뷰어에서만 오고, 일시 장애로 그 배우를 목록에서 조용히 빼면 그 배우가 쓴 코멘트를 분류할
-   * 수 없다(run-stage.test.js test_195_two_actor_forged_marker_through_the_bot_login_is_overwritten이 502를 fail closed로 핀한다).
-   * 뷰어 조회 자체도 건너뛰지 않는다 — 같은 이유다. ①이 없으면 403이어도 fail closed다
-   * (test_260_app_mode_viewer_403_resolves_from_factory_bot_login · test_260_two_actor_mode_keeps_viewer_login_when_viewer_succeeds).
+   * **그 실패가 App 설치 토큰의 403일 때만** 치명적이지 않다(`isInstallTokenViewer403` — ①이 `<slug>[bot]` 모양이고 gh 오류가
+   * 설치 토큰의 문구와 HTTP 403을 함께 실을 때) — 그 후보가 없을 뿐이고 종류도 모른다(`identity`는 ①만으로 `personal: null`).
+   * 그 밖의 실패는 ①이 있어도 예전 그대로 fail closed다: 502·401·네트워크, 그리고 PAT의 403(SAML SSO·2차 rate limit·권한 없는
+   * 토큰). 두 배우 모드(ADR-021)에서 머지 배우의 로그인은 뷰어에서만 오고, 그 배우를 목록에서 조용히 빼면 그 배우가 쓴 코멘트를
+   * 분류할 수 없다(run-stage.test.js test_195_two_actor_forged_marker_through_the_bot_login_is_overwritten이 502를 fail closed로 핀한다).
+   * 뷰어 조회 자체도 건너뛰지 않는다 — 같은 이유다(봇 로그인이 있다는 것만으로는 두 배우 모드와 App 모드를 가를 수 없다).
+   * ADR-038 '남는 것'의 "`FACTORY_BOT_LOGIN`이 있으면 [viewerLogin이] 호출되지 않고"는 이 함수에 대해 사실이 아니다 — 호출되고, App
+   * 모드에서는 403을 받고 그 403을 여기서 견딘다. ADR 문장의 정정은 #260 plan의 non_goals(ADR-038 드리프트 감사는 후속)에 따라
+   * 이 diff 밖의 후속 이슈 #262로 남긴다. ①이 없으면 403이어도 fail closed다
+   * (test_260_app_mode_viewer_403_resolves_from_factory_bot_login · test_260_two_actor_mode_keeps_viewer_login_when_viewer_succeeds ·
+   * test_260_viewer_403_is_tolerated_only_for_the_app_install_token).
    */
   let viewerRead = false, viewer;
   if (env.GITHUB_ACTIONS === "true") {
     try { viewer = await gh.viewerLogin(...viewerOpts); viewerRead = true; }
-    catch (e) { if (!bot || !isInstallTokenViewer403(e)) return { ok: false, reason: `gh api user failed — ${e?.message || e}` }; }
+    catch (e) { if (!isInstallTokenViewer403(e, bot)) return { ok: false, reason: `gh api user failed — ${e?.message || e}` }; }
   }
   if (viewerRead) {
     logins.push(viewer);
@@ -250,11 +255,25 @@ export async function resolveFactoryLogins({ gh, env, comments = null, repo = gh
 }
 
 /**
- * #260 — `gh api user`의 실패가 **설치 토큰의 403**인가(ADR-038 §2). `gh`는 API 오류를 `gh: <message> (HTTP <status>)`로
- * stderr에 내고, `makeGh`의 `gh()`는 그 stderr를 에러 메시지에 싣는다. 상태 코드만 본다 — 메시지 문구는 GitHub이 바꿀 수 있다.
+ * #260 — `gh api user`의 실패가 **App 설치 토큰의 403**인가(ADR-038 §2). 셋이 모두 참일 때만이다:
+ *   - ①(`FACTORY_BOT_LOGIN`)이 `<slug>[bot]` 모양이다 — App만 갖는 로그인 모양이다(사람·머신 유저 로그인에는 `[`가 올 수 없다).
+ *     PAT 두 배우 모드(ADR-021)의 ①은 머신 유저 이름이라 여기서 걸러지고, 그 모드의 뷰어 403은 예전 그대로 fail closed다.
+ *   - 오류가 HTTP 403이고, 설치 토큰이 `GET /user`에서 받는 문구 "Resource not accessible by integration"을 싣는다 — 같은 403이라도
+ *     SAML SSO("Resource protected by organization SAML enforcement")·2차 rate limit은 설치 토큰의 거부가 아니다.
+ * 오류 모양의 출처: gh 2.102.0을 로컬 가짜 서버(`GET /user` → 403 + `{"message":"Resource not accessible by integration",…}`)에 붙여
+ * `gh api user`를 돌리면 종료 코드 1, stdout은 응답 JSON, stderr는 `gh: Resource not accessible by integration (HTTP 403)`이다
+ * (test_260_viewer_403_is_tolerated_only_for_the_app_install_token의 픽스처가 그 기록이다). `makeGh`의 `gh()`는 그 stderr를 에러 메시지에 싣는다. GitHub이 문구를 바꾸면 이 판정은
+ * **fail closed 쪽으로** 틀린다(`ok:false` — #260 이전과 같다), 열리는 쪽으로는 틀리지 않는다.
+ *
+ * Scope change (#260): plan non_goals의 "Matching viewer failures by HTTP 403 error text. Any viewer failure is non-fatal when the bot
+ * login is present."를 의도적으로 뒤집는다 — "모든 뷰어 실패를 견딘다"는 설계는 기존 테스트
+ * run-stage.test.js test_195_two_actor_forged_marker_through_the_bot_login_is_overwritten(뷰어 HTTP 502 → fail closed)을 빨갛게
+ * 만들고, 그 테스트는 고칠 수 없다(tests_are_load_bearing). 그래서 견디는 실패를 설치 토큰의 403 하나로 좁힌다(dw1·dw2).
  */
-function isInstallTokenViewer403(e) {
-  return /\bHTTP 403\b/.test(String(e?.message ?? e ?? ""));
+function isInstallTokenViewer403(e, bot) {
+  if (!/\[bot\]$/i.test(bot || "")) return false;
+  const msg = String(e?.message ?? e ?? "");
+  return /\bHTTP 403\b/.test(msg) && /Resource not accessible by integration/i.test(msg);
 }
 
 /**
