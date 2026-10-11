@@ -142,6 +142,47 @@ export const GUARD_SHAPED_PATTERNS = [
 const GUARD_REQUESTED = /\bguard\b|가드|\[guard\]/i;
 
 /**
+ * #232 (gap P-6, E-7) — **이슈의 done_when은 계약의 원본이다.** 큐 진입 심사(`admission.js`)가 "명시적 job인가"를
+ * 이 정규식 하나로 판정하고, 아래 파서가 같은 정규식으로 그 절을 찾는다 — 둘이 갈라지면 심사를 통과한 이슈가
+ * 여기서 "항목 없음"으로 읽혀 검사가 조용히 열린다(fail open). 그래서 정규식은 여기 한 벌만 있고 admission이 import한다
+ * (admission은 이미 이 모듈을 import하므로 순환이 생기지 않는다; 반대 방향으로 두면 순환이다).
+ */
+export const DONE_WHEN_RE = /^#{2,3}\s*done[_ ]when\b|^done_when:/im;
+const CHECKLIST_ITEM = /^ {0,3}[-*+]\s+\[[ xX]\]\s+(.*?)\s*$/;
+const LEADING_TEST_ID = /^`(test_[A-Za-z0-9_]+)`\s*(?:[—–:-]+\s*)?/;
+const ANY_TEST_ID = /`(test_[A-Za-z0-9_]+)`/;
+const NEXT_HEADING = /^#{1,6}\s/;
+/** `must_not:` 같은 맨 키 줄 — 이슈 본문에서 체크리스트 뒤에 붙는 다음 블록의 시작이다. */
+const NEXT_BARE_KEY = /^[A-Za-z_][\w-]*:\s*$/;
+
+/**
+ * 이슈 본문의 done_when 절(`DONE_WHEN_RE`가 찾는 첫 제목 아래)에서 체크리스트 항목(`- [ ]`/`- [x]`)을 읽는다.
+ * 절은 다음 제목이나 맨 키 줄(`must_not:`)에서 끝나고, 체크리스트가 아닌 줄은 항목이 아니다.
+ * → `[{id, text}]`. id는 백틱 안 `test_…` 이름, 없으면 항목 순번 `issue-dw<n>`. text는 맨 앞의 백틱 id와
+ * 구분자(`—`/`:`/`-`)를 뗀 나머지(id가 앞에 없으면 항목 전체). 절이 없거나 항목이 없으면 `[]`.
+ */
+export function issueDoneWhenItems(body) {
+  const text = String(body ?? "");
+  const m = DONE_WHEN_RE.exec(text);
+  if (!m) return [];
+  const lineEnd = text.indexOf("\n", m.index);
+  if (lineEnd < 0) return [];
+  const items = [];
+  for (const line of text.slice(lineEnd + 1).split(/\r?\n/)) {
+    if (NEXT_HEADING.test(line) || NEXT_BARE_KEY.test(line)) break;
+    const c = CHECKLIST_ITEM.exec(line);
+    if (!c || !c[1]) continue;
+    const lead = LEADING_TEST_ID.exec(c[1]);
+    if (lead) { items.push({ id: lead[1], text: c[1].slice(lead[0].length) }); continue; }
+    const any = ANY_TEST_ID.exec(c[1]);
+    items.push({ id: any ? any[1] : `issue-dw${items.length + 1}`, text: c[1] });
+  }
+  return items;
+}
+export const ISSUE_DONE_WHEN_NONE = "done_when: issue has no items — the plan's contract stands alone";
+const ISSUE_NOT_COVERED = "issue done_when not covered by the plan:";
+
+/**
  * ── 수용 계약 (리뷰 효율 Task 1, Structure A) ──────────────────────────────────
  * done_when 각 항목은 **어떻게 확인되는지**(`check {kind, ref}`)와 리뷰어가 적용할 **한 줄 기준**
  * (`rubric`) 중 적어도 하나를 지녀야 한다. 이 하나의 계약이 세 곳에서 쓰인다: 구현자의 핸드오프 전
@@ -228,7 +269,7 @@ export function deriveReworkPins({ mustFix = [], doneWhen = [] } = {}) {
  * `plan.v1` 핸드오프를 CHARTER의 plan 규칙으로 검사한다. 반환은 사유 문자열 배열(빈 배열 = 유효).
  * 스키마 검사와 별개다 — 스키마는 "모양", 이것은 "계약".
  */
-export function validatePlanHandoff(plan, { maxDoneWhen = 6, issueBody = "" } = {}) {
+export function validatePlanHandoff(plan, { maxDoneWhen = 6, issueBody = "", notes = null } = {}) {
   const reasons = [];
   if (!plan || typeof plan !== "object") return reasons;
   const doneWhen = Array.isArray(plan.done_when) ? plan.done_when : [];
@@ -292,6 +333,28 @@ export function validatePlanHandoff(plan, { maxDoneWhen = 6, issueBody = "" } = 
     if (!hasUsableCheck(d, null) && !hasRubric) reasons.push(`acceptance contract incomplete: ${id}`);
   });
 
+  // (e) #232 (E-7) — 이슈의 done_when 항목은 **전부** 덮여야 한다. 덮음 = plan 항목의 `check.ref`가 이슈 항목의 `test_…` id와
+  //     같거나, plan 항목의 `covers_issue`가 그 id(`test_…` 또는 `issue-dw<n>`)를 부른다. 옛 `verify` 철자와 텍스트 일치는
+  //     덮음이 아니다. 계획이 이슈에 없는 항목을 더하는 것은 허용(상한은 (b)). id는 (a)처럼 trim·대소문자를 가리지 않는다.
+  //     항목이 0개면 통과하고 기록 한 줄을 `notes`에 남긴다 — 사유가 아니므로 `reasons`(곧 실패·수리 턴)에 넣지 않는다.
+  const issueItems = issueDoneWhenItems(issueBody);
+  if (!issueItems.length) {
+    if (Array.isArray(notes)) notes.push(ISSUE_DONE_WHEN_NONE);
+  } else {
+    const norm = (s) => String(s).trim().toLowerCase();
+    const byRef = new Set();
+    const byCoversIssue = new Set();
+    for (const d of doneWhen) {
+      if (d?.check && typeof d.check === "object" && typeof d.check.ref === "string") byRef.add(norm(d.check.ref));
+      if (Array.isArray(d?.covers_issue)) for (const c of d.covers_issue) byCoversIssue.add(norm(c));
+    }
+    for (const it of issueItems) {
+      const id = norm(it.id);
+      const covered = byCoversIssue.has(id) || (id.startsWith("test_") && byRef.has(id));
+      if (!covered) reasons.push(`${ISSUE_NOT_COVERED} ${it.id} — "${[...it.text].slice(0, 80).join("")}"`);
+    }
+  }
+
   return reasons;
 }
 
@@ -329,6 +392,11 @@ export function verifyStage({ stage, out, transcriptText, agentsLog, roster = []
    * plan validator actually found something; the same strings are also pushed to `reasons`.
    */
   let planRepair = null;
+  /**
+   * #232 — the plan validator's **non-failing** record lines (today only "issue has no items"). Kept apart
+   * from `reasons`/`planRepair` so a record never fails the stage or triggers a repair turn. Null when empty.
+   */
+  let planNotes = null;
   /*
    * 산출물은 디스패처의 최종 텍스트 하나만 믿지 않는다(KTB-7). 트랜스크립트의 Workflow 결과 →
    * result의 ```json 펜스 → 맨 JSON 순으로 훑고, **스키마를 통과하는 첫 후보**가 이긴다.
@@ -407,8 +475,10 @@ export function verifyStage({ stage, out, transcriptText, agentsLog, roster = []
   // Task 9(KTB-51): 이 검증기의 사유는 결정적·기계 판정이라 한 번의 수리 턴으로 되먹일 수 있다 —
   // `planRepair`로 따로 실어 run-stage가 "순수 계획-계약 결함"만 골라 수리하게 한다.
   if (stage === "plan" && data) {
-    const pr = validatePlanHandoff(data, { maxDoneWhen: planLimits?.max_done_when ?? 6, issueBody });
+    const notes = [];
+    const pr = validatePlanHandoff(data, { maxDoneWhen: planLimits?.max_done_when ?? 6, issueBody, notes });
     if (pr.length) { reasons.push(...pr); planRepair = pr; }
+    if (notes.length) planNotes = notes;
   }
   for (const role of roster) {
     if (!agentsLog.completed.includes(rolePrefix + role)) reasons.push(`roster role not completed: ${role}`);
@@ -471,5 +541,5 @@ export function verifyStage({ stage, out, transcriptText, agentsLog, roster = []
   // KTB-15b M1: 어느 후보가 이겼는지(트랜스크립트 파일 읽기냐, task-notification이냐, envelope 펜스냐)는
   // 사후 감사의 provenance다 — `extractStageArtifact`는 이미 계산해 뒀는데(ok일 때만 `source`가 있다)
   // 지금까지 여기서 버려졌다. run-stage가 이 값을 run 기록 한 줄로 남긴다(§run-stage.js `artifact:`).
-  return { ok: reasons.length === 0, reasons, data, source: artifact.source ?? null, qaShortfall, planRepair };
+  return { ok: reasons.length === 0, reasons, data, source: artifact.source ?? null, qaShortfall, planRepair, planNotes };
 }
