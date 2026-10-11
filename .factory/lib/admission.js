@@ -11,9 +11,9 @@ import { neverAutomateHits } from "./verify-stage.js";
  *   3. **큐 길이**(`back_pressure.queue_max`) — 외부 에이전트의 큐 홍수. `awaiting_review_max`는 리뷰 대기 수지 큐 길이가 아니다.
  *   4. **자기생성 이슈의 상한**(`self_generated.open_max`, `depth_max`) — 실측 증식률(캠페인 28머지 → 자기생성 7 = 0.25/머지)에서
  *      루프는 이미 수렴한다. 이 상한은 지문 드리프트 같은 결함에 대한 보험이다. 자기생성인지는 **러너가 쓴 마커와 작성 계정**으로
- *      판정한다 — 제출자의 자기 신고(`by=`)가 아니다. 심사하는 이슈와 기원 사슬의 상한은 **마커 또는 라벨**로 건다(#231 rework cf1):
- *      gh.issue()가 작성자를 싣기 전에는 작성자 갈래가 프로덕션에서 돈 적이 없고, 그것을 켜면 공유 계정(PAT 폴백)에서 소유자가 쓴
- *      보통 피처가 open_max에, 그 피처에서 수확한 flaky가 depth_max에 걸린다. 공장이 연 이슈는 어느 계정이든 마커·라벨을 단다.
+ *      판정한다 — 제출자의 자기 신고(`by=`)가 아니다. 상한의 판정(`isSelfGenerated`)은 넓은 쪽(마커 또는 라벨 또는 공장 작성자)
+ *      그대로다(#231 plan non_goals[1]): 좁히면 공장이 사람 계정(PAT 폴백)으로 연 이슈가 세지지 않아 증식 상한이 조용히 풀린다.
+ *      다만 저장소 소유자 로그인은 작성자 갈래에서 뺀다(`capFactoryLogins`) — 공유 계정(PAT 폴백)에서 소유자의 사람 일이 상한에 막히지 않게.
  *
  * 리허설(ADR-025)과 같은 자리에서, 같은 방식(배선된 검사기, fail closed)으로 돈다. 상한 상수는 CHARTER에 있고 사람만 고친다.
  */
@@ -32,8 +32,8 @@ const isFactoryLogin = (login, factoryLogins) => !!login && (Array.isArray(facto
 
 /**
  * 공장이 만든 이슈인가 — 마커(개선·하네스·flaky) **또는** 공장 라벨 **또는** 작성 계정이 팩토리 계정.
- * 진행 중 자기생성 수가 쓰는 넓은 판정이다. 공장이 소유자 PAT으로 연 이슈(ADR-038 폴백)와 마커만 남은 옛 이슈도 상한에는 세진다.
- * `queueAdmission`은 심사하는 이슈와 기원 사슬에 `factoryLogins` 없이 부른다(rework cf1 — 마커·라벨만, 작성자 갈래 없이).
+ * **상한(open_max·depth_max)·진행 중 자기생성 수·기원 사슬**이 쓰는 넓은 판정이다. #231은 이것을 좁히지 않는다: 공장이 소유자 PAT으로
+ * 연 이슈(ADR-038 폴백)와 마커만 남은 옛 이슈도 상한에는 세져야 한다 — 좁히면 증식 상한이 조용히 풀린다(fail open).
  * done_when 면제는 더 좁은 `doneWhenExemption`이 따로 판정한다.
  */
 export function isSelfGenerated(issue, factoryLogins = []) {
@@ -80,6 +80,8 @@ const PATH_CHARS_RE = /^[\w.*/@{}!,[\]-]+$/;
 const LIST_ITEM_RE = /^\s*(?:[-*+]|\d+[.)])[ \t]+(.*)$/;
 /** 점이 든 산문 약어(`e.g`·`i.e`) — 경로 모양이지만 경로가 아니다. */
 const ABBREV_RE = /^(?:[a-z]\.)+[a-z]?$/i;
+/** 버전 번호(`v1.2`·`2.0.1`) — 경로 모양이지만 경로가 아니다(self-critique, #231). */
+const VERSION_RE = /^v?\d+(?:\.\d+)+$/i;
 
 /**
  * `## Impact paths`(또는 `###`) 절의 경로. 다른 절의 백틱은 경로가 아니다 — 절은 다음 `#`·`##`·`###` 제목에서 끝난다.
@@ -101,7 +103,8 @@ export function impactPathsOf(body) {
   if (!m) return [];
   const lines = [];
   let fence = false;
-  for (const line of text.slice(m.index + m[0].length).split("\n")) {
+  // rework cf1·qa1 — 웹 UI로 쓴 본문은 CRLF다: `\r`이 남으면 LIST_ITEM_RE의 `(.*)$`가 맞지 않아 백틱 없는 항목이 사라진다.
+  for (const line of text.slice(m.index + m[0].length).split(/\r?\n/)) {
     if (/^\s*(?:```|~~~)/.test(line)) fence = !fence;
     else if (!fence && /^#{1,3}\s/.test(line)) break;
     lines.push(line);
@@ -110,7 +113,7 @@ export function impactPathsOf(body) {
   const keep = (raw, { shaped }) => {
     const p = String(raw).trim().replace(/[,.;:]+$/, "");
     if (!p || !PATH_CHARS_RE.test(p)) return;
-    if (shaped && (!/[/.]/.test(p) || ABBREV_RE.test(p))) return;
+    if (shaped && (!/[/.]/.test(p) || ABBREV_RE.test(p) || VERSION_RE.test(p))) return;
     if (!out.includes(p)) out.push(p);
   };
   for (const line of lines) {
@@ -119,9 +122,9 @@ export function impactPathsOf(body) {
     if (!item) continue;
     const plain = item[1].replace(/`[^`\n]*`/g, " ");
     for (const tok of plain.split(/[^\w.*/@{}!\[\]-]+/)) {
-      keep(tok, { shaped: true });
+      // `**굵게**`는 속만 읽는다 — 별표째로 받으면 `**a/b.toml**`이라는 찌꺼기 항목이 함께 나온다(self-critique, #231)
       const bold = /^(\*\*|__)([^/].*[^/])\1$/.exec(tok);
-      if (bold) keep(bold[2], { shaped: true });
+      keep(bold ? bold[2] : tok, { shaped: true });
     }
   }
   return out;
@@ -132,16 +135,15 @@ export function impactPathsOf(body) {
  *   issue: {number, body, labels, author} · queued: 큐 라벨을 가진 이슈들 · openSelfGenerated: 진행 중인 자기생성 이슈들
  *   byNumber(n): 기원 이슈를 돌려준다(없으면 null) · factoryLogins: 팩토리 계정 이름들
  *   factoryLoginsResolved: 그 이름들을 실제로 알아냈는가(생략하면 목록이 비었는지로 본다) — #231의 거부 이유를 가른다
+ *   repoOwner: 저장소 소유자 로그인 — 상한의 작성자 갈래에서 뺀다(`capFactoryLogins`)
  */
-export function queueAdmission({ issue, charter, queued = [], openSelfGenerated = [], byNumber = () => null, factoryLogins = [], factoryLoginsResolved = undefined }) {
+export function queueAdmission({ issue, charter, queued = [], openSelfGenerated = [], byNumber = () => null, factoryLogins = [], factoryLoginsResolved = undefined, repoOwner = null }) {
   const caps = { ...SELF_GENERATED_DEFAULTS, ...(charter?.self_generated || {}) };
   const queueMax = Number.isInteger(charter?.back_pressure?.queue_max) ? charter.back_pressure.queue_max : caps.queue_max;
   const reasons = [];
-  // rework cf1 — 상한은 러너가 쓴 마커·라벨로만 건다(작성자 갈래 없이: 공유 계정에서는 소유자의 피처도 공장 작성자다).
-  // plan non_goal "open_max/depth_max·openSelfGenerated·기원 사슬의 판정을 바꾸지 않는다"와의 관계: #231 전의 gh.issue()는 작성자를
-  // 싣지 않아 작성자 갈래가 프로덕션에서 한 번도 참이 된 적이 없다 — 지금까지 실제로 돈 판정은 마커 또는 라벨이고, 세 상한 입력
-  // (이 이슈, openSelfGenerated, 기원 사슬)이 모두 `[]`로 그 판정을 그대로 지킨다. 작성자를 실은 것이 상한을 바꾸지 않게 하는 것이다.
-  const self = isSelfGenerated(issue, []);
+  // rework spec1 — 세 상한 입력(이 이슈, openSelfGenerated, 기원 사슬)은 plan non_goals[1]의 판정(마커 또는 라벨 또는 공장 작성자)을 쓴다.
+  const capLogins = capFactoryLogins(factoryLogins, repoOwner);
+  const self = isSelfGenerated(issue, capLogins);
   const body = String(issue?.body ?? "");
 
   // #231 — done_when 면제는 상한의 판정(`self`)보다 좁다: 마커는 공장 로그인이 연 이슈에서만 면제한다(`doneWhenExemption`).
@@ -179,13 +181,27 @@ export function queueAdmission({ issue, charter, queued = [], openSelfGenerated 
     let depth = gen(issue), cur = originOf(issue), hops = 0;
     while (cur && hops++ < 10) {
       const parent = byNumber(cur.number);
-      if (!parent || !isSelfGenerated(parent, [])) break;
+      if (!parent || !isSelfGenerated(parent, capLogins)) break;
       depth += gen(parent);
       cur = originOf(parent);
     }
     if (depth > caps.depth_max) reasons.push(`self-generated generation ${depth} > ${caps.depth_max} (self_generated.depth_max) — an issue the factory made from an issue the factory made`);
   }
   return { ok: reasons.length === 0, reasons, self_generated: self };
+}
+
+/**
+ * 상한의 작성자 갈래가 쓰는 공장 로그인 — **저장소 소유자 로그인은 뺀다**(self-critique, #231 dw5 "factory work is not refused").
+ * 공장이 소유자 계정으로 도는 저장소(PAT 폴백)에서는 소유자가 공장 로그인 목록에 든다. #231 전에는 gh.issue()가 작성자를 싣지 않아
+ * 작성자 갈래가 돈 적이 없었는데, 이제 돌면 소유자의 보통 피처가 전부 자기생성이 되어 open_max에 막히고, 그 피처에서 수확한 flaky는
+ * 2세대로 depth_max에 막힌다. 소유자 로그인은 사람과 에이전트를 가를 수 없는 공유 신원이다 — gh.js `identityOf`가 같은 규칙(팩토리
+ * 로그인 = 저장소 소유자 → `personal`)으로 작성자 귀속을 끈다. 공장이 연 이슈는 마커·라벨 갈래로 여전히 세지고, 앱·머신 유저 작성자도
+ * 그대로 센다. done_when 면제(`doneWhenExemption`)는 이 목록이 아니라 전체 목록을 쓴다(공유 계정의 한계는 plan non_goals[3]로 핀).
+ */
+function capFactoryLogins(factoryLogins, repoOwner) {
+  const all = Array.isArray(factoryLogins) ? factoryLogins : [];
+  const owner = typeof repoOwner === "string" && repoOwner.trim() ? repoOwner.trim().toLowerCase() : null;
+  return owner ? all.filter((l) => String(l).toLowerCase() !== owner) : all;
 }
 
 const ACTIVE = ["factory:queue", "factory:ready", "factory:planned", "factory:in-progress", "factory:rework", "factory:awaiting-review", "factory:approved", "factory:blocked"];
@@ -208,12 +224,13 @@ export function makeQueueAdmission({ gh, charter, factoryLogins = null }) {
       for (const label of ["factory-improvement", "factory:flaky", "factory:harness"]) {
         for (const c of await gh.searchIssues(label)) candidates.set(c.number, c);
       }
+      const repoOwner = typeof gh?.repo === "string" ? gh.repo.split("/")[0] : null;
+      const capLogins = capFactoryLogins(logins, repoOwner);
       const openSelfGenerated = [];
       for (const c of candidates.values()) {
         if (c.number === it.number) continue;
         const full = await gh.issue(c.number);
-        // 상한 입력은 셋 다 같은 판정(마커 또는 라벨, rework cf1 — queueAdmission의 `self` 주석)으로 센다.
-        if (labelsOf(full).some((l) => ACTIVE.includes(l)) && isSelfGenerated(full, [])) openSelfGenerated.push({ number: c.number });
+        if (labelsOf(full).some((l) => ACTIVE.includes(l)) && isSelfGenerated(full, capLogins)) openSelfGenerated.push({ number: c.number });
       }
       const cache = new Map();
       const byNumber = (n) => cache.get(n) ?? null;
@@ -226,7 +243,7 @@ export function makeQueueAdmission({ gh, charter, factoryLogins = null }) {
         if (!parent) break;
         cur = originOf(parent);
       }
-      return queueAdmission({ issue: it, charter, queued, openSelfGenerated, byNumber, factoryLogins: logins, factoryLoginsResolved: loginsResolved });
+      return queueAdmission({ issue: it, charter, queued, openSelfGenerated, byNumber, factoryLogins: logins, factoryLoginsResolved: loginsResolved, repoOwner });
     } catch (e) {
       return { ok: false, reasons: [`queue admission could not be read — ${e?.message || e}`], self_generated: null };
     }
