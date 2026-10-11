@@ -5,7 +5,8 @@ import { latestHandoff } from "./handoff.js";
 import { tierFloor, maxTier, normalizeTier } from "./gates.js";
 import { changedFiles } from "./changed-files.js";
 import { buildHouseRules } from "./house-rules.js";
-import { commentsSinceRequeue, latestSelfGateFindings, kRestartState, TRANSITION_TO } from "./retro/issue-comments.js";
+import { commentsSinceRequeue, latestSelfGateFindings, kRestartState, TRANSITION_TO, countedTransitionIndices, mergeConflictRework, conflictExemptionNote, conflictRoundsUsed } from "./retro/issue-comments.js";
+import { CONFLICT_ROUND_EXCLUDED_RUNS } from "./budget.js";
 
 const ROSTER_STAGE = { plan: "plan", review: "review" };
 
@@ -310,6 +311,13 @@ export async function buildContext({ root, gh, issue, stage, run = null, base = 
     ...(stage === "implement" && Array.isArray(mergeConflicts) && mergeConflicts.length ? { merge_conflicts: [...mergeConflicts] } : {}),
   };
   ctx.loaded = await loadedFor({ ctx, roleBlock, gh, comments });
+  // #212 dw5 — the merge stage's reason was reworded: not a conflict-only round, and run-stage writes this line so it is not silent.
+  if (stage === "implement") { const note = conflictExemptionNote(commentsSinceRequeue(comments)); if (note) ctx.conflict_only_note = note; }
+  // #212 skeptic f5 — the bound is LIFETIME on both sides: once the issue has used it, a conflict round is a normal round, and it says so.
+  if (stage === "implement" && conflictBoundSpent(comments, ctx.issue?.number)
+    && conflictOnlyOf({ comments: commentsSinceRequeue(comments), mergeConflicts: ctx.merge_conflicts, review: ctx.handoffs?.review ?? null })) {
+    ctx.conflict_only_note = `conflict-only: not applied — this issue already used its CONFLICT_ROUND_EXCLUDED_RUNS=${CONFLICT_ROUND_EXCLUDED_RUNS} conflict round(s) (ADR-041); this round counts as a normal round (cost and K)`;
+  }
   mkdirSync(join(root, ".factory/out"), { recursive: true });
   writeFileSync(join(root, ".factory/out/context.json"), JSON.stringify(ctx, null, 2));
   // 역할별 파일(H4). 오케스트레이터만 `context.json`(전체)을 보고, 역할은 자기 이름이 붙은 파일만 본다.
@@ -416,6 +424,32 @@ export function loadedJsonLine(ctx) {
 }
 
 /**
+ * #212 (ADR-041) — **이 implement 라운드는 충돌 해소 전용인가.** 셋 다 러너의 사실일 때만 `{ approved_head }`, 아니면 null:
+ *   (i) 창(`commentsSinceRequeue`)의 마지막 rework 전이가 머지 스테이지의 CONFLICTING rework다(`mergeConflictRework` — 코멘트 전체 모양,
+ *       `by=` 러너; 사람의 전이·다른 글 안에 인용된 마커는 아니다). K 면제는 여기서 끄고 본다 — 면제된 전이도 "마지막 rework"다.
+ *   (ii) 러너가 base 병합에서 넘긴 충돌 경로(`merge_conflicts`, run-stage `pendingMerge.paths`)가 비어 있지 않다.
+ *   (iii) review 핸드오프가 `approved`이고 verdict가 하나 이상이며 전부 `approve`다. 승인된 head(`head_sha`, 40-hex)가 conflict-scope의 기준이다.
+ * 하나라도 아니면 키 자체가 없다 — `loaded`는 오늘과 바이트까지 같다. 위조된 마커만으로는 켜지지 않는다: (ii)는 진짜 git 충돌이어야 하고,
+ * 켜져도 비용·K 면제는 러너가 진짜 merge 커밋에서 잰 conflict-scope가 GREEN일 때만 쓴다(run-stage).
+ */
+/**
+ * skeptic f5 — 이 이슈가 평생 쓴 conflict 라운드(러너 마커, 재큐와 무관)가 상한에 닿았나. K의 창은 재큐마다 열리지만 비용 상한은 평생이다 —
+ * 그래서 **쓰는 쪽**이 평생으로 묶는다: 닿았으면 conflict-only를 켜지 않고, 그러면 마커(K)도 태그(비용)도 나가지 않는다(둘 다 또는 둘 다 아님).
+ */
+const conflictBoundSpent = (comments, issue) => conflictRoundsUsed(comments, issue) >= CONFLICT_ROUND_EXCLUDED_RUNS;
+
+export function conflictOnlyOf({ comments, mergeConflicts, review }) {
+  if (!(Array.isArray(mergeConflicts) && mergeConflicts.length)) return null;
+  const list = Array.isArray(comments) ? comments : [];
+  const idx = countedTransitionIndices(list, "factory:rework", { exemptConflictRounds: false });
+  if (!idx.length || !mergeConflictRework(list[idx[idx.length - 1]]?.body)) return null;
+  const verdicts = review?.verdicts;
+  if (review?.decision !== "approved" || !Array.isArray(verdicts) || !verdicts.length || !verdicts.every((v) => v?.verdict === "approve")) return null;
+  if (typeof review.head_sha !== "string" || !/^[0-9a-f]{40}$/.test(review.head_sha)) return null;
+  return { approved_head: review.head_sha };
+}
+
+/**
  * 로더가 돌려주던 것과 **같은 모양**의 객체를, LLM 없이. triage의 로스터는 context.json에서 비어 있으므로
  * (단일 명명 역할이지 토론 로스터가 아니다) 로더의 특례와 똑같이 `[{name:'triage', …}]`로 채운다.
  */
@@ -438,6 +472,8 @@ async function loadedFor({ ctx, roleBlock, gh, comments = [] }) {
    */
   const kRestartBrief = ctx.stage === "implement" ? kRestartState(commentsSinceRequeue(comments)).brief : null;
   const review = ctx.handoffs?.review ?? null;
+  const conflictOnly = ctx.stage === "implement" && !conflictBoundSpent(comments, ctx.issue?.number)
+    ? conflictOnlyOf({ comments: commentsSinceRequeue(comments), mergeConflicts: ctx.merge_conflicts, review }) : null;
   const mustFix = review?.decision === "rework"
     ? (Array.isArray(review.verdicts) ? review.verdicts : []).flatMap((v) => (Array.isArray(v?.must_fix) ? v.must_fix.filter(Boolean) : []))
     : [];
@@ -503,5 +539,7 @@ async function loadedFor({ ctx, roleBlock, gh, comments = [] }) {
     ...(Array.isArray(ctx.plan_repair) && ctx.plan_repair.length ? { plan_repair: ctx.plan_repair } : {}),
     // #143 (S3b): the source paths still conflicted in the base merge the stage left to the builder. Absent when no merge is pending.
     ...(Array.isArray(ctx.merge_conflicts) && ctx.merge_conflicts.length ? { merge_conflicts: ctx.merge_conflicts } : {}),
+    // #212: an approved PR's base conflict, resolution-only round (`conflictOnlyOf`). Absent unless all three runner facts hold.
+    ...(conflictOnly ? { conflict_only: true, approved_head: conflictOnly.approved_head } : {}),
   };
 }
