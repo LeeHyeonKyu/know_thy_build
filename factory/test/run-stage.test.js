@@ -6572,3 +6572,93 @@ test("test_200_scope_check_fails_open_visibly_on_git_read_error", async () => {
     expect(r.ok, name).toBe(false);
   }
 });
+
+// ── #257: a review gate whose verdict differs from the implement gate on the SAME head gets one diagnostic record line ──
+// #253 head b4aac9b: implement `unit` GREEN, review `unit` RED, requeue GREEN — same head, same command. The review record now
+// says so next to FACTORY_GATES; the line is diagnostic only (verdict, transition, factory/gates status and exit code unchanged).
+const HEAD_257 = "c".repeat(40);
+const review257 = async ({ implement, reviewGates }) => {
+  const lines = [], transitions = [], statuses = [];
+  const gh = {
+    comments: vi.fn(async () => [{ id: 1, createdAt: "2026-10-11T00:00:00Z", body: renderHandoff({ stage: "implement", issue: 253, summary: "s", data: { pr: 31, ...implement } }) }]),
+    prHeadSha: vi.fn(async () => implement.head_sha),
+  };
+  const run = makeFakeRun([
+    { match: (c, a) => c === "git" && a[0] === "fetch", result: { code: 0, stdout: "", stderr: "" } },
+    { match: (c, a) => c === "git" && a[0] === "checkout", result: { code: 0, stdout: "", stderr: "" } },
+  ]);
+  const deps = baseDeps({
+    checkoutHead: makeCheckoutHead({ gh, run, root: "/repo", issue: 253 }),
+    gates: async () => reviewGates,
+    // A review whose gates are not GREEN fails verification (the #253 path: needs-human); GREEN verifies.
+    verifyStage: ({ gates }) => (gates.status === "GREEN" ? { ok: true, reasons: [], data: { decision: "approved", verdicts: [] } } : { ok: false, reasons: [`gates ${gates.status}: failing=${gates.failing.join(",")}`], data: null }),
+    transition: vi.fn(async (t) => { transitions.push(JSON.stringify(t)); return { ok: true, to: t.to }; }),
+    reportStatus: vi.fn(async (s) => { statuses.push(JSON.stringify(s)); }),
+    runRecord: (l) => lines.push(...l),
+  });
+  const code = await runStage({ stage: "review", issue: 253, deps });
+  return { code, lines, transitions, statuses };
+};
+const gates257 = (status, level = "fast", head_sha = HEAD_257) => ({
+  schema: "factory.gates.v1", level, status, head_sha, passed: 9, failed: status === "GREEN" ? 0 : 1,
+  failing: status === "GREEN" ? [] : ["unit"], skipped: [], misconfigured: [], tests: { failing: [], excluded: [] },
+});
+const ENV_LINE_257 = "gates: verdict differs from the implement gate on the same head — environmental";
+
+test("test_257_review_gate_notes_a_verdict_differing_from_implement_on_the_same_head", async () => {
+  const withLine = await review257({ implement: { head_sha: HEAD_257, gates: { status: "GREEN", level: "fast" } }, reviewGates: gates257("RED") });
+  expect(withLine.lines.filter((l) => l === ENV_LINE_257)).toHaveLength(1);
+  // Written through the real record path, right next to the FACTORY_GATES verdict line.
+  const at = withLine.lines.indexOf(ENV_LINE_257);
+  expect(withLine.lines[at - 1]).toMatch(/^FACTORY_GATES: level=fast status=RED /);
+  // The same run without the implement gate data: no line — and everything that decides is byte-identical.
+  const without = await review257({ implement: { head_sha: HEAD_257 }, reviewGates: gates257("RED") });
+  expect(without.lines).not.toContain(ENV_LINE_257);
+  expect(withLine.code).toBe(2);
+  expect(withLine.code).toBe(without.code);
+  expect(withLine.transitions).toEqual(without.transitions);
+  expect(JSON.parse(withLine.transitions[0]).to).toBe("factory:needs-human");
+  expect(withLine.statuses).toEqual(without.statuses);
+  expect(JSON.parse(withLine.statuses[0])).toMatchObject({ context: "factory/gates", state: "failure", sha: HEAD_257 });
+  expect(withLine.lines.filter((l) => l !== ENV_LINE_257)).toEqual(without.lines);
+  // The reverse direction (implement RED is never handed to review today, but the comparison is symmetric) also notes it.
+  const reverse = await review257({ implement: { head_sha: HEAD_257, gates: { status: "RED", level: "fast" } }, reviewGates: gates257("GREEN") });
+  expect(reverse.lines).toContain(ENV_LINE_257);
+});
+
+test("test_257_no_environmental_note_when_verdicts_match_heads_or_levels_differ_or_implement_gates_missing", async () => {
+  const control = await review257({ implement: { head_sha: HEAD_257 }, reviewGates: gates257("RED") });
+  const same = async (implement, reviewGates) => {
+    const r = await review257({ implement, reviewGates });
+    expect(r.lines).not.toContain(ENV_LINE_257);
+    return r;
+  };
+  // 1. statuses match (both GREEN; both RED)
+  const bothGreen = await same({ head_sha: HEAD_257, gates: { status: "GREEN", level: "fast" } }, gates257("GREEN"));
+  const greenControl = await review257({ implement: { head_sha: HEAD_257 }, reviewGates: gates257("GREEN") });
+  expect(bothGreen).toEqual(greenControl);
+  expect(await same({ head_sha: HEAD_257, gates: { status: "RED", level: "fast" } }, gates257("RED"))).toEqual(control);
+  // 2. levels differ — implement fast vs review full is a different gate set, not the environment
+  const fullRed = gates257("RED", "full");
+  const fullControl = await review257({ implement: { head_sha: HEAD_257 }, reviewGates: fullRed });
+  expect(await same({ head_sha: HEAD_257, gates: { status: "GREEN", level: "fast" } }, fullRed)).toEqual(fullControl);
+  // 3. the implement gate ran on another sha: after a self-mirror commit builder_head_sha differs from head_sha
+  expect(await same({ head_sha: HEAD_257, builder_head_sha: "b".repeat(40), mirror_sha: HEAD_257, gates: { status: "GREEN", level: "fast" } }, gates257("RED"))).toEqual(control);
+  //    …and a review gate that measured a different head than the implement gate
+  const otherHead = gates257("RED", "fast", "d".repeat(40));
+  const otherControl = await review257({ implement: { head_sha: HEAD_257 }, reviewGates: otherHead });
+  expect(await same({ head_sha: HEAD_257, gates: { status: "GREEN", level: "fast" } }, otherHead)).toEqual(otherControl);
+  // 4. no implement gate data: an old handoff (covered by `control`), or a fake checkoutHead without the field
+  const lines = [];
+  const deps = baseDeps({
+    checkoutHead: async () => ({ ok: true, sha: HEAD_257, pr: 31 }),
+    gates: async () => gates257("RED"),
+    verifyStage: () => ({ ok: false, reasons: ["gates RED"], data: null }),
+    transition: vi.fn(async (t) => ({ ok: true, to: t.to })),
+    runRecord: (l) => lines.push(...l),
+  });
+  expect(await runStage({ stage: "review", issue: 253, deps })).toBe(2);
+  expect(lines.some((l) => l.startsWith("FACTORY_GATES: "))).toBe(true);
+  expect(lines).not.toContain(ENV_LINE_257);
+  expect(control.lines).not.toContain(ENV_LINE_257);
+});

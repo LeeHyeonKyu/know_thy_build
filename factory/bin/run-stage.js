@@ -117,6 +117,25 @@ export function stageClaudeEnv({ root, stage, harnessIssue = false, harness = nu
 const GATED_STAGES = new Set(["implement", "review", "merge"]);
 export const GATES_SELF_REPORTED = "gates: self-reported by workflow (no gates.json from this run — unverified)";
 /**
+ * #257 — 리뷰 게이트가 **같은 head·같은 level**에서 implement 게이트와 다른 status를 냈다는 진단 한 줄(#253: implement GREEN,
+ * 리뷰 RED, 재큐 뒤 GREEN — 같은 head·같은 명령). 기록에 더해질 뿐 판정·전이·factory/gates 상태·종료 코드는 바꾸지 않는다.
+ * 문구는 이슈가 정한 그대로다("environmental"은 원인 확정이 아니라 이슈의 이름이다 — plan dissent d1, open_risks).
+ */
+export const GATES_DIFFER_FROM_IMPLEMENT = "gates: verdict differs from the implement gate on the same head — environmental";
+/**
+ * 줄을 낼지 정하는 순수 함수. `implementGates`는 makeCheckoutHead가 implement handoff에서 읽어 온 `{ status, level, head_sha }`
+ * (head_sha = `builder_head_sha ?? head_sha` — 미러 커밋이 head를 바꾼 라운드는 sha가 갈라져 줄이 서지 않는다), `gates`는
+ * 이번 리뷰의 게이트 파일. 어느 한쪽이라도 비면, head·level이 다르면, status가 같으면 null이다.
+ */
+export function implementGateDiffersLine(implementGates, gates, reviewedHead = null) {
+  if (!implementGates || !gates) return null;
+  const head = gates.head_sha ?? reviewedHead;
+  if (!implementGates.head_sha || !head || implementGates.head_sha !== head) return null;
+  if (!implementGates.level || implementGates.level !== gates.level) return null;
+  if (!implementGates.status || !gates.status || implementGates.status === gates.status) return null;
+  return GATES_DIFFER_FROM_IMPLEMENT;
+}
+/**
  * 최종 리뷰 A-SF1 — qa 증거 부족을 이 라운드의 판정으로 접을 때 쓰는 **합성 must_fix의 id**.
  * 고정 id인 이유: 같은 부족이 두 번 접히지 않고(dedupe), rework 응답에서 사람과 builder가 그 항목을
  * 이름으로 부를 수 있어야 한다.
@@ -381,6 +400,7 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runAt
   let stageBranchName = null;                                         // Task 8b — implement가 스테이지 스스로 체크아웃한 브랜치(세션 뒤 같은 자리인지 다시 묻는다)
   let pendingMerge = null;                                            // #143 — 빌더에게 넘긴 base 병합 `{ sha, paths }`(세션 뒤 끝났는지 다시 묻는다)
   let driftRefusal = null;                                            // KTB-43 — 핸드오프 뒤의 커밋이 드리프트 경로 밖이었다(핸드오프를 쓴 뒤에 거부한다)
+  let implementGates = null;                                          // #257 — review: checkoutHead가 읽어 온 implement 게이트 {status, level, head_sha}(없으면 null)
   let checkoutSha = null;                                             // review/merge가 실제로 게이트를 돌린 PR head — review는 아래에서 런 레코드 마지막 줄에, merge는 runMergeStage로 그대로 넘겨 기록한다
   try {
     // 로컬 진입(§4.2.5): backlog 이슈를 사람이 손으로 큐에 넣기 전에 로컬에서 먼저 락을 잡았을 때,
@@ -594,6 +614,7 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runAt
         return 2;
       }
       checkoutSha = co.sha;
+      implementGates = co.implement_gates ?? null;
       // 1.4.21 (L22) — 하네스 이슈의 리뷰는 브랜치의 harness.toml로 게이트를 돈다(implement의 1.4.3 규칙과 같다).
       if (stage === "review" && harnessLabeled && d.reloadHarness) record([harnessReloadLine(await d.reloadHarness(), "after the review checkout")]);
     }
@@ -923,9 +944,12 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runAt
      * 그 RED의 뿌리는 7일짜리 Actions 아티팩트에만 남는다 — 루프가 그것을 읽을 수는 없다(spec §3).
      * 새 기록자는 만들지 않는다: 같은 `record()`(= `appendRunRecord`)를 타고 같은 줄 묶음으로 나간다.
      */
+    // #257 — 진단 한 줄(판정 불변). review만: implement 게이트와 같은 head·같은 level에서 status가 갈렸을 때.
+    const envDiffLine = stage === "review" ? implementGateDiffersLine(implementGates, gates, checkoutSha) : null;
+    const envDiffNote = envDiffLine ? [envDiffLine] : [];
     const gatesNote = gates == null
       ? (GATED_STAGES.has(stage) ? [GATES_SELF_REPORTED] : [])
-      : gates.schema === "factory.gates.v1" ? [verdictLine(gates), ...gatesDetailLines(gates, stamp), ...testEnvNote] : [];
+      : gates.schema === "factory.gates.v1" ? [verdictLine(gates), ...envDiffNote, ...gatesDetailLines(gates, stamp), ...testEnvNote] : [];
     // BLOCKED은 "판정 불가"다 — GREEN도 RED도 아니므로 needs-human이 아니라 blocked로 세운다.
     if (gates?.status === "BLOCKED") {
       const t = await d.transition({ to: "factory:blocked", reason: gates.blocked_reason || "gates could not be decided" });
@@ -2787,7 +2811,11 @@ export function makeCheckoutHead({ gh, run, root, issue }) {
     if (fetch.code !== 0) return { ok: false, reason: `git fetch failed: ${fetch.stderr.trim()}` };
     const checkout = await run("git", ["checkout", "--detach", head_sha], { cwd: root });
     if (checkout.code !== 0) return { ok: false, reason: `git checkout failed: ${checkout.stderr.trim()}` };
-    return { ok: true, sha: head_sha, pr };
+    // #257 — implement 게이트 판정을 함께 돌려준다(선택 필드: handoff에 gates가 없으면 키 자체가 없다 — 기존 소비자는 그대로).
+    // 그 게이트가 돈 sha는 빌더의 head다(`builder_head_sha ?? head_sha`): 미러 커밋이 head를 바꿨으면 리뷰 head와 갈라진다.
+    const g = handoff.data.gates;
+    const implement_gates = g && typeof g === "object" ? { status: g.status ?? null, level: g.level ?? null, head_sha: handoff.data.builder_head_sha ?? head_sha } : null;
+    return { ok: true, sha: head_sha, pr, ...(implement_gates ? { implement_gates } : {}) };
   };
 }
 
