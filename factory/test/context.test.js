@@ -743,3 +743,97 @@ test("test_174_builder_context_takes_the_brief_bound_to_the_restart_transition",
   expect(loaded.k_restart_brief.findings).toEqual(real);
   expect(loaded.k_restart_brief.paths).toEqual(["factory/lib/self-gate.js"]);
 });
+
+/**
+ * #238 (P-14, M-8) dw1 — the plan repair turn carries the **whole rejected plan** next to the reasons. The chain is the real one:
+ * runStage → makeBuildContextDep (main()'s dep) → buildContext → `loaded.json` + every `context.<role>.json`, and the verdict comes
+ * from the real `verifyStage` (its `v.data` is the object the repair turn must see). `plan_repair` stays today's string[] — the
+ * shipped workflow tests `Array.isArray(loaded.plan_repair)` — and the plan rides in the sibling key `plan_repair_previous`.
+ */
+import { verifyStage as verifyStage238 } from "../lib/verify-stage.js";
+const out238 = (plan) => ({ is_error: false, result: "The workflow returned:\n```json\n" + JSON.stringify(plan) + "\n```" });
+const plan238 = (over = {}) => ({
+  schema: "factory.plan.v1", issue: 238, tier: "standard", roles: ["synthesizer", "skeptic"], rounds: 2,
+  // long fields on purpose: a carried plan that was cut short would not deep-equal the verdict's object.
+  done_when: Array.from({ length: 6 }, (_, i) => ({ id: `dw${i + 1}`, text: `behaviour ${i + 1} ` + "x".repeat(4000), verify: `test_238_case_${i + 1}`, level: "unit" })),
+  files_expected: ["factory/bin/run-stage.js"], non_goals: ["n".repeat(3000)], open_risks: ["r".repeat(3000)], orchestration: "workflow",
+  dissent_log: [{ id: "d2", role: "skeptic", severity: "high", objection: "o".repeat(2000), resolution: "unresolved — proceeding" }],
+  ...over,
+});
+function repairRun238({ firstData = undefined } = {}) {
+  const r = root();
+  const gh = { issue: vi.fn(async () => ({ number: 238, title: "T", body: "", labels: ["factory:ready"] })), comments: vi.fn(async () => []) };
+  const bad = plan238();                                                    // d2 uncovered → the validator rejects it
+  const good = plan238({ done_when: [...plan238().done_when.slice(0, 5), { id: "dw6", text: "covers d2", verify: "test_238_d2", level: "unit", covers: ["d2"] }] });
+  const verdicts = [], seen = [], lines = [];
+  let turn = 0;
+  const deps = {
+    charterReady: async () => true, trustWorkspace: async () => {}, claim: async () => ({ ok: true }),
+    heartbeat: async () => ({ stop() {} }), assertHandoff: async () => ({ ok: true }),
+    buildContext: makeBuildContextDep({ root: r, gh, issue: 238, stage: "plan", run: null, mergeBase: async () => null, recordLine: () => {} }),
+    resetAgentsLog: async () => {},
+    claudeP: async (_ctx, opts) => {
+      const outDir = join(r, ".factory/out");
+      const roles = JSON.parse(readFileSync(join(outDir, "loaded.json"), "utf8")).contexts;
+      seen.push({
+        opts,
+        loaded: JSON.parse(readFileSync(join(outDir, "loaded.json"), "utf8")),
+        roles: Object.fromEntries(Object.keys(roles).map((n) => [n, JSON.parse(readFileSync(join(outDir, `context.${n}.json`), "utf8"))])),
+      });
+      return out238(turn++ === 0 ? bad : good);
+    },
+    gates: async () => null,
+    verifyStage: ({ out }) => {
+      let v = verifyStage238({ stage: "plan", out, agentsLog: { starts: [], stops: [], completed: ["plan-synthesizer", "plan-skeptic"], orphans: [] }, roster: ["synthesizer", "skeptic"], rolePrefix: "plan-", expectedRounds: 2, orchestration: "workflow" });
+      if (verdicts.length === 0 && firstData !== undefined) v = { ...v, data: firstData };
+      verdicts.push(v);
+      return v;
+    },
+    writeHandoff: async () => {}, transition: async ({ to }) => ({ ok: true, to }), runRecord: (l) => lines.push(...l), release: async () => true,
+  };
+  return { deps, verdicts, seen, lines, bad };
+}
+
+test("test_238_plan_repair_turn_carries_the_rejected_plan_and_reasons", async () => {
+  const { deps, verdicts, seen, lines, bad } = repairRun238();
+  expect(await runStage({ stage: "plan", issue: 238, deps })).toBe(0);
+  expect(seen).toHaveLength(2);
+  const rejected = verdicts[0];
+  expect(rejected.ok).toBe(false);
+  expect(rejected.data).toEqual(bad);                                         // the verdict's object IS the plan the planner emitted
+  const [first, repair] = seen;
+  // the first turn carries neither key — there is nothing to repair yet.
+  expect(Object.keys(first.loaded)).not.toContain("plan_repair_previous");
+  expect(Object.keys(first.loaded)).not.toContain("plan_repair");
+  // the repair turn: plan_repair is still the exact string[] of validator reasons, and the whole rejected plan rides next to it.
+  expect(repair.loaded.plan_repair).toEqual(rejected.planRepair);
+  expect(repair.loaded.plan_repair_previous).toEqual(rejected.data);
+  expect(JSON.stringify(repair.loaded.plan_repair_previous)).toBe(JSON.stringify(bad));   // never truncated, byte for byte
+  const roleNames = Object.keys(repair.roles);
+  expect(roleNames.length).toBeGreaterThan(0);
+  for (const n of roleNames) {
+    expect(repair.roles[n].plan_repair_previous, `context.${n}.json`).toEqual(rejected.data);
+    expect(repair.roles[n].plan_repair, `context.${n}.json`).toEqual(rejected.planRepair);
+  }
+  // the second claudeP dispatch is handed both, too.
+  expect(repair.opts.planRepair).toEqual(rejected.planRepair);
+  expect(repair.opts.planRepairPrevious).toEqual(rejected.data);
+  // the repair turn's manifest lists the key for every role (and the first turn's does not).
+  const manifests = lines.filter((l) => l.startsWith(CONTEXT_MANIFEST_PREFIX)).map((l) => JSON.parse(l.slice(CONTEXT_MANIFEST_PREFIX.length)));
+  expect(manifests).toHaveLength(roleNames.length * 2);
+  for (const m of manifests.slice(0, roleNames.length)) expect(m.fields).not.toContain("plan_repair_previous");
+  for (const m of manifests.slice(roleNames.length)) expect(m.fields).toContain("plan_repair_previous");
+
+  // the rejected plan is unavailable (v.data missing / not a plain object): the key is left out and the repair STILL runs on the reasons.
+  // a plan object JSON cannot hold (here: a cycle) is left out the same way — it never turns into a "could not run" escalation.
+  const cyclic = { schema: "factory.plan.v1", issue: 238 }; cyclic.self = cyclic;
+  for (const firstData of [null, ["not", "a", "plan"], "a string", cyclic]) {
+    const run = repairRun238({ firstData });
+    expect(await runStage({ stage: "plan", issue: 238, deps: run.deps })).toBe(0);
+    expect(run.seen).toHaveLength(2);
+    expect(Object.keys(run.seen[1].loaded)).not.toContain("plan_repair_previous");
+    expect(run.seen[1].loaded.plan_repair).toEqual(run.verdicts[0].planRepair);
+    expect(Object.keys(run.seen[1].opts)).not.toContain("planRepairPrevious");
+    expect(run.lines.some((l) => /could not run/.test(l))).toBe(false);
+  }
+});

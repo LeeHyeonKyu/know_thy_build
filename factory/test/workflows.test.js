@@ -2406,3 +2406,39 @@ test("factory-retro.js: once() is byte-identical to the four stage workflows', a
   expect(retro).not.toContain("factory-loader");
   expect(retro).not.toContain("context.json");
 });
+
+/**
+ * #238 (P-14) dw2 — the repair-turn `loaded.json` the engine now produces (`plan_repair` string[] **plus** the sibling
+ * `plan_repair_previous`) is fed, unchanged, to the shipped factory-plan.js. The loaded payload comes from the real producer
+ * (`buildContext`), not a hand-written fixture: if the new key ever displaced or reshaped `plan_repair`, the workflow's
+ * `Array.isArray(loaded.plan_repair)` would quietly turn today's targeted repair into a blind retry.
+ */
+import { mkdirSync as mkdirSync238 } from "node:fs";
+import { buildContext as buildContext238 } from "../lib/context.js";
+test("test_238_current_workflow_still_renders_repair_reasons_from_new_shape", async () => {
+  const r = mkdtempSync(join(tmpdir(), "wf238-"));
+  mkdirSync238(join(r, ".factory"), { recursive: true }); mkdirSync238(join(r, "docs/factory"), { recursive: true });
+  writeFileSync(join(r, ".factory/harness.toml"), `schema = 1\n[harness]\nmaturity = "M0"\n[factory]\norchestration = "workflow"\n[commands]\nunit = "npm test"\n[gates]\nrequired = ["unit"]\nfast = ["unit"]\nfull = ["unit"]\ndeep = ["unit"]\n`);
+  writeFileSync(join(r, "docs/factory/CHARTER.md"), `---\nschema: factory.charter.v1\nstatus: ready\ntier_default: standard\nroster:\n  standard: [correctness]\nplan_roles:\n  default: [skeptic]\nplan_rounds: { docs: 2, default: 3 }\n---\n`);
+  writeFileSync(join(r, ".factory/roles.toml"), `[triage]\nagent = "t.md"\nmodel = "sonnet"\n[review.correctness]\nagent = "c.md"\nmodel = "opus"\n[plan.skeptic]\nagent = "s.md"\nmodel = "opus"\n[plan.synthesizer]\nagent = "syn.md"\nmodel = "opus"\n`);
+  const gh = { issue: async () => ({ number: 42, title: "T", body: "", labels: ["factory:ready"] }), comments: async () => [] };
+  const rejected = { schema: "factory.plan.v1", issue: 42, done_when: [{ id: "dw1", text: "REJECTED-PLAN-MARKER", verify: "test_42_x", level: "unit" }], dissent_log: [{ id: "d2", severity: "high" }] };
+  await buildContext238({ root: r, gh, issue: 42, stage: "plan", planRepair: R1_REPAIR_REASONS, planRepairPrevious: rejected });
+  const loaded = JSON.parse(readFileSync(join(r, ".factory/out/loaded.json"), "utf8"));
+  // the new shape really is the engine's: both keys, plan_repair untouched.
+  expect(loaded.plan_repair).toEqual(R1_REPAIR_REASONS);
+  expect(loaded.plan_repair_previous).toEqual(rejected);
+
+  for (const mode of ["debate", "single"]) {
+    const { calls } = await runWorkflow(FACTORY_PLAN_WORKFLOW, {
+      agent: planStub(),
+      args: { issue: 42, context: ".factory/out/context.json", loaded: { ...loaded, roster: PLAN_ROSTER, rounds: 3, plan: { mode, max_done_when: 6 } } },
+    });
+    const writer = mode === "debate"
+      ? calls.find((c) => c.opts.agentType === "plan-synthesizer")
+      : calls.find((c) => typeof c.opts.label === "string" && c.opts.label.startsWith("plan:"));
+    expect(writer, `${mode}: the plan writer was dispatched`).toBeTruthy();
+    expect(writer.prompt, mode).toContain("REPAIR TURN (KTB-51)");
+    for (const reason of R1_REPAIR_REASONS) expect(writer.prompt, `${mode}: ${reason}`).toContain(reason);
+  }
+});

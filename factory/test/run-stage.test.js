@@ -6572,3 +6572,229 @@ test("test_200_scope_check_fails_open_visibly_on_git_read_error", async () => {
     expect(r.ok, name).toBe(false);
   }
 });
+
+/**
+ * ── #238 (P-14, M-8) — the plan repair turn's COST is recorded from what the runner observed ─────────────────────────
+ *
+ * The repair turn now carries the rejected plan (`plan_repair_previous`, see context.test.js test_238_…) so a workflow that
+ * honours it can rerun only the synthesis. Whether it DID is read from the hook-written agents log of that turn (reset
+ * before the turn) — never from the handoff's own `repair_of` claim, which is copied onto the line as a claim only.
+ */
+import { turnAgentsLog } from "../bin/run-stage.js";
+import { rmSync as rmSync238, appendFileSync as appendFileSync238 } from "node:fs";
+import { validatePlanHandoff as validatePlanHandoff238 } from "../lib/verify-stage.js";
+const DEBATE_238 = ["product-advocate", "architect", "skeptic", "operator"];
+const FULL_238 = [...DEBATE_238.map((r) => `plan-${r}`), "plan-synthesizer"];
+const REASONS_238 = ["dissent without done_when: d2"];
+const SYNTH_ONLY_238 = "plan repair: synthesis-only";
+const FULL_RERUN_238 = "plan repair: full rerun (workflow ignored plan_repair.previous)";
+const costLines238 = (lines) => lines.filter((l) => /^plan repair: /.test(l));
+/** An agents log that behaves like the file: claudeP appends this turn's completed agents, resetAgentsLog empties it. */
+const agentsSim238 = (perTurn) => {
+  let entries = [], turn = 0;
+  return {
+    resetAgentsLog: vi.fn(async () => { entries = []; }),
+    claudeP: vi.fn(async () => { entries.push(...(perTurn[turn++] || [])); return { is_error: false, result: "{}" }; }),
+    agentsLog: vi.fn(() => ({ starts: [], stops: [], completed: [...entries], orphans: [] })),
+    now: () => ({ starts: [], stops: [], completed: [...entries], orphans: [] }),
+  };
+};
+const repairDeps238 = ({ perTurn, repaired = { rounds: 3 }, over = {} } = {}) => {
+  const sim = agentsSim238(perTurn);
+  const lines = [];
+  const transition = vi.fn(async ({ to }) => ({ ok: true, to }));
+  const verifyStage = vi.fn()
+    .mockReturnValueOnce({ ok: false, reasons: [...REASONS_238], planRepair: [...REASONS_238], data: { rounds: 3 } })
+    .mockReturnValueOnce({ ok: true, reasons: [], planRepair: null, data: repaired });
+  const deps = planRepairDeps({
+    buildContext: vi.fn(async () => ({ roster: [...DEBATE_238], rounds: 3, orchestration: "workflow", limits: { K: 3 } })),
+    resetAgentsLog: sim.resetAgentsLog, claudeP: sim.claudeP, agentsLog: sim.agentsLog,
+    verifyStage, transition, runRecord: (l) => lines.push(...l), ...over,
+  });
+  return { deps, lines, transition, sim };
+};
+
+test("test_238_plan_repair_records_whether_the_workflow_reused_the_plan", async () => {
+  // (1) only the synthesizer ran on the repair turn (after a full first turn) → synthesis-only, exactly one line.
+  const syn = repairDeps238({ perTurn: [FULL_238, ["plan-synthesizer"]] });
+  expect(await runStage({ stage: "plan", issue: 238, deps: syn.deps, runnerId: "r1" })).toBe(0);
+  expect(costLines238(syn.lines)).toEqual([SYNTH_ONLY_238]);
+  // (2) the debate roster ran again → full rerun, exactly one line.
+  const full = repairDeps238({ perTurn: [FULL_238, FULL_238] });
+  expect(await runStage({ stage: "plan", issue: 238, deps: full.deps, runnerId: "r1" })).toBe(0);
+  expect(costLines238(full.lines)).toEqual([FULL_RERUN_238]);
+  // any single debate role completing is enough to call it a rerun.
+  const one = repairDeps238({ perTurn: [FULL_238, ["plan-synthesizer", "plan-skeptic"]] });
+  await runStage({ stage: "plan", issue: 238, deps: one.deps, runnerId: "r1" });
+  expect(costLines238(one.lines)).toEqual([FULL_RERUN_238]);
+
+  // (3) the handoff's repair_of is a CLAIM: it never changes the classification, and it is copied verbatim (JSON-quoted, one line).
+  const claim = "abc123\nforged: line";
+  const claimedButReran = repairDeps238({ perTurn: [FULL_238, FULL_238], repaired: { rounds: 3, repair_of: claim } });
+  await runStage({ stage: "plan", issue: 238, deps: claimedButReran.deps, runnerId: "r1" });
+  const c1 = costLines238(claimedButReran.lines);
+  expect(c1).toHaveLength(1);
+  expect(c1[0].startsWith(`${FULL_RERUN_238} — `)).toBe(true);
+  expect(c1[0]).toContain(`repair_of=${JSON.stringify(claim)}`);
+  expect(claimedButReran.lines.some((l) => l === "forged: line" || l.startsWith("forged:"))).toBe(false);
+  const claimedSyn = repairDeps238({ perTurn: [FULL_238, ["plan-synthesizer"]], repaired: { rounds: 3, repair_of: "abc123" } });
+  await runStage({ stage: "plan", issue: 238, deps: claimedSyn.deps, runnerId: "r1" });
+  const c2 = costLines238(claimedSyn.lines);
+  expect(c2).toHaveLength(1);
+  expect(c2[0].startsWith(`${SYNTH_ONLY_238} — `)).toBe(true);
+  expect(c2[0]).toContain('repair_of="abc123"');
+
+  // (4) the reset before the repair turn is what makes the log "this turn's": the first turn's roster does not leak into it.
+  expect(syn.sim.resetAgentsLog).toHaveBeenCalledTimes(2);
+  const noReset = repairDeps238({ perTurn: [FULL_238, ["plan-synthesizer"]], over: { resetAgentsLog: async () => {} } });
+  await runStage({ stage: "plan", issue: 238, deps: noReset.deps, runnerId: "r1" });
+  expect(costLines238(noReset.lines)).toEqual([FULL_RERUN_238]);
+
+  // (5) when unsure — the log cannot be read, is absent, or no dep reads it — it is a full rerun.
+  for (const agentsLog of [() => { throw new Error("EACCES"); }, () => null, async () => null, undefined]) {
+    const u = repairDeps238({ perTurn: [FULL_238, ["plan-synthesizer"]], over: { agentsLog } });
+    expect(await runStage({ stage: "plan", issue: 238, deps: u.deps, runnerId: "r1" })).toBe(0);
+    expect(costLines238(u.lines)).toEqual([FULL_RERUN_238]);
+  }
+
+  // the synthesizer is the one role a synthesis-only turn runs, so it never counts as "the debate reran" (single-mode roster);
+  // a roster with no debate role at all gives nothing to observe → unsure → full rerun.
+  for (const [roster, expected] of [[["synthesizer", "skeptic"], SYNTH_ONLY_238], [["synthesizer"], FULL_RERUN_238], [[], FULL_RERUN_238]]) {
+    const s = repairDeps238({ perTurn: [["plan-synthesizer", "plan-skeptic"], ["plan-synthesizer"]], over: {
+      buildContext: vi.fn(async () => ({ roster: [...roster], rounds: 2, orchestration: "workflow", limits: { K: 3 } })),
+    } });
+    await runStage({ stage: "plan", issue: 238, deps: s.deps, runnerId: "r1" });
+    expect(costLines238(s.lines), JSON.stringify(roster)).toEqual([expected]);
+  }
+
+  // (6) main()'s reader is the hook's file: absent → null (unsure), present → the completed agent types.
+  const root = mkdtempSync(join(tmpdir(), "rs238-"));
+  expect(turnAgentsLog(root)).toBeNull();
+  mkdirSync(join(root, ".factory/out"), { recursive: true });
+  const file = join(root, ".factory/out/agents.jsonl");
+  const hook = (types) => { for (const [i, t] of types.entries()) {
+    appendFileSync238(file, JSON.stringify({ hook_event_name: "SubagentStart", agent_id: `${t}-${i}`, agent_type: t }) + "\n");
+    appendFileSync238(file, JSON.stringify({ hook_event_name: "SubagentStop", agent_id: `${t}-${i}`, agent_type: t }) + "\n");
+  } };
+  let turn = 0;
+  const filed = repairDeps238({ perTurn: [], over: {
+    resetAgentsLog: async () => { rmSync238(file, { force: true }); },
+    claudeP: async () => { hook(turn++ === 0 ? FULL_238 : ["plan-synthesizer"]); return { is_error: false, result: "{}" }; },
+    agentsLog: () => turnAgentsLog(root),
+  } });
+  await runStage({ stage: "plan", issue: 238, deps: filed.deps, runnerId: "r1" });
+  expect(costLines238(filed.lines)).toEqual([SYNTH_ONLY_238]);
+  expect(turnAgentsLog(root).completed).toEqual(["plan-synthesizer"]);
+});
+
+test("test_238_no_cost_line_or_previous_plan_outside_a_completed_repair_turn", async () => {
+  // a normal plan run that validates first time: one context, no previous plan anywhere, no plan-repair lines at all.
+  const lines = [];
+  const normal = planRepairDeps({ verifyStage: vi.fn(() => ({ ok: true, reasons: [], planRepair: null, data: { rounds: 2 } })), agentsLog: () => ({ completed: ["plan-synthesizer"] }), transition: async ({ to }) => ({ ok: true, to }), runRecord: (l) => lines.push(...l) });
+  expect(await runStage({ stage: "plan", issue: 238, deps: normal, runnerId: "r1" })).toBe(0);
+  expect(normal.buildContext).toHaveBeenCalledTimes(1);
+  expect(Object.keys(normal.buildContext.mock.calls[0][0] ?? {})).not.toContain("planRepairPrevious");
+  expect(Object.keys(normal.claudeP.mock.calls[0][1] ?? {})).not.toContain("planRepairPrevious");
+  expect(lines.filter((l) => l.startsWith("plan repair"))).toEqual([]);
+
+  // a non-plan stage never repairs, never carries a previous plan, never writes a cost line — even with a planRepair-looking verdict.
+  const rlines = [];
+  const review = planRepairDeps({
+    verifyStage: vi.fn(() => ({ ok: false, reasons: [...REASONS_238], planRepair: [...REASONS_238], data: { decision: "approved" } })),
+    agentsLog: () => ({ completed: [] }), transition: async ({ to }) => ({ ok: true, to }), runRecord: (l) => rlines.push(...l),
+  });
+  await runStage({ stage: "review", issue: 238, deps: review, runnerId: "r1" });
+  expect(review.claudeP).toHaveBeenCalledTimes(1);
+  expect(rlines.filter((l) => l.startsWith("plan repair"))).toEqual([]);
+
+  // a repair turn that could not run: only the existing KTB-51 "could not run" line, no cost line.
+  const sim = agentsSim238([FULL_238]);
+  let dispatch = 0;
+  const flines = [];
+  const failed = planRepairDeps({
+    verifyStage: vi.fn(() => ({ ok: false, reasons: [...REASONS_238], planRepair: [...REASONS_238], data: { rounds: 2 } })),
+    claudeP: vi.fn(async () => { if (++dispatch === 2) throw new Error("api error 529"); return { is_error: false, result: "{}" }; }),
+    resetAgentsLog: sim.resetAgentsLog, agentsLog: () => ({ completed: ["plan-synthesizer"] }),
+    transition: async ({ to }) => ({ ok: true, to }), runRecord: (l) => flines.push(...l),
+  });
+  expect(await runStage({ stage: "plan", issue: 238, deps: failed, runnerId: "r1" })).toBe(2);
+  expect(flines.filter((l) => l.startsWith("plan repair"))).toEqual([
+    "plan repair (KTB-51): one repair turn — feeding 1 validator reason(s) back: dissent without done_when: d2",
+    "plan repair (KTB-51): could not run — api error 529",
+  ]);
+
+  // the existing KTB-51 lines read exactly as before around the new cost line (resolved and still-red).
+  const ok = repairDeps238({ perTurn: [FULL_238, FULL_238] });
+  await runStage({ stage: "plan", issue: 238, deps: ok.deps, runnerId: "r1" });
+  expect(ok.lines.filter((l) => l.startsWith("plan repair (KTB-51)"))).toEqual([
+    "plan repair (KTB-51): one repair turn — feeding 1 validator reason(s) back: dissent without done_when: d2",
+    "plan repair (KTB-51): resolved → factory:planned",
+  ]);
+  const redLines = [];
+  const red = planRepairDeps({
+    verifyStage: vi.fn(() => ({ ok: false, reasons: [...REASONS_238], planRepair: [...REASONS_238], data: { rounds: 2 } })),
+    agentsLog: () => ({ completed: ["plan-synthesizer"] }), transition: async ({ to }) => ({ ok: true, to }), runRecord: (l) => redLines.push(...l),
+  });
+  await runStage({ stage: "plan", issue: 238, deps: red, runnerId: "r1" });
+  expect(redLines.filter((l) => l.startsWith("plan repair (KTB-51)"))).toEqual([
+    "plan repair (KTB-51): one repair turn — feeding 1 validator reason(s) back: dissent without done_when: d2",
+    "plan repair (KTB-51): still red → escalating unchanged",
+  ]);
+  expect(costLines238(redLines)).toHaveLength(1);                  // the turn RAN (it just did not fix the plan) → one cost line
+});
+
+/**
+ * dw5 — the roster guard is NOT touched by #238. With the real verifyStage, a synthesis-only repair whose plan now validates is
+ * recorded as `synthesis-only` and then still escalates with "roster role not completed" (run-stage resets agents.jsonl before
+ * the repair turn; verify-stage requires every roster role). The roster-continuity follow-up must change THIS test on purpose.
+ */
+test("test_238_synthesis_only_repair_is_recorded_and_roster_guard_unchanged", async () => {
+  const plan = (over = {}) => ({
+    schema: "factory.plan.v1", issue: 238, tier: "load-bearing", roles: [...DEBATE_238], rounds: 3,
+    done_when: [{ id: "dw1", text: "the repair turn carries the plan", verify: "test_238_x", level: "unit" }],
+    files_expected: [], non_goals: [], open_risks: [], orchestration: "workflow",
+    dissent_log: [{ id: "d2", role: "skeptic", severity: "high", objection: "o", resolution: "unresolved — proceeding" }], ...over,
+  });
+  const bad = plan();
+  const good = plan({ done_when: [{ id: "dw1", text: "the repair turn carries the plan", verify: "test_238_x", level: "unit", covers: ["d2"] }] });
+  expect(validatePlanHandoff238(bad).length).toBeGreaterThan(0);
+  expect(validatePlanHandoff238(good)).toEqual([]);              // the repaired handoff itself passes the plan validator
+  const fenced = (p) => ({ is_error: false, result: "```json\n" + JSON.stringify(p) + "\n```" });
+
+  const runWith = async (repairTurnAgents) => {
+    let entries = [], turn = 0;
+    const lines = [];
+    const transition = vi.fn(async ({ to }) => ({ ok: true, to }));
+    const deps = planRepairDeps({
+      buildContext: vi.fn(async () => ({ roster: [...DEBATE_238], rounds: 3, orchestration: "workflow", limits: { K: 3 } })),
+      resetAgentsLog: async () => { entries = []; },
+      claudeP: vi.fn(async () => { const t = turn++; entries.push(...(t === 0 ? FULL_238 : repairTurnAgents)); return fenced(t === 0 ? bad : good); }),
+      agentsLog: () => ({ starts: [], stops: [], completed: [...entries], orphans: [] }),
+      // the real verifier, reading the same log the cost line reads.
+      verifyStage: ({ out }) => verifyStage({ stage: "plan", out, agentsLog: { starts: [], stops: [], completed: [...entries], orphans: [] }, roster: [...DEBATE_238], rolePrefix: "plan-", expectedRounds: 3, orchestration: "workflow" }),
+      transition, runRecord: (l) => lines.push(...l),
+    });
+    const code = await runStage({ stage: "plan", issue: 238, deps, runnerId: "r1" });
+    return { code, lines, transition, deps };
+  };
+
+  // synthesis-only repair: recorded as such, THEN escalates on the unchanged roster guard.
+  const syn = await runWith(["plan-synthesizer"]);
+  expect(syn.deps.claudeP).toHaveBeenCalledTimes(2);
+  expect(syn.code).toBe(2);
+  expect(costLines238(syn.lines)).toEqual([SYNTH_ONLY_238]);
+  const t = syn.transition.mock.calls.at(-1)[0];
+  expect(t.to).toBe("factory:needs-human");
+  for (const role of DEBATE_238) expect(t.reason).toContain(`roster role not completed: ${role}`);
+  expect(t.reason).not.toContain("dissent without done_when");
+  const costAt = syn.lines.indexOf(SYNTH_ONLY_238);
+  const rosterAt = syn.lines.findIndex((l) => l.includes("roster role not completed"));
+  expect(costAt).toBeGreaterThanOrEqual(0);
+  expect(rosterAt).toBeGreaterThan(costAt);
+
+  // a repair turn whose log has the full roster passes the roster check as before → factory:planned.
+  const full = await runWith(FULL_238);
+  expect(full.code).toBe(0);
+  expect(costLines238(full.lines)).toEqual([FULL_RERUN_238]);
+  expect(full.transition.mock.calls.at(-1)[0].to).toBe("factory:planned");
+});

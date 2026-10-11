@@ -235,7 +235,10 @@ export function explicitSubmission(comments) {
   return latest ? { explicit_submission: true, submitted_by: latest.by } : { explicit_submission: false, submitted_by: null };
 }
 
-export async function buildContext({ root, gh, issue, stage, run = null, base = null, setupDirty = null, planRepair = null, mergeConflicts = null }) {
+/** #238 — a JSON-object value (not null, not an array). The one test for "a rejected plan we can carry" (run-stage imports it). */
+export const isPlainObject = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
+
+export async function buildContext({ root, gh, issue, stage, run = null, base = null, setupDirty = null, planRepair = null, planRepairPrevious = null, mergeConflicts = null }) {
   const harness = loadHarness(root), charter = loadCharter(root), roles = loadRoles(root);
   const it = await gh.issue(issue);
   const comments = await gh.comments(issue);
@@ -303,6 +306,13 @@ export async function buildContext({ root, gh, issue, stage, run = null, base = 
      * the planner reads them from `loaded.plan_repair` and fixes exactly those before re-emitting.
      */
     ...(stage === "plan" && Array.isArray(planRepair) && planRepair.length ? { plan_repair: planRepair } : {}),
+    /**
+     * #238 (P-14, M-8) — the WHOLE rejected `factory.plan.v1` the reasons above were raised against, so a workflow can fix that
+     * plan by rerunning synthesis only instead of the whole debate. A sibling key, never folded into `plan_repair`: the shipped
+     * workflow reads `Array.isArray(loaded.plan_repair)` and must keep seeing today's string[] (test_238_current_workflow_…).
+     * Carried whole or not at all — only next to `plan_repair`, only for a plain object (run-stage leaves it out otherwise).
+     */
+    ...(stage === "plan" && Array.isArray(planRepair) && planRepair.length && isPlainObject(planRepairPrevious) ? { plan_repair_previous: planRepairPrevious } : {}),
     /**
      * #143 (S3b) — 스테이지가 base 병합의 소스 충돌을 abort하지 않고 빌더에게 넘긴 라운드에서, 아직 충돌 중인 경로들
      * (`run-stage.js`의 `mergeBaseIntoBranch`). 병합을 이어 받는 쓰기 세션은 implement뿐이고, 넘긴 것이 없으면 키 자체가 없다.
@@ -423,6 +433,8 @@ async function loadedFor({ ctx, roleBlock, gh, comments = [] }) {
     // Task 9 (KTB-51): the plan validator reasons this repair turn must fix (factory-plan.js reads
     // them and hands them to the planner). Absent on a normal plan pass; present on the one repair turn.
     ...(Array.isArray(ctx.plan_repair) && ctx.plan_repair.length ? { plan_repair: ctx.plan_repair } : {}),
+    // #238: the rejected plan those reasons were raised against (absent unless plan_repair is present). See buildContext.
+    ...(Array.isArray(ctx.plan_repair) && ctx.plan_repair.length && isPlainObject(ctx.plan_repair_previous) ? { plan_repair_previous: ctx.plan_repair_previous } : {}),
     // #143 (S3b): the source paths still conflicted in the base merge the stage left to the builder. Absent when no merge is pending.
     ...(Array.isArray(ctx.merge_conflicts) && ctx.merge_conflicts.length ? { merge_conflicts: ctx.merge_conflicts } : {}),
   };
