@@ -23,13 +23,13 @@
 | rounds/issue (plan/impl/review) | 0 / 0 / 0 | 0.81 / 1.87 / 1.75 |
 | escaped defects | 0 | 20 |
 | revert rate | 없음 | 0.00 (0/16) |
-| needs-human | 1 | 60 |
+| needs-human | 24 | 60 |
 | rejects by role | 없음 | spec-conformance 8, qa 4, correctness 12, architecture 6, security 2 |
 | reviewer overlap | 없음 | 0.50 (18/36, runs 36) |
 | unique findings by role | 없음 | spec-conformance 3, qa 4, correctness 6, architecture 3, security 2 |
-| qa na ratio | 없음 | 0.22 (30/138 claims, na-heavy 4/19 approvals) |
-| cost (usd) | 44.20 | 910.10 |
-| tokens | input 937448 / output 84484 | input 22526857 / output 1779541 |
+| qa na ratio | 0.26 (27/104 claims, na-heavy 4/15 approvals) | 0.22 (30/138 claims, na-heavy 4/19 approvals) |
+| cost (usd) | 356.13 | 910.10 |
+| tokens | input 8640822 / output 771681 | input 22526857 / output 1779541 |
 | retro cost (usd) | 0.00 | 10.44 |
 | retro tokens | input 0 / output 0 | input 30 / output 26670 |
 | full retros | — | 9 |
@@ -1302,6 +1302,198 @@
           226
         ],
         "source": "must_fix"
+      },
+      {
+        "role": "correctness",
+        "text": "implement_gates.head_sha is set to `builder_head_sha ?? head_sha`, and the comment says the implement gate ran on the builder's sha. That is false. In the implement stage the runner's mirror commit happens before the gates run, so the implement gate ran on the mirror sha, which is `head_sha` and is the same head that review checks out. So the diagnostic line is suppressed in every round that had a mirror commit, even though both gates ran on the same head. That includes the incident that motivated this issue: #253 head b4aac9b is itself a factory-runner mirror commit. Issue item 3 is therefore not delivered for its own motivating case, and a false claim about engine behaviour is now recorded in a code comment.",
+        "runs": [
+          257
+        ],
+        "source": "must_fix"
+      },
+      {
+        "role": "spec-conformance",
+        "text": "dw4/dw5 and issue item 3 are not delivered for the motivating case. implement_gates.head_sha is set to `builder_head_sha ?? head_sha`, but the implement gate ran on the mirror sha, which is `head_sha`. The diagnostic line is suppressed in every round with a mirror commit, even though both gates ran on the same head. lesson:none",
+        "runs": [
+          257
+        ],
+        "source": "must_fix"
+      },
+      {
+        "role": "spec-conformance",
+        "text": "An unplanned production behavior change was added: proveTest and proveFixedTests no longer default `exists` to existsSync. They now use a new `worktreeInstallProbe` that trusts a lockfile only if `<tmp>/.git` exists, and proveFixedTests's missing-file check now uses `(exists ?? existsSync)`. The approved plan did not contain this.",
+        "runs": [
+          257
+        ],
+        "source": "must_fix"
+      },
+      {
+        "role": "security",
+        "text": "This diff turns off the queue caps (queue_max, self_generated.open_max, depth_max) for the triage blocked→factory:queue retry hop. That hop is authorized only by a comment marker that anyone can forge. blockedOrigin() takes the newest comment that matches `<!-- factory-blocked-origin from=(\\S+) stage=(\\S+)(?: cause=(\\S+))? -->` and never checks the comment's author. Other readers in the same file do check it (issue-comments.js:648, 683 compare against factoryLogin). So anyone who can comment on an issue that is in factory:blocked can get it put back in factory:queue with no cap check. The queue door is the control #230/#247 set out to close, and this gets around it. run-stage.js is a [load_bearing] path, so a relaxation whose justification is only a code comment ('the hop only restores a label the issue already earned', run-stage.js:511-517) cannot be approved as 'probably fine'. This promotes my round-1 sec-s1 to must_fix.",
+        "runs": [
+          249
+        ],
+        "source": "must_fix"
+      },
+      {
+        "role": "security",
+        "text": "The new `review-r1:` line copies the agent-controlled `r1_verdicts[].role` and `.verdict` into the agent-unwritable run record without removing line terminators. A role containing `\\n` therefore makes the runner itself write a well-formed `review-evidence:` line into this run's own `## review` section. On the incomplete exit, that forged line is the only evidence line for the run id, and `verifyReviewProvenance` accepts it. This diff adds a way for agent text to create the one artifact that merge provenance treats as runner-attested.",
+        "runs": [
+          239
+        ],
+        "source": "must_fix"
+      },
+      {
+        "role": "correctness",
+        "text": "ADR-039 says the direct session's role md path and model come from roles.toml [triage]/[retro.analyst], 'the same source as the workflow's agent()'. That is true for triage and false for retro. The retro.js comments repeat the false claim and go further: they say an operator's roles.toml change reaches the analyst whatever the mode. In workflow mode it does not. No test pins the workflow-side half of the claim, and the claim is false, so it is a wrong decision record that a later plan could cite.",
+        "runs": [
+          237
+        ],
+        "source": "must_fix"
+      },
+      {
+        "role": "correctness",
+        "text": "A merge run that is waiting for the required reviewer on the `factory-merge` environment is counted as \"queued >24 min\", so `factory status` prints `ACTIONS BLOCKED? ... check Actions billing` while Actions is working normally. This happens in the default installed configuration.",
+        "runs": [
+          234
+        ],
+        "source": "must_fix"
+      },
+      {
+        "role": "architecture",
+        "text": "`variableState` is the third separate reader of the same `gh variable get <name> -R <repo>` call in one client. The other two are `getVariable` at gh.js:577 and `variableGet` at gh.js:778. The two older readers already disagree on the empty-variable case, and this one adds a third contract. Under the lens, a third copy is an automatic must_fix. Fix: make `variableState` the only place that calls `gh variable get`, and rewrite `getVariable` and `variableGet` as thin wrappers over it. The wrappers keep their null-returning contract, so plan s4's 'six callers depend on the contract' still holds.",
+        "runs": [
+          234
+        ],
+        "source": "must_fix"
+      },
+      {
+        "role": "correctness",
+        "text": "The merge stage still works out the quorum roster with `resolveTier({ run, cwd, base, harness, tier })` and never passes `raised`. The review stage now runs the raised load-bearing roster, but the merge gate expects the declared/floor roster. So every raised issue whose real diff does not touch a [load_bearing].paths file gets blocked at merge with `verdict count N != roster size M`. The two gates also stop agreeing with each other: the sweeper's human-merge arm reads the review handoff's tier_effective, which is load-bearing, while merge-stage uses the declared/floor tier. KTB-46 r3 in review-roster.js forbids exactly this split.",
+        "runs": [
+          233
+        ],
+        "source": "must_fix"
+      },
+      {
+        "role": "architecture",
+        "text": "The diff gives `resolveTier` a new input, `raised`, and wires it into only one of its two production callers. `buildContext` passes it (context.js:259). The merge stage's `reviewRoster` dep does not: it still calls `resolveTier({ run, cwd, base, harness, tier })` with no `raised`. So the same tier rule now produces two results. The review stage builds the load-bearing roster from the raise, but the merge quorum recomputes the tier as the declared tier plus the diff floor. For exactly the case dw4 targets (raised at triage, diff floor below load-bearing), the review handoff carries 4 verdicts while the merge roster has 2. `verifyReviewQuorum` then refuses the merge with `verdict count 4 != roster size 2`. The sweeper's human-merge path reads the review handoff's `tier_effective` through `maxTier` (`tierFromReviewHandoff`), so it does see the raise. The two doors that are supposed to share one roster rule now disagree, and the factory's own merge door blocks every raised issue whose diff stays off load-bearing paths.",
+        "runs": [
+          233
+        ],
+        "source": "must_fix"
+      },
+      {
+        "role": "qa",
+        "text": "dw4 (the raised tier is not lowered after plan) does not hold at the merge gate. The merge quorum roster is computed with resolveTier without `raised`. The review stage runs the raised load-bearing roster, so a raised issue whose diff stays off [load_bearing].paths is refused at merge with a verdict-count mismatch. I did not see this in round 1 because I only drove resolveTier and buildContext, not the merge path. Found by cross-examination.",
+        "runs": [
+          233
+        ],
+        "source": "must_fix"
+      },
+      {
+        "role": "correctness",
+        "text": "Issue item 3 rests on the premise that every issue in this repo uses `test_<n>_…` ids, so coverage can rely on `check.ref` alone until the plan prompt learns `covers_issue`. That premise is false. The repo's own issue template tells authors to write docs-only issues with NO test id (`- [ ] \\`README.md\\`의 Quickstart가 …`). Each such item gets a positional `issue-dw<n>` id. The diff counts only `test_` refs as coverage through check.ref, so a positional item can be covered only by `covers_issue`. Nothing the plan agent reads mentions that field: it is not in the prompt, not in the repair context, and not in the reason text. So every docs-only issue is rejected at plan, the one-shot repair gets `issue done_when not covered by the plan: issue-dw1 — \"…\"` with no way to fix it, and the issue stalls. The spec's claim becomes false and an issue class the repo prescribes stops flowing. CLAUDE.md SDD policy 3 makes that an immediate-fix case, not a follow-up.",
+        "runs": [
+          232
+        ],
+        "source": "must_fix"
+      },
+      {
+        "role": "correctness",
+        "text": "The line `done_when: issue has no items — the plan's contract stands alone` never reaches the run record. Issue item 4 says the check passes and the record (기록) carries one line. verifyStage now returns `planNotes`, but nothing reads it, so in production the line is computed and then thrown away.",
+        "runs": [
+          232
+        ],
+        "source": "must_fix"
+      },
+      {
+        "role": "correctness",
+        "text": "The parser looks only at the first DONE_WHEN_RE match and ignores code fences. If an earlier fenced block has a column-0 `done_when:` line (for example a quoted plan handoff in `## What`), that block is the only one read. It yields no checklist items, so the real `## done_when` section below it is skipped and validation gives the 'issue has no items' record line. That is the same fail-open the docstring says the shared regex prevents. It also contradicts plan done_when test_232_every_admitted_done_when_spelling_yields_its_items, which says 'an issue that passed admission and has checklist items under its done_when section is never validated as \"issue has no items\"'. A related problem: inside the section, a `# comment` line in a fenced shell block, or a bare `Note:` line, ends the section early. Items after it are dropped without warning, so the plan can leave them uncovered.",
+        "runs": [
+          232
+        ],
+        "source": "must_fix"
+      },
+      {
+        "role": "correctness",
+        "text": "Once gh.issue() returns `author`, the author arm of isSelfGenerated runs in production for the first time. It feeds the self-generated caps, not only the done_when exemption. Under a shared identity (ADR-038 PAT fallback: in Actions the viewer, and so the owner, lands in factoryLogins), every issue the owner writes is now `self_generated: true`. That includes ordinary feature issues that have a done_when and no marker. Those issues get refused by `self_generated.open_max` whenever 5 or more factory-labelled active issues are open. Issues opened by ops/agent sessions under the bot login get the same new cap. Before this PR, author was always undefined in the production gh.issue() path, so both kinds of issue were admitted. Neither the issue nor dw1-dw5 asks for this change, and no test pins it. dw4 pins the shared-account limit only for the marker exemption.",
+        "runs": [
+          231
+        ],
+        "source": "must_fix"
+      },
+      {
+        "role": "correctness",
+        "text": "impactPathsOf still reads nothing from plain, un-backticked list items when the issue body uses CRLF line endings, which is how GitHub stores bodies written in the web UI. That is the E-5 defect this issue fixes: a person who writes `- templates/factory/harness.toml` in the browser passes the NEVER_AUTOMATE queue check.",
+        "runs": [
+          231
+        ],
+        "source": "must_fix"
+      },
+      {
+        "role": "spec-conformance",
+        "text": "The diff changes the predicate behind open_max/depth_max, the openSelfGenerated count and the origin walk. The plan names that change as a non-goal. The factory-author arm is removed from all three cap inputs by passing an empty login list.",
+        "runs": [
+          231
+        ],
+        "source": "must_fix"
+      },
+      {
+        "role": "qa",
+        "text": "Plain (un-backticked) Impact paths list items are dropped when the issue body has CRLF line endings, which is how GitHub stores bodies written in the web UI. This is the E-5 defect the issue fixes, still open for CRLF bodies. I confirm correctness cf1 by running it myself.",
+        "runs": [
+          231
+        ],
+        "source": "must_fix"
+      },
+      {
+        "role": "correctness",
+        "text": "Under the production App setup (GITHUB_ACTIONS=true, FACTORY_BOT_LOGIN=<slug>[bot], installation token), resolveFactoryLogins always returns {ok:false}. That means dw4's 'marker plus factory author is admitted' path, and the caps' author arm, can never fire in any App-mode Actions run. The diff hides this in three ways. (1) It adds a comment saying the installation token's `gh api user` returns `<slug>[bot]`; it actually returns 403. (2) It adds a test fixture that fakes `viewerLogin` succeeding under GITHUB_ACTIONS=true, a path that cannot happen in App mode. (3) It adds a refusal reason that tells the operator to 'fix the login lookup (FACTORY_BOT_LOGIN)' when FACTORY_BOT_LOGIN is already set correctly. The comment is a record that makes a claim about engine behaviour, and that claim is false. Policy item 5 of CLAUDE.md asks for both env paths to be pinned, and the real App path is not.",
+        "runs": [
+          231
+        ],
+        "source": "must_fix"
+      },
+      {
+        "role": "architecture",
+        "text": "This adds a third production copy of the protocol 'create the issue in backlog, call transition(to: factory:queue), on refusal or throw leave it in backlog and post a not-queued comment'. The retro copy is a near line-for-line clone of ensureHarnessIssue. The third copy (gates.js) has already drifted, so a fix made to one copy will not reach the others.",
+        "runs": [
+          230
+        ],
+        "source": "must_fix"
+      },
+      {
+        "role": "spec-conformance",
+        "text": "dw4 promises 'When admission is not wired, local entry refuses (fails closed)'. The diff does not deliver that for the omitted-`admission`-key shape. makeLocalEntry still writes factory:queue after the rehearsal check alone in that case. The builder narrowed the done_when on its own authority, and the plan never approved this narrowing.",
+        "runs": [
+          230
+        ],
+        "source": "must_fix"
+      },
+      {
+        "role": "spec-conformance",
+        "text": "Standing from round 1, upheld. dw4 says 'When admission is not wired, local entry refuses (fails closed)' and its rubric says 'An unwired admission refuses'. `if (admission !== undefined)` still lets an omitted `admission` key reach setFactoryLabel(factory:queue) after the rehearsal check alone. Only null, false and other non-function values refuse. The code comment at 3517 names the omitted-key shape as a deliberate exception. Neither the plan's non_goals nor its open_risks carve that out, and ADR-039 is not a plan amendment.",
+        "runs": [
+          230
+        ],
+        "source": "must_fix"
+      },
+      {
+        "role": "security",
+        "text": "The new path publishes the start of the gate log in a permanent issue comment. For command gates, that start is where an earlier unscrubbed cut already split the output, so a token cut in two at that point is published without redaction. Scrubbing runs before the 300-char cut, but the log arrives already cut before any scrub. dw3 requires that a secret across a boundary is not partly exposed, and this breaks that rule.",
+        "runs": [
+          206
+        ],
+        "source": "must_fix"
+      },
+      {
+        "role": "architecture",
+        "text": "`gateRedFindings` builds the scrub secret list by hand with `SECRET_ENV.map((k) => env?.[k]).filter(...)`. This is the sixth hand-copied version of a rule that decides which credentials get redacted before text goes into a public issue comment. The copies have already started to differ, so a future change to the secret-collection rule will land in some copies and miss others.",
+        "runs": [
+          206
+        ],
+        "source": "must_fix"
       }
     ],
     "examples": [
@@ -1529,6 +1721,87 @@
           226
         ],
         "source": "dissent"
+      },
+      {
+        "role": "operator",
+        "kind": "good",
+        "text": "Putting the admission.js:122 fail-open out of scope leaves the operator's guard blind whenever the login is unresolved, with nothing for the on-call person to see. The plan should require a visible signal (a reason or log line) when factoryLogins returns ok:false or throws. That does not change the admit/reject policy, so it avoids the unrecorded policy decision the architect wants to avoid.",
+        "runs": [
+          260
+        ],
+        "source": "dissent"
+      },
+      {
+        "role": "skeptic",
+        "kind": "good",
+        "text": "The claim that 'triage reads the label as an input, so a revert cannot lower an issue already raised' has no evidence behind it. The label is triage's output, set by setTierLabel from the triage tier. Plan and review read the triage handoff's data.tier, not the label. After a revert, an issue re-triaged as standard would get its label lowered on that same call. That makes the after-revert behavior unknown, not safe.",
+        "runs": [
+          254
+        ],
+        "source": "dissent"
+      },
+      {
+        "role": "operator",
+        "kind": "good",
+        "text": "dw4 is checked only through an assertStageBranch stub. The two reason sites must be forced to share one function (architect's overlayDriftReason), or the test must call both sites with the same input. Otherwise a one-site fix passes a test written for the other.",
+        "runs": [
+          253
+        ],
+        "source": "dissent"
+      },
+      {
+        "role": "operator",
+        "kind": "good",
+        "text": "To skeptic: dw2 ('exactly one label write', 'not left in factory:queue') invents the end state. If the branch leaves the issue in queue and only comments, a mechanical re-land breaks the test. Read it from the branch, and flag a gap as a risk rather than demanding what the branch does not do.",
+        "runs": [
+          247
+        ],
+        "source": "dissent"
+      },
+      {
+        "role": "skeptic",
+        "kind": "good",
+        "text": "dw1 is written as an argv-shape assertion. The laziest builder can pass it by appending `--allowedTools Read,Grep,Glob` while leaving Edit/Write/Bash reachable. Under `dontAsk`, the allow list is not the boundary; the L2 deny list and the frontmatter hook are. The test also proves nothing about whether frontmatter `hooks:` apply to a `--system-prompt` session, and at M0 no e2e can prove it. Require dw1 to assert that the argv explicitly denies Edit/Write/MultiEdit/NotebookEdit/Bash (for example `--disallowedTools`), instead of relying on frontmatter. Record in open_risks that hook application on the direct path is unverified until the first live run.",
+        "runs": [
+          237
+        ],
+        "source": "dissent"
+      },
+      {
+        "role": "operator",
+        "kind": "good",
+        "text": "The DECISIONS.md ADR is listed as a file but not as a done_when. Nothing gates it, so the change to the meaning of 'agent' and the guarantee value could be skipped and still pass. The operator-facing meaning of the key also has to be written into the harness.toml:36 comment and the doctor message. Otherwise an operator who flips the key expects every stage to switch.",
+        "runs": [
+          237
+        ],
+        "source": "dissent"
+      },
+      {
+        "role": "skeptic",
+        "kind": "good",
+        "text": "dw5 lets a hand-written gh fake decide that 'factory login authored' is true for the gates.js flaky producer. In production the token that creates that issue may be the App (`app/<slug>` vs `<slug>[bot]`) or the PAT fallback. The test would prove the fixture, not the production path. CLAUDE.md rule 5 asks for real producers, and here the author value itself has no real producer in the repo.",
+        "runs": [
+          231
+        ],
+        "source": "dissent"
+      },
+      {
+        "role": "architect",
+        "kind": "good",
+        "text": "The proposal to scrub `g.log` inside run-stage.js with scrubText + SECRET_ENV does not say where the env comes from. runStage has no env seam... dw5's 'injected explicitly through env' cannot be honoured at this site without that new contract. The source that needs no new seam is `g.detail.snippet`. (Skeptic raised the companion objection to product-advocate: if the implementation reads process.env directly, the test can pass trivially when the env var is empty, because secretsFrom filters out empty values.)",
+        "runs": [
+          206
+        ],
+        "source": "dissent"
+      },
+      {
+        "role": "product-advocate",
+        "kind": "good",
+        "text": "Switching runCli in scrub-artifacts.js changes the public scrub CLI that the issue did not ask for. Adding an export to scrub-artifacts.js widens the change into a module that factory/lib/gates.js imports and that is mirrored into the installed runner. That buys no user outcome, and the cost is the architect's own first risk: if the mirror is skewed, no stage can load. (Later conceded only 'provided dw8 (the installed runner loads) is one of the six items and dw7 is dropped or rewritten'.)",
+        "runs": [
+          206
+        ],
+        "source": "dissent"
       }
     ],
     "flaky": [],
@@ -1672,6 +1945,101 @@
         "issue": 207,
         "reason": "gh pr view failed: gh pr view failed (1): GraphQL: Could not resolve to a PullRequest with the number of 220. (repository.pullRequest)",
         "at": "2026-10-10T15:46:14Z"
+      },
+      {
+        "issue": 271,
+        "reason": "protected paths changed — human merge required: .factory/bin/qa-evidence.js, .factory/bin/run-stage.js, .factory/bin/scrub-artifacts.js, .factory/lib/gates.js, .factory/lib/progress.js, factory/bin/qa-evidence.js, factory/bin/run-stage.js, factory/bin/scrub-artifacts.js, factory/lib/gates.js, factory/lib/progress.js, factory/test/gates.test.js, factory/test/run-stage.test.js, factory/test/scrub-artifacts.test.js (see PR #272)",
+        "at": "2026-10-11T14:51:18Z"
+      },
+      {
+        "issue": 260,
+        "reason": "protected paths changed — human merge required: .factory/lib/admission.js, .factory/lib/gh.js, factory/lib/admission.js, factory/lib/gh.js, factory/test/admission.test.js, factory/test/gh.test.js, factory/test/transition.test.js, templates/know-thy-build/issue.md (see PR #261)",
+        "at": "2026-10-11T05:36:54Z"
+      },
+      {
+        "issue": 257,
+        "reason": "protected paths changed — human merge required: .factory/bin/run-stage.js, .factory/lib/prove-test.js, factory/bin/run-stage.js, factory/lib/prove-test.js, factory/test/prove-test.test.js, factory/test/run-stage.test.js (see PR #264)",
+        "at": "2026-10-11T09:07:54Z"
+      },
+      {
+        "issue": 254,
+        "reason": "protected paths changed — human merge required: .factory/bin/run-stage.js, .factory/lib/verify-stage.js, factory/bin/run-stage.js, factory/lib/verify-stage.js, factory/test/context.test.js, factory/test/merge-stage.test.js, factory/test/run-stage.test.js, factory/test/verify-stage.test.js (see PR #255)",
+        "at": "2026-10-11T01:02:35Z"
+      },
+      {
+        "issue": 253,
+        "reason": "protected paths changed — human merge required: .factory/bin/run-stage.js, factory/bin/run-stage.js, factory/test/helpers/builder-session.js, factory/test/run-stage-branch.test.js, factory/test/self-mirror.test.js (see PR #256)",
+        "at": "2026-10-11T02:20:36Z"
+      },
+      {
+        "issue": 249,
+        "reason": "protected paths changed — human merge required: .factory/bin/retro.js, .factory/bin/run-stage.js, .factory/lib/admission.js, .factory/lib/gates.js, .factory/lib/harness-request.js, .factory/lib/transition.js, factory/bin/retro.js, factory/bin/run-stage.js, factory/lib/admission.js, factory/lib/gates.js, factory/lib/harness-request.js, factory/lib/transition.js, factory/test/admission.test.js, factory/test/gates.test.js, factory/test/retro-bin.test.js, factory/test/run-stage.test.js (see PR #250)",
+        "at": "2026-10-10T23:31:45Z"
+      },
+      {
+        "issue": 247,
+        "reason": "verifier rejected again after one retry: My round-1 finding is still open. At head 235aed8 the diff still changes a test that already exists on main. Lens 5 reje | I ran prove-test and read its output. It is in prove mode and GREEN, and it is not the reason for this reject. It checks | The test_247_* tests and the test_230 retro promotion test all exist at HEAD. The `verify` field is null for every done_ | No skip or ignore pragma was added. The one grep hit is a false positive: `xit(` matched inside `process.exit(`.",
+        "at": "2026-10-10T21:40:17Z"
+      },
+      {
+        "issue": 239,
+        "reason": "protected paths changed — human merge required: .factory/bin/run-stage.js, .factory/lib/verify-stage.js, factory/bin/run-stage.js, factory/lib/verify-stage.js, factory/test/run-stage.test.js, factory/test/verify-stage.test.js (see PR #265)",
+        "at": "2026-10-11T10:17:46Z"
+      },
+      {
+        "issue": 238,
+        "reason": "protected paths changed — human merge required: .factory/bin/run-stage.js, .factory/lib/context.js, factory/bin/run-stage.js, factory/lib/context.js, factory/test/context.test.js, factory/test/run-stage.test.js, factory/test/workflows.test.js (see PR #266)",
+        "at": "2026-10-11T10:56:50Z"
+      },
+      {
+        "issue": 237,
+        "reason": "protected paths changed — human merge required: .factory/bin/retro.js, .factory/bin/run-stage.js, .factory/bin/verify-stage.js, .factory/lib/config.js, .factory/lib/context.js, factory/bin/retro.js, factory/bin/run-stage.js, factory/bin/verify-stage.js, factory/lib/config.js, factory/lib/context.js, factory/test/context.test.js, factory/test/retro-bin.test.js, factory/test/run-stage.test.js (see PR #267)",
+        "at": "2026-10-11T12:26:11Z"
+      },
+      {
+        "issue": 234,
+        "reason": "protected paths changed — human merge required: .factory/install-manifest.json, .factory/lib/doctor/platform.js, .factory/lib/gh.js, .factory/lib/status.js, factory/cli/doctor.js, factory/cli/status.js, factory/lib/doctor/platform.js, factory/lib/gh.js, factory/lib/status.js, factory/test/doctor-platform.test.js, factory/test/status.test.js (see PR #258)",
+        "at": "2026-10-11T03:17:30Z"
+      },
+      {
+        "issue": 233,
+        "reason": "blocked (undecidable) — needs human",
+        "at": "2026-10-11T00:23:48Z"
+      },
+      {
+        "issue": 232,
+        "reason": "protected paths changed — human merge required: .factory/lib/admission.js, .factory/lib/context.js, .factory/lib/verify-stage.js, factory/lib/admission.js, factory/lib/context.js, factory/lib/verify-stage.js, factory/test/context.test.js, factory/test/verify-stage.test.js (see PR #263)",
+        "at": "2026-10-11T07:30:50Z"
+      },
+      {
+        "issue": 231,
+        "reason": "stage artifact missing or invalid: no candidate matched the stage schema — transcript: the Workflow tool result is a background receipt, not a return value (1 call(s)) | transcript task-notification #1: head_sha is required; pr is required; verifier is required | transcript file read loaded.json: verifier is required; guarantee is required | transcript tool result #1: verifier is required; guarantee is required | result bare JSON: head_sha is required; pr is required; verifier is required",
+        "at": "2026-10-11T04:50:12Z"
+      },
+      {
+        "issue": 230,
+        "reason": "stage artifact missing or invalid: no candidate matched the stage schema — transcript: the Workflow tool result is a background receipt, not a return value (1 call(s)) | transcript task-notification #1: head_sha is required; pr is required; verifier is required | transcript file read loaded.json: verifier is required; guarantee is required | transcript tool result #1: verifier is required; guarantee is required | result bare JSON: head_sha is required; pr is required; verifier is required",
+        "at": "2026-10-10T19:59:56Z"
+      },
+      {
+        "issue": 227,
+        "reason": "protected paths changed — human merge required: .factory/bin/run-stage.js, .factory/lib/context.js, .factory/lib/labels.js, factory/bin/run-stage.js, factory/lib/context.js, factory/lib/labels.js, factory/test/context.test.js, factory/test/labels.test.js, factory/test/run-stage.test.js (see PR #273)",
+        "at": "2026-10-11T15:40:34Z"
+      },
+      {
+        "issue": 226,
+        "reason": "protected paths changed — human merge required: .factory/bin/run-stage.js, .factory/lib/context.js, factory/bin/run-stage.js, factory/lib/context.js, factory/test/context.test.js, factory/test/run-stage.test.js (see PR #228)",
+        "at": "2026-10-10T18:13:22Z"
+      },
+      {
+        "issue": 217,
+        "reason": "protected paths changed — human merge required: .factory/lib/gh.js, factory/lib/gh.js, factory/test/evidence.test.js, factory/test/gh.test.js, factory/test/run-stage.test.js (see PR #269)",
+        "at": "2026-10-11T13:04:20Z"
+      },
+      {
+        "issue": 206,
+        "reason": "stage artifact missing or invalid: no candidate matched the stage schema — transcript: the Workflow tool result is a background receipt, not a return value (1 call(s)) | transcript task-notification #1: head_sha is required; pr is required; verifier is required | transcript file read loaded.json: verifier is required; guarantee is required | transcript tool result #1: verifier is required; guarantee is required | result bare JSON: head_sha is required; pr is required; verifier is required",
+        "at": "2026-10-11T14:18:39Z"
       }
     ]
   },
@@ -1692,17 +2060,17 @@
     "overlapping_findings": 0,
     "unique_findings_by_role": {},
     "overlap_ratio": 0,
-    "needs_human": 1,
-    "qa_approvals": 0,
-    "qa_claims_total": 0,
-    "qa_na_total": 0,
-    "qa_na_ratio": 0,
-    "qa_na_heavy_approvals": 0,
+    "needs_human": 24,
+    "qa_approvals": 15,
+    "qa_claims_total": 77,
+    "qa_na_total": 27,
+    "qa_na_ratio": 0.26,
+    "qa_na_heavy_approvals": 4,
     "usage": {
-      "cost_usd": 44.198985,
+      "cost_usd": 356.133209,
       "tokens": {
-        "input": 937448,
-        "output": 84484
+        "input": 8640822,
+        "output": 771681
       }
     }
   },
