@@ -298,8 +298,8 @@ export function commentsSinceRequeue(comments) {
  * 먼저 나가게 된 뒤로 한 가지 예외가 생겼다: 스왑이 4번의 CLI 시도 + REST까지 전부 실패하면 코멘트만
  * 남는다. K=3에서 그런 장애 두 번이면 멀쩡한 이슈가 라운드를 다 쓴다 — 그 창을 이 마커가 닫는다.
  */
-export function countTransitionsTo(comments, to) {
-  return countedTransitionIndices(comments, to).length;
+export function countTransitionsTo(comments, to, opts) {
+  return countedTransitionIndices(comments, to, opts).length;
 }
 
 /**
@@ -311,7 +311,7 @@ export function countTransitionsTo(comments, to) {
  * factory 계정의 코멘트 본문이라 에이전트가 쓸 수 있다 — 취소를 따르는 셈은 코멘트 하나로 **줄어든다**. 천장은 코멘트가
  * 더해질수록 늘기만 하는 셈 위에 있어야 위조가 멈춤을 앞당길 뿐 늦추지 못한다. 대가: 진짜 라벨 스왑 실패도 천장의 한 칸을 쓴다.
  */
-export function countedTransitionIndices(comments, to, { honourFailed = true, exemptConflictRounds = true } = {}) {
+export function countedTransitionIndices(comments, to, { honourFailed = true, exemptConflictRounds = true, rejecting = false } = {}) {
   const out = [];
   const list = Array.isArray(comments) ? comments : [];
   list.forEach((c, i) => {
@@ -330,7 +330,7 @@ export function countedTransitionIndices(comments, to, { honourFailed = true, ex
    * (`honourFailed: false`)은 그대로 늘기만 한다. 충돌 전이가 없는 창은 바이트 하나 다르지 않다.
    */
   if (to === "factory:rework" && honourFailed && exemptConflictRounds) {
-    const exempt = conflictExemptIndices(list, out);
+    const exempt = conflictExemptIndices(list, out, { rejecting });
     if (exempt.size) return out.filter((i) => !exempt.has(i));
   }
   return out;
@@ -395,7 +395,7 @@ export function conflictExemptionNote(comments) {
  * 마커도 factory 계정의 코멘트라 에이전트가 쓸 수 있다: 그래서 면제는 진짜 모양의 충돌 전이에만 붙고, 상수로 묶이고, 2K 천장의 셈
  * (`honourFailed: false`, `kRestartState().attempts`)에는 걸리지 않는다 — 위조는 많아야 그 개수만큼 K를 늦출 뿐 천장을 넘기지 못한다.
  */
-function conflictExemptIndices(list, ids) {
+function conflictExemptIndices(list, ids, { rejecting = false } = {}) {
   if (!list.some((c) => conflictRoundOf(c?.body))) return new Set();
   const out = new Set();
   ids.forEach((i, n) => {
@@ -404,6 +404,10 @@ function conflictExemptIndices(list, ids) {
     // dw6 — the next rework is not the merge stage's (the review after the conflict round rejected it): not a finished conflict round,
     // the exemption is revoked and this rework counts as today. The cost side reads the same event (`lib/budget.js` `reviewRejectedAfter`).
     if (next !== undefined && !mergeConflictRework(list[next]?.body)) return;
+    // dw6 (skeptic, round 3) — `rejecting`: the review that is deciding on the window's LAST conflict round (no rework after it yet) is
+    // rejecting it. Its round is decided as today — the undecided conflict rework counts — so a reject at today's round K goes to
+    // factory:needs-human, not to one extra exempt rework round (and the issue's rounds stay consecutive once that rework is posted).
+    if (next === undefined && rejecting) return;
     // skeptic f6 — the marker must be bound to THIS round: the approved review handoff the merge stage acted on (its head and issue),
     // and the runner's own position — after this round's hand-off transition to awaiting-review, before the next rework.
     const approved = latestHandoff(list.slice(0, i), "review");

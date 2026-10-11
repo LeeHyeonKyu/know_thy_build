@@ -188,7 +188,10 @@ export function parseRunRecord(text, { reviewReworks = false } = {}) {
       // which is where the #196 flow's re-review sits). A forged line can only ADD a rejection (that counts a conflict round again) —
       // it never hides one. cf2: a REFUSED transition (`transition refused: <reason>`, run-stage `refusal(t)`) did not reach
       // factory:approved either — transition.js parks the issue in factory:needs-human — so it ends the conflict round the same way.
-      ...(reviewReworks && m[1] === "review" && bodyLines.some((l) => /^transition: factory:(?!approved(?:\s|$))\S/.test(l) || /^transition refused:/.test(l)) ? { review_rejected: true } : {}),
+      // Skeptic (round 3) — two runner transitions do NOT end the review and are not read: the engine-crash block (an `engine_crash` section,
+      // `transition: factory:blocked (cause=engine-crash)` — the sweeper retries the review) and the harness park (`transition:
+      // factory:needs-info` — unparked back to review when the harness issue closes). Either way the retried review decides.
+      ...(reviewReworks && m[1] === "review" && !engineCrash && bodyLines.some((l) => /^transition: factory:(?!(?:approved|needs-info)(?:\s|$))\S/.test(l) || /^transition refused:/.test(l)) ? { review_rejected: true } : {}),
     });
     // #212 skeptic — a runner revocation (first body line, naming this section's implement stage and runner) withdraws ITS run's
     // conflict-round tag: tag without marker is not a conflict round. The runner writes it right after its own tag, so it is the LATEST

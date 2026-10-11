@@ -7358,3 +7358,136 @@ test("test_212_conflict_round_rejected_at_round_k_counts_as_today", async () => 
     expect(inc.capCheck(), `restart=${restart}`).not.toHaveProperty("conflictUsd");
   }
 });
+
+// ── #212 self-critique (skeptic, round 3) — the review that DECIDES on a conflict round decides on today's round; a crashed or parked
+// re-review is not a rejection. Fixtures: the real merge stage, the real implement round (incident212's pieces), and the REAL review stage
+// (runStage → reviewRounds from the production K deps → nextState → transition()), so the round the deciding review uses is observed.
+import { reviewRoundOf } from "../bin/run-stage.js";
+/** incident212 with `reworks` review reworks before the approval (the #196 flow with a different round count) */
+async function incidentN212(reworks) {
+  const gh = issue212();
+  const repo = await repo212();
+  const recRoot = mkdtempSync(join(tmpdir(), "rec212n-"));
+  for (let i = 0; i < reworks; i++) await reviewRework212(gh, repo.approved);
+  await review212(gh, repo.approved, [approve212("correctness"), approve212("qa")], "approved");
+  appendRunRecord({ root: recRoot, issue: 212, stage: "implement", runnerId: "gha-1", lines: ["verify: ok", usageLine({ usage: {}, total_cost_usd: 62.38, num_turns: 9, terminal_reason: "end_turn" })] });
+  gh.label = "factory:approved";
+  expect(await runMergeStage212({
+    issue: 212, defaultBranch: "main", headSha: repo.approved,
+    d: { prInfo: async () => ({ number: 31, state: "OPEN", mergeable: "CONFLICTING" }), transition: ({ to, reason, cause }) => transition({ gh, issue: 212, to, reason, cause, stage: "merge", env: {} }) },
+    record: () => {}, refusal: () => [],
+  })).toBe(2);
+  const read = () => readFileSync(join(recRoot, "docs/factory/runs/212.md"), "utf8");
+  const k = () => makeKRestartDeps212({ gh, issue: 212 }).reviewRounds();
+  const capCheck = () => budgetCheck212({ charter: { budget: { usd_per_issue: 62.38 } }, recordText: read() });
+  return { gh, repo, recRoot, read, k, capCheck };
+}
+/** the real review stage on `inc`; only the approved/blocked/needs-info transitions are faked (its merge-side requirements are not this test's subject) */
+async function reviewStage212(inc, { K = 3, verdicts, decision, runnerId = "gha-r", throwAt = null, dependencyBlock = null, budget = false }) {
+  const transitions = [], handoffRounds = [];
+  const kDeps = makeKRestartDeps212({ gh: inc.gh, issue: 212 });
+  inc.gh.label = "factory:awaiting-review";
+  const code = await runStage({
+    stage: "review", issue: 212, runnerId, runId: runnerId.replace(/^gha-/, ""),
+    deps: {
+      charterReady: async () => true, trustWorkspace: async () => {}, claim: async () => ({ ok: true }), assertHandoff: async () => ({ ok: true }),
+      heartbeat: async () => ({ stop() {} }), release: async () => true, gates: async () => null,
+      ...(budget ? { lifetimeBudget: async () => inc.capCheck() } : {}),
+      ...(dependencyBlock ? { dependencyBlock } : {}),
+      buildContext: async () => ({ roster: ["correctness", "qa"], orchestration: "workflow", limits: { K } }),
+      claudeP: async () => ({ is_error: false, result: "{}", usage: { input_tokens: 3 }, total_cost_usd: 1, num_turns: 2, terminal_reason: "end_turn" }),
+      verifyStage: () => {
+        if (throwAt === "verify") throw new TypeError("Cannot read properties of undefined (reading 'verdicts')");
+        return { ok: true, reasons: [], data: { schema: "factory.review.v1", issue: 212, pr: 31, head_sha: inc.repo.approved, round: 1, orchestration: "workflow", verdicts, ...(decision ? { decision } : {}) } };
+      },
+      writeHandoff: async ({ data } = {}) => { handoffRounds.push(data?.round); },
+      reviewRounds: kDeps.reviewRounds,
+      transition: async ({ to, reason, by, cause }) => {
+        transitions.push(to);
+        if (to === "factory:approved" || to === "factory:blocked" || to === "factory:needs-info") { inc.gh.label = to; return { ok: true, to }; }
+        return transition({ gh: inc.gh, issue: 212, to, reason, by, cause, stage: "review", env: {} });
+      },
+      runRecord: (lines) => appendRunRecord({ root: inc.recRoot, issue: 212, stage: "review", runnerId, lines }),
+    },
+  });
+  const evidence = [...inc.read().matchAll(new RegExp(`^review-evidence: run_id=${runnerId.replace(/^gha-/, "")} .* round=(\\S+) decision=(\\S+)`, "gm"))].map((m) => [m[1], m[2]]);
+  return { code, transitions, handoffRounds, evidence };
+}
+
+test("test_212_rejecting_rereview_decides_on_todays_round", async () => {
+  // One review rework, approval at round 2, the real merge-stage CONFLICTING, then a GREEN conflict round. Today (no exemption) the re-review
+  // is round 3 = 1 review rework + the conflict rework + 1. A REJECTING re-review must decide on that round — dw6 "counts K as today":
+  // with K=3 it goes to factory:needs-human (not one extra exempt factory:rework round), and its handoff and evidence line say round 3.
+  const atK = await incidentN212(1);
+  expect((await implementRound212({ gh: atK.gh, repo: atK.repo, recRoot: atK.recRoot, runnerId: "gha-2", cost: 9.5, builder: resolveOnly212 })).code).toBe(0);
+  expect(await atK.k()).toBe(1);                                           // the finished-looking conflict round is exempt while undecided…
+  const rj = await reviewStage212(atK, { K: 3, verdicts: [reject212("correctness"), approve212("qa")] });
+  expect(rj.transitions).toEqual(["factory:needs-human"]);                 // …but the rejection is decided at today's round 3 = K
+  expect(atK.gh.label).toBe("factory:needs-human");
+  expect(rj.handoffRounds).toEqual([3]);
+  expect(rj.evidence).toEqual([["3", "rework"]]);
+  // …and the same when the review handoff carries its own decision (the aggregation is skipped; the round is still today's).
+  const carried = await incidentN212(1);
+  expect((await implementRound212({ gh: carried.gh, repo: carried.repo, recRoot: carried.recRoot, runnerId: "gha-2", cost: 9.5, builder: resolveOnly212 })).code).toBe(0);
+  const rc = await reviewStage212(carried, { K: 3, verdicts: [reject212("correctness"), approve212("qa")], decision: "rework" });
+  expect(rc.transitions).toEqual(["factory:needs-human"]);
+  expect(rc.handoffRounds).toEqual([3]);
+
+  // K=4: the same rejection is today's round 3 → factory:rework, and the next review is round 4 — consecutive, no gap in the issue's rounds.
+  const below = await incidentN212(1);
+  expect((await implementRound212({ gh: below.gh, repo: below.repo, recRoot: below.recRoot, runnerId: "gha-2", cost: 9.5, builder: resolveOnly212 })).code).toBe(0);
+  const rj4 = await reviewStage212(below, { K: 4, verdicts: [reject212("correctness"), approve212("qa")] });
+  expect(rj4.transitions).toEqual(["factory:rework"]);
+  expect(rj4.handoffRounds).toEqual([3]);
+  expect(await below.k()).toBe(3);                                          // 1 review rework + the (revoked) conflict rework + this reject
+  expect(reviewRoundOf(await below.k(), null).round).toBe(4);
+
+  // Control (dw5 unchanged): an APPROVING re-review keeps the exemption — after 2 review reworks it is round 3 = K, not 4, so merge's `round > K` quorum check never trips on it.
+  const ok = await incidentN212(2);
+  expect((await implementRound212({ gh: ok.gh, repo: ok.repo, recRoot: ok.recRoot, runnerId: "gha-2", cost: 9.5, builder: resolveOnly212 })).code).toBe(0);
+  const ap = await reviewStage212(ok, { K: 3, verdicts: [approve212("correctness"), approve212("qa")] });
+  expect(ap.transitions).toEqual(["factory:approved"]);
+  expect(ap.handoffRounds).toEqual([3]);                                    // 2 review reworks + 1: the conflict rework is not a round
+  expect(ap.evidence).toEqual([["3", "approved"]]);
+  expect(await ok.k()).toBe(2);
+});
+
+test("test_212_crashed_or_parked_rereview_keeps_the_conflict_exemption", async () => {
+  // The #196 cap scenario: the record is AT the lifetime cap and the GREEN conflict round's $9.50 is excluded. The re-review first crashes
+  // (the real runStage catch: engine-crash block, `transition: factory:blocked (cause=engine-crash)`), then is parked on a harness issue
+  // (`transition: factory:needs-info`). Neither ended the review — the sweeper/unpark retries it — so neither revokes the exclusion, and the
+  // retried review passes the budget gate at entry and approves. dw6 revokes only on a review that ends anywhere other than factory:approved.
+  const inc = await incident212();
+  expect((await implementRound212({ gh: inc.gh, repo: inc.repo, recRoot: inc.recRoot, runnerId: "gha-2", cost: 9.5, builder: resolveOnly212 })).code).toBe(0);
+  expect(inc.capCheck()).toMatchObject({ ok: true, usd: 62.38, conflictUsd: 9.5, conflictRuns: 1 });
+
+  const crash = await reviewStage212(inc, { runnerId: "gha-r1", verdicts: [], throwAt: "verify", budget: true });
+  expect(crash.code).toBe(1);
+  expect(crash.transitions).toEqual(["factory:blocked"]);
+  expect(inc.read()).toMatch(/^engine-crash: stage=review runner=gha-r1 /m);
+  expect(inc.read()).toMatch(/^transition: factory:blocked \(cause=engine-crash\)$/m);
+  expect(inc.capCheck()).toMatchObject({ ok: true, usd: 62.38, conflictUsd: 9.5, conflictRuns: 1 });
+  expect(inc.capCheck()).not.toHaveProperty("conflictRevokedRuns");
+
+  const park = await reviewStage212(inc, { runnerId: "gha-r2", verdicts: [], dependencyBlock: async () => 300, budget: true });
+  expect(park.code).toBe(0);
+  expect(park.transitions).toEqual(["factory:needs-info"]);
+  expect(inc.read()).toMatch(/^transition: factory:needs-info$/m);
+  expect(inc.capCheck()).toMatchObject({ ok: true, usd: 62.38, conflictUsd: 9.5 });
+  expect(inc.capCheck()).not.toHaveProperty("conflictRevokedRuns");
+
+  const retry = await reviewStage212(inc, { runnerId: "gha-r3", verdicts: [approve212("correctness"), approve212("qa")], budget: true });
+  expect(inc.read()).not.toMatch(/REFUSED/);
+  expect(retry.transitions).toEqual(["factory:approved"]);
+  expect(inc.gh.label).toBe("factory:approved");
+  // after it: 62.38 + this review's own $1 (the crashed run's $1 is the engine-crash exclusion); the conflict round's $9.50 stays excluded
+  expect(inc.capCheck()).toMatchObject({ usd: 63.38, conflictUsd: 9.5, conflictRuns: 1, engineRuns: 1 });
+  expect(inc.capCheck()).not.toHaveProperty("conflictRevokedRuns");
+
+  // Control: a re-review that really rejects still revokes (the crash/park carve-out is not a blanket pass).
+  const rej = await incident212();
+  expect((await implementRound212({ gh: rej.gh, repo: rej.repo, recRoot: rej.recRoot, runnerId: "gha-2", cost: 9.5, builder: resolveOnly212 })).code).toBe(0);
+  await reviewStage212(rej, { runnerId: "gha-r1", verdicts: [], throwAt: "verify" });
+  await reviewStage212(rej, { runnerId: "gha-r2", verdicts: [reject212("correctness"), approve212("qa")] });
+  expect(rej.capCheck()).toMatchObject({ ok: false, conflictRevokedUsd: 9.5, conflictRevokedRuns: 1 });
+});
