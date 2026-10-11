@@ -4511,6 +4511,28 @@ doctor-ci의 토큰 검사는 `continue-on-error`라 잡을 죽이지 않지만 
 `gh pr edit`류의 GraphQL `viewer` 조회가 App 토큰에서 어떻게 되는지는 #217(REST PATCH)이 비켜 간다. own-calendar는 다음 릴리스로
 업그레이드하고 같은 두 시크릿을 넣는다. `bot-hk`가 복구되면 숨겨진 PR·코멘트가 다시 보이고, 그 계정은 PAT 폴백으로만 남는다.
 
+### ADR-038 보정 — 머지 잡의 git 자격은 머지 배우의 것이다; 창은 토큰보다 짧아야 열린다 — 2026-10-11
+
+**실측(#249·#212, 머지 런 38160716604·38160719884).** ADR-039 뒤 처음으로 판정 경로 자동 머지가 창까지 갔다. 창은 17:42에 열려 18:42에
+닫혔고, 그 직후 리뷰 재검증의 `factory/records` fetch가 죽었다 — `fatal: could not read Username for 'https://github.com'`. 락 해제와
+run 기록 push도 같은 줄로 죽었다. 원인은 코드가 아니라 **자격증명의 수명**이다: ADR-038 뒤 체크아웃이 심는 토큰은 App 설치 토큰이고
+그것은 민팅 뒤 60분에 만료된다(GitHub 문서 "Generating an installation access token": *The installation access token will expire after
+1 hour*). ADR-033이 정한 창은 60분, **잡 안 대기**다. 그 둘은 양립하지 않았고, 만료는 401 뒤 사용자명 프롬프트로 나타나 "review evidence
+not bound to a factory run"으로 읽혔다 — 이슈는 needs-human이 됐고 PR head에는 pending `factory/veto-window` 상태가 남았다.
+
+**결정(운영 세션, ADR-021·ADR-033·ADR-038의 교차점이라 새 번호를 쓰지 않는다).**
+1. **머지 잡의 체크아웃 자격은 `FACTORY_MERGE_TOKEN || App || PAT`다.** 두 배우 모드에서 머지 잡의 `GH_TOKEN`은 이미 머지 PAT이고,
+   그 잡은 `claude -p`를 띄우지 않으며(ADR-021: 머지 권한이 사는 유일한 잡), 스크럽 스텝이 그 리터럴을 지운다 — 같은 잡의 git이 같은
+   자격을 쓰는 것은 노출을 늘리지 않는다. `yml-lint`의 `merge-token-scope`(파일·스텝 범위)는 그대로 통과한다.
+2. **단일 배우 App 모드는 fail-closed.** 워크플로가 `FACTORY_GIT_TOKEN_TTL_MINUTES`(머지 PAT면 `0`, App이면 `60`)를 싣고, merge-stage의
+   창 열기는 잡 예산 검사와 같은 모양으로 "잡 시작 + 수명 − 지금 ≥ 창 + 10분 여유"를 묻는다. 모자라면 창을 열지 않고 blocked로 이유를
+   말한다(머지 PAT를 넣거나 `veto_minutes`를 낮추라고). 한 시간 뒤에 알 수 없는 이유로 죽는 것보다 지금 이유를 말하는 쪽이 낫다.
+3. **창을 잡 밖으로 내는 재진입 설계(ADR-037 토론 (1)의 stalled 팔 안)는 채택하지 않는다** — ADR-033의 소유자 결정("잡 안 대기")을
+   유지하고, 설치 토큰을 엔진이 재민팅하는 안(개인 키를 스텝 env로 — 노출면 확대)도 택하지 않는다. 템플릿 사본도 같이 바꾼다.
+
+**남는 것**: #249·#212는 재큐로 다시 돈다(그 head에 남은 pending `factory/veto-window`는 새 런이 새 상태를 올리며 덮는다). 운영 door는
+pending 상태가 있는 PR을 머지하지 않으므로(`operator-merge-check`), 죽은 런이 남긴 창은 door로도 못 연다 — 그것이 맞다.
+
 ## ADR-039 소유자는 거부권이다 — 판정 경로 자동 머지 ON, 운영 세션이 자기 PR을 머지한다 — 2026-10-10 (소유자 결정)
 
 **소유자(원문)**: "이거 사람역할 하는 agent를 하나 띄워서 나한테 pr 검토 받지 않고 merge하도록 해. 이거 때문에 너무 블로커가 심하다."

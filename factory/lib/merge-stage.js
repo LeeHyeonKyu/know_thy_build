@@ -383,7 +383,8 @@ async function waitForChecksSettled({ prChecks, pr, required, sleep, waitSec = D
  *      factoryLogins()  → { ok, logins: string[], reason? }  팩토리 자신의 계정 이름(값이 아니라 이름)
  *    humanGate?       → CHARTER `merge.human_gate`(boolean|undefined) — 머지 전이 텍스트에만 쓴다.
  *    #179 자기 변경 경로(ADR-033): selfChange?(CHARTER `self_change`), engine?(base에서 계산), neverAutomate?(CHARTER
- *    NEVER_AUTOMATE 글롭 — 경로를 탈 때 필수, 없으면 blocked), vetoWindow·vetoLabel·now·sleep?·jobStartedAt·jobTimeoutMinutes.
+ *    NEVER_AUTOMATE 글롭 — 경로를 탈 때 필수, 없으면 blocked), vetoWindow·vetoLabel·now·sleep?·jobStartedAt·jobTimeoutMinutes,
+ *    gitTokenTtlMinutes?(체크아웃 토큰의 수명(분) — App 설치 토큰이면 60, 만료 없는 PAT면 null/0; 창 + 여유가 그 안에 들어야 연다).
  *    그 경로의 머지는 `mergePr(pr, { matchHeadCommit })`로 창 뒤에 재검증한 head를 못 박는다.
  * headSha: review·merge가 checkoutHead로 고정한 PR head — 없으면 gates().head_sha로 대신한다(둘 다
  * 없으면 "unknown"으로 남긴다. 아무것도 지어내지 않는다).
@@ -1183,13 +1184,32 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
     if (!Number.isFinite(openedAt)) return await undecidable(what, "clock returned no time");
     const windowMs = vetoMinutes * 60 * 1000;
     const remainingMs = started + timeout * 60 * 1000 - openedAt;
+    const marginMin = VETO_POST_WINDOW_MARGIN_MS / 60000;
     // 창 뒤의 일(리뷰 재검증·승인·머지·전이)도 같은 잡 안에서 끝나야 한다 — 잡이 창 끝에서 죽으면 finally가 돌지 않는다(KTB-24).
     if (remainingMs < windowMs + VETO_POST_WINDOW_MARGIN_MS) {
-      const marginMin = VETO_POST_WINDOW_MARGIN_MS / 60000;
       const reason = `veto window does not fit in this merge job — timeout-minutes: ${timeout} leaves ${Math.max(0, Math.floor(remainingMs / 60000))} min, CHARTER self_change.veto_minutes: ${vetoMinutes} plus a ${marginMin} min margin for the post-window re-verify and merge; raise timeout-minutes in .github/workflows/factory-merge.yml above ${vetoMinutes + marginMin} (plus the gate time) or lower veto_minutes — no window was opened`;
       const t = await toBlocked(reason);
       record([`merge: veto window not started — ${reason}`, ...refusal(t)]);
       return 2;
+    }
+    /**
+     * ADR-038 보정(2026-10-11, #249·#212) — 잡의 **git 자격증명**도 창보다 오래 살아야 한다. 체크아웃이 심은 토큰이 GitHub App
+     * 설치 토큰이면 민팅 뒤 60분에 만료되는데(GitHub 문서: "The installation access token will expire after 1 hour"), 창은 60분이라
+     * 창이 닫힌 뒤의 `factory/records` fetch·push와 락 해제가 전부 "could not read Username"으로 죽었다 — 그리고 그 실패는
+     * "review evidence not bound to a factory run"으로 읽혀 needs-human이 됐다. 워크플로가 `FACTORY_GIT_TOKEN_TTL_MINUTES`로
+     * 그 수명을 싣는다(두 배우 모드 = 만료 없는 머지 PAT가 체크아웃 자격이므로 0/없음 = 만료 없음). 수명이 있으면 잡 시작(민팅은 그
+     * 직후다 — 보수적인 앵커)부터 창 + 여유가 그 안에 들어야 연다. 아니면 창을 열지 않고 blocked — 한 시간 뒤에 알 수 없는 이유로
+     * 죽는 것보다 지금 이유를 말하는 것이 낫다.
+     */
+    const ttl = d.gitTokenTtlMinutes;
+    if (Number.isFinite(ttl) && ttl > 0) {
+      const tokenLeftMs = started + ttl * 60 * 1000 - openedAt;
+      if (tokenLeftMs < windowMs + VETO_POST_WINDOW_MARGIN_MS) {
+        const reason = `veto window outlives this job's git credential — the checkout token is a GitHub App installation token that expires ${ttl} min after the job started (${Math.max(0, Math.floor(tokenLeftMs / 60000))} min left), CHARTER self_change.veto_minutes: ${vetoMinutes} plus a ${marginMin} min margin for the post-window re-verify, records sync and merge; set FACTORY_MERGE_TOKEN in the factory-merge environment (two-actor mode — the merge job then checks out with the merge actor's PAT) or lower veto_minutes below ${ttl - marginMin} — no window was opened`;
+        const t = await toBlocked(reason);
+        record([`merge: veto window not started — ${reason}`, ...refusal(t)]);
+        return 2;
+      }
     }
     const closesAt = new Date(openedAt + windowMs).toISOString();
     const description = vetoWindowDescription(closesAt);

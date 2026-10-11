@@ -96,10 +96,15 @@ jobs:
         env:
           APP_SLUG: ${{ steps.factory-token.outputs.app-slug }}
         run: echo "FACTORY_BOT_LOGIN=${APP_SLUG}[bot]" >> "$GITHUB_ENV"
+      # ADR-038 보정(2026-10-11) — **이 잡의 git 자격은 머지 배우의 것이다.** 체크아웃이 심는 토큰은 창 뒤의 `factory/records`
+      # fetch·push와 락 해제가 나가는 유일한 경로인데, App 설치 토큰은 민팅 뒤 60분에 만료되고 거부권 창은 60분이다 — #249·#212의
+      # 머지 런이 창이 닫힌 직후 "could not read Username"으로 죽었다. 두 배우 모드에서는 만료 없는 머지 PAT가 이미 이 스텝 아래
+      # `Run stage`의 `GH_TOKEN`이므로(ADR-021: 머지 권한이 사는 유일한 잡, `claude -p`를 띄우지 않는다) 체크아웃도 같은 자격으로 한다.
+      # 단일 배우 모드(머지 PAT 없음)는 App 토큰 그대로이고, 그때는 아래 `FACTORY_GIT_TOKEN_TTL_MINUTES`가 창이 토큰보다 길면 열지 않게 한다.
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          token: ${{ steps.factory-token.outputs.token || secrets.FACTORY_BOT_TOKEN }}
+          token: ${{ secrets.FACTORY_MERGE_TOKEN || steps.factory-token.outputs.token || secrets.FACTORY_BOT_TOKEN }}
       # 1.4.19 (L20, own-calendar #28) — **큐에서 기다린 런은 만들어진 시점의 커밋을 체크아웃한다.** 단일 self-hosted 러너
       # 뒤에서 50분을 기다린 implement 런이 그 사이 두 번 올라간 엔진(1.4.12 → 1.4.14)을 전혀 보지 못했고, 옛 검증자
       # 프롬프트로 head를 돌려보냈다. 여기서 origin의 기본 브랜치로 갱신한다 — 런의 headSha는 "어느 main에서 시작하라"가
@@ -151,6 +156,8 @@ jobs:
           # 필요한 것은 불리언 하나뿐이다. 시크릿 값을 env에 한 번 더 복사하면 사본이 하나 더 생길
           # 뿐이다 — `GH_TOKEN`이 이미 그 토큰이다.
           FACTORY_TWO_ACTOR: ${{ secrets.FACTORY_MERGE_TOKEN != '' }}
+          # ADR-038 보정 — 체크아웃 토큰의 수명(분). 머지 PAT면 만료 없음(0), App 설치 토큰이면 60: merge-stage가 창 + 여유가 그 안에 드는지 본다.
+          FACTORY_GIT_TOKEN_TTL_MINUTES: ${{ secrets.FACTORY_MERGE_TOKEN == '' && env.FACTORY_APP_CONFIGURED == 'true' && '60' || '0' }}
           FACTORY_RUNNER_ID: gha-${{ github.run_id }}
           FACTORY_RUN_ATTEMPT: ${{ github.run_attempt }}
           # ADR-020 최종 리뷰 MF-2 — **`${{ … }}`를 `run:` 안에 붙여 넣지 않는다.** `inputs.issue`는

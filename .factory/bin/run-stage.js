@@ -2593,6 +2593,8 @@ export function makePrEvidenceDeps({ gh, issue, repo = null, readRecord = null, 
 export function makeMergeSelfChangeDeps({ gh, issue, getCharter, getEngine, env = {}, now = () => Date.now() }) {
   const started = String(env.FACTORY_JOB_STARTED ?? "").trim();
   const timeout = String(env.FACTORY_JOB_TIMEOUT_MINUTES ?? "").trim();
+  // ADR-038 보정 — 워크플로가 싣는 체크아웃 토큰의 수명(분). App 설치 토큰이면 60, 만료 없는 머지 PAT면 0; 없거나 모양이 틀리면 null(= 만료 없음).
+  const ttl = String(env.FACTORY_GIT_TOKEN_TTL_MINUTES ?? "").trim();
   return {
     get selfChange() { return getCharter()?.self_change; },
     get engine() { return getEngine() === true; },
@@ -2603,6 +2605,7 @@ export function makeMergeSelfChangeDeps({ gh, issue, getCharter, getEngine, env 
     now,
     jobStartedAt: /^[0-9]+$/.test(started) && Number(started) > 0 ? Number(started) * 1000 : null,
     jobTimeoutMinutes: /^[0-9]+$/.test(timeout) && Number(timeout) > 0 ? Number(timeout) : null,
+    gitTokenTtlMinutes: /^[0-9]+$/.test(ttl) && Number(ttl) > 0 ? Number(ttl) : null,
     vetoWindow: {
       open: async ({ sha, description }) => {
         try { await gh.setStatus({ sha, context: VETO_WINDOW_CONTEXT, state: "pending", description }); return { ok: true }; }

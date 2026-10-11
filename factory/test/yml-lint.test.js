@@ -393,6 +393,14 @@ test("every agent-token workflow mints a GitHub App token before checkout and ne
   expect(merge).toContain("GH_TOKEN: ${{ secrets.FACTORY_MERGE_TOKEN || steps.factory-token.outputs.token || secrets.FACTORY_BOT_TOKEN }}");
   expect(merge.indexOf("id: two-actor-token-guard")).toBeLessThan(merge.indexOf("id: factory-token"));
   expect(merge).toContain('if [[ -n "${FACTORY_BOT_LOGIN:-}" ]]; then');
+  // ADR-038 보정(2026-10-11) — 머지 잡의 **체크아웃** 자격도 머지 배우 → App → PAT다: App 설치 토큰은 60분에 만료되고 창은 60분이라
+  // 창 뒤의 records push·락 해제가 죽었다(#249·#212). 그리고 그 토큰의 수명을 run-stage에 싣는다(머지 PAT면 0, App이면 60).
+  expect(merge).toMatch(/- uses: actions\/checkout@v4\n {8}with:\n {10}fetch-depth: 0\n {10}token: \$\{\{ secrets\.FACTORY_MERGE_TOKEN \|\| steps\.factory-token\.outputs\.token \|\| secrets\.FACTORY_BOT_TOKEN \}\}\n/);
+  expect(merge).toContain("FACTORY_GIT_TOKEN_TTL_MINUTES: ${{ secrets.FACTORY_MERGE_TOKEN == '' && env.FACTORY_APP_CONFIGURED == 'true' && '60' || '0' }}");
+  // 다른 여덟 파일의 체크아웃은 여전히 App → PAT다 — 머지 토큰은 머지 워크플로 밖으로 나가지 않는다(ADR-021)
+  for (const f of files.filter((x) => x !== "factory-merge.yml")) {
+    expect(readFileSync(join(W, f), "utf8"), f).toMatch(/- uses: actions\/checkout@v4\n {8}with:\n(?: {10}[^\n]*\n)*? {10}token: \$\{\{ steps\.factory-token\.outputs\.token \|\| secrets\.FACTORY_BOT_TOKEN \}\}\n/);
+  }
 });
 
 test("sweeper and integrity workflows", () => {

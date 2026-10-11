@@ -5043,10 +5043,16 @@ test("test_179_run_stage_wires_merge_self_change_deps", async () => {
   expect(deps.engine).toBe(true);
   expect(deps.jobStartedAt).toBe(1790000000 * 1000);
   expect(deps.jobTimeoutMinutes).toBe(90);
+  expect(deps.gitTokenTtlMinutes).toBeNull();                           // ADR-038 보정 — 수명을 싣지 않으면 만료 없음
   expect(deps.now()).toBe(42);
   const noEnv = makeMergeSelfChangeDeps({ gh, issue: 7, getCharter: () => charter, getEngine: () => false, env: {} });
   expect(noEnv.jobStartedAt).toBeNull();
   expect(noEnv.jobTimeoutMinutes).toBeNull();
+  expect(noEnv.gitTokenTtlMinutes).toBeNull();
+  // ADR-038 보정 — 워크플로가 싣는 체크아웃 토큰 수명: App 설치 토큰 "60" → 60, 머지 PAT "0" → null(만료 없음), 모양이 틀리면 null
+  for (const [ttl, want] of [["60", 60], ["0", null], ["an hour", null], ["-60", null]]) {
+    expect(makeMergeSelfChangeDeps({ gh, issue: 7, getCharter: () => charter, getEngine: () => false, env: { FACTORY_GIT_TOKEN_TTL_MINUTES: ttl } }).gitTokenTtlMinutes, ttl).toBe(want);
+  }
   expect(makeMergeSelfChangeDeps({ gh, issue: 7, getCharter: () => charter, getEngine: () => false, env: { FACTORY_JOB_STARTED: "soon", FACTORY_JOB_TIMEOUT_MINUTES: "-5" } }).jobTimeoutMinutes).toBeNull();
 
   const sha = "b".repeat(40);
