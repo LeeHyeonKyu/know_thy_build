@@ -4640,6 +4640,8 @@ doctor-ci의 토큰 검사는 `continue-on-error`라 잡을 죽이지 않지만 
 #249 sec1: `test_249_blocked_retry_hop_is_refused_by_queue_caps`(작성자가 팩토리가 아닌 마커, 진짜 심사기 — `queue_max`·`depth_max`에서 hop 거부,
 blocked·exit 2·상한이 적힌 기록, 구성원 그대로), `test_249_blocked_retry_hop_with_room_still_reaches_triage`(자리가 있으면 hop이 같은 문으로 큐에 넣고
 에이전트에 닿는다), `test_249_hop_restored_entry_recheck_enforces_queue_max`(hop으로 복구된 진입도 `queue_max` 재심사에서 `transition()`과 같은 문장으로 거부).
+
+**#249 main 병합(#261 위로)**: 거부 코드 `codes`는 거부 결과의 **열거되지 않는** 속성이다 — #231·#260 테스트가 `toEqual`로 핀한 거부 결과의 모양을 바꾸지 않고, 같은 프로세스의 `entryRecheck`는 그대로 읽는다(펼치거나 JSON을 지나면 코드가 사라지고 `unreadable`로 남는다 — 내보내지 않는 쪽). #231의 "factory logins could not be resolved" 거부는 `no-done-when`이 아니라 `unreadable`이다: 문은 같은 문장으로 거부하지만 triage 진입 재심사는 로그인 조회 한 번의 실패로 큐의 공장 이슈를 needs-info로 내리지 않는다. 검증: `test_249_unresolved_factory_logins_refusal_is_unreadable_at_the_entry_recheck`, `test_249_local_entry_production_wiring_passes_admission`(main()의 심사기 바인딩이 `factoryLogins: () => resolveFactoryLogins({ gh, env: process.env })` 그대로이고, App 모드에서 마커만 있는 공장 이슈는 들어가며 작성자만 공장인 이슈는 `open_max`에 세진다).
 ## ADR-039 소유자는 거부권이다 — 판정 경로 자동 머지 ON, 운영 세션이 자기 PR을 머지한다 — 2026-10-10 (소유자 결정)
 
 **소유자(원문)**: "이거 사람역할 하는 agent를 하나 띄워서 나한테 pr 검토 받지 않고 merge하도록 해. 이거 때문에 너무 블로커가 심하다."
