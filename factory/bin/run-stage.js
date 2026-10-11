@@ -44,6 +44,7 @@ import { parseHeartbeatComment } from "../lib/board.js";
 import { syncRecords, hydrateRecord, readRecordsDetailed } from "../lib/records-branch.js";
 import { budgetCheck, budgetLine } from "../lib/budget.js";
 import { trustWorkspace } from "./trust-workspace.js";
+import { scrubText, SECRET_ENV } from "./scrub-artifacts.js";
 import { runMergeStage, idlessFailedSuites, VETO_WINDOW_CONTEXT } from "../lib/merge-stage.js";
 import { readBreaker, makeRecordsUploadGuard, makeMergeAbortVouch, persistSelfMergeEvidence } from "../lib/breaker.js";
 import { isEngineCheckout } from "../lib/non-judge-paths.js";
@@ -133,6 +134,37 @@ export function unhandledGateReason(gates) {
   if (gates?.status !== "RED") return null;
   for (const g of Object.values(gates.gates || {})) if (g?.status === "RED" && g.reason) return g.reason;
   return null;
+}
+
+/**
+ * #206 — gates-RED 재시도 finding에 실리는 게이트 `log`의 상한(앞에서 자른다). 설정 키가 아니다: 이슈 코멘트와 재시도
+ * 브리프를 유계로 두는 이 자리만의 관례다.
+ */
+export const GATE_LOG_FINDING_MAX = 300;
+
+/**
+ * 1.4.23 (L26) gates-RED 가지의 finding들 — RED 게이트마다 `{check: "gate:<name>", blocking, detail}`.
+ * id가 있는 게이트는 예전 그대로 `failing: <id…≤10>`이다. #206: id가 없는 게이트(must-not·lint·prove-test의 계약 위반)는
+ * **그 게이트의 `log`가 곧 사유**다 — #195 attempt 1에서 빌더는 `(no test names; see the gate log)`만 보고 추측으로 재시도했다.
+ * 이 detail은 공개 이슈 코멘트(`selfGateRetryComment`, 스크럽 없음)와 브리프로 간다. 그래서 순서가 계약이다:
+ * ① `scrubText` + `SECRET_ENV`(gates.js의 gates-detail과 같은 규칙 원천 — 새 정규식이 아니다)로 스크럽,
+ * ② 개행 → 공백, ③ 코드펜스(```)를 깨뜨린다 — 코멘트의 JSON 블록은 `}` 뒤 첫 ```에서 끝나는 lazy 정규식으로 읽히므로
+ * (issue-comments.js SELF_GATE_FINDINGS_JSON) 로그 속 `} ```` 하나가 블록을 잘라 findings 전체를 잃게 한다,
+ * ④ 앞 `GATE_LOG_FINDING_MAX`자. 스크럽이 자르기보다 먼저여야 경계에 걸친 비밀이 반쪽으로 새지 않는다.
+ * log가 비어 있으면 예전 문구다. ` — ${reason}` 접미 규칙은 바뀌지 않는다.
+ */
+export function gateRedFindings(gates, { env = process.env } = {}) {
+  const secrets = SECRET_ENV.map((k) => env?.[k]).filter((v) => typeof v === "string" && v);
+  const logReason = (log) => {
+    if (typeof log !== "string" || !log.trim()) return "";
+    const one = scrubText(log, { secrets }).text.replace(/\s*[\r\n]+\s*/g, " ").replace(/`{3,}/g, (m) => "'".repeat(m.length)).trim();
+    return one.slice(0, GATE_LOG_FINDING_MAX);
+  };
+  return Object.entries(gates?.gates || {}).filter(([, g]) => g?.status === "RED").map(([name, g]) => {
+    const ids = (Array.isArray(g.failing_ids) && g.failing_ids.length ? g.failing_ids : g.detail?.failing || []).slice(0, 10).join(", ");
+    const why = ids ? `failing: ${ids}` : logReason(g.log) || "failing: (no test names; see the gate log)";
+    return { check: `gate:${name}`, blocking: true, detail: `gate ${name} RED — ${why}${g.reason ? ` — ${g.reason}` : ""}` };
+  });
 }
 
 // MergeBaseError/isMergeBaseError/MERGE_BASE_BLOCKED_REASON/GIT_DIFF_BLOCKED_REASON now live in
@@ -1063,10 +1095,8 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runAt
        * 빨간 게이트의 실패 테스트 id를 발견으로 실어 planned로 돌려보낸다; 두 번째부터는 예전처럼 사람이다.
        */
       if (stage === "implement" && gates?.status === "RED" && !blocked && !apiError && d.selfGateRetry) {
-        const findings = Object.entries(gates.gates || {}).filter(([, g]) => g?.status === "RED").map(([name, g]) => {
-          const ids = (Array.isArray(g.failing_ids) && g.failing_ids.length ? g.failing_ids : g.detail?.failing || []).slice(0, 10);
-          return { check: `gate:${name}`, blocking: true, detail: `gate ${name} RED — failing: ${ids.join(", ") || "(no test names; see the gate log)"}${g.reason ? ` — ${g.reason}` : ""}` };
-        });
+        // #206: `process.env` is passed explicitly here — the scrub's secret values come from the job env, never a silent default.
+        const findings = gateRedFindings(gates, { env: process.env });
         const head = gates.head_sha ?? v.data?.head_sha ?? null;
         const { attempt, total } = await d.selfGateRetry({ head, findings });
         const bounded = attempt >= 2 || (Number.isFinite(total) && total >= SELF_GATE_RETRY_BACKSTOP);
