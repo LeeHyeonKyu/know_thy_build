@@ -1,4 +1,4 @@
-import { neverAutomateHits } from "./verify-stage.js";
+import { neverAutomateHits, DONE_WHEN_RE } from "./verify-stage.js";
 
 /**
  * 설계 2026-09-30 §8.2 (S2) — **큐 진입 심사: job의 형식과 상한으로, 제출자로가 아니라.**
@@ -19,7 +19,8 @@ export const SELF_GENERATED_DEFAULTS = { open_max: 5, depth_max: 1, per_merge_ma
 const IMPROVEMENT_RE = /<!-- factory-improvement fp=\S+(?: tags=\S*)? from=([\w.-]+\/[\w.-]+)#(\d+) -->/;
 const HARNESS_RE = /<!-- factory-harness-request for=(\d+) -->/;
 const FLAKY_RE = /Detected while implementing #(\d+)\./;
-const DONE_WHEN_RE = /^#{2,3}\s*done[_ ]when\b|^done_when:/im;
+// #232 — `DONE_WHEN_RE` now lives in verify-stage.js, beside the parser that reads the items under the same heading:
+// admission and the plan validator must agree on what a done_when section is (one regex, imported above).
 
 const labelsOf = (issue) => (Array.isArray(issue?.labels) ? issue.labels : []).map((l) => (typeof l === "string" ? l : l?.name)).filter(Boolean);
 

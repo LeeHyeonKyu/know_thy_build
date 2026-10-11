@@ -7,6 +7,13 @@ import { changedFiles } from "./changed-files.js";
 import { buildHouseRules } from "./house-rules.js";
 import { commentsSinceRequeue, latestSelfGateFindings, kRestartState, TRANSITION_TO } from "./retro/issue-comments.js";
 
+/**
+ * #232 (E-7) — the issue body's done_when checklist as `[{id, text}]`. Re-exported here because this module is where the
+ * issue body is read for every stage; the parser itself lives beside `DONE_WHEN_RE` in verify-stage.js so admission and
+ * the plan validator share one definition of a done_when section (and verify-stage need not import this module).
+ */
+export { issueDoneWhenItems } from "./verify-stage.js";
+
 const ROSTER_STAGE = { plan: "plan", review: "review" };
 
 /**
