@@ -432,3 +432,43 @@ test("test_212_conflict_marker_binds_to_its_round_and_a_rejecting_review_revokes
   await mergeConflict212(again);
   expect(countTransitionsTo(await window212(again), "factory:rework")).toBe(2);
 });
+
+test("test_212_reworded_note_covers_the_blocked_retry_and_spares_human_reworks", async () => {
+  // The merge retry from factory:blocked emits the same conflict reason (MERGE_CONFLICT_REWORK accepts from=factory:blocked). The REAL merge
+  // stage from blocked is recognised (no note); a reworded reason on that path is counted AND says so — never silently.
+  const blockedRetry = async (reason) => {
+    const g = gh212();
+    await reviewRework212(g);
+    await approvedReview212(g);
+    g.label = "factory:blocked";
+    if (reason === null) {
+      const code = await runMergeStage212({ issue: 212, defaultBranch: "main", headSha: A212,
+        d: { prInfo: async () => ({ number: 31, state: "OPEN", mergeable: "CONFLICTING" }), transition: ({ to, reason: r, cause }) => transition212({ gh: g, issue: 212, to, reason: r, cause, stage: "merge", env: {} }) },
+        record: () => {}, refusal: () => [] });
+      expect(code).toBe(2);
+    } else {
+      const t = await transition212({ gh: g, issue: 212, to: "factory:rework", reason, stage: "merge", env: {} });
+      expect(t.ok, t.reason).toBe(true);
+    }
+    expect(g.label).toBe("factory:rework");
+    await to212(g, "factory:in-progress", { stage: "implement" });
+    return window212(g);
+  };
+  expect(conflictExemptionNote212(await blockedRetry(null))).toBeNull();
+  const rewordedBlocked = await blockedRetry("merge conflict: please rebase on main");
+  expect(countTransitionsTo(rewordedBlocked, "factory:rework")).toBe(2);
+  expect(conflictExemptionNote212(rewordedBlocked)).toMatch(/^conflict-only: not applied — the last rework came from factory:blocked but its reason does not match the merge stage's conflict reason .* counts as a review round/);
+
+  // A person sending an approved PR back (by=human) is not the merge stage at all: it counts as a review round, as today, and the note —
+  // which says "the merge stage's reason was reworded" — stays silent, so it remains a reliable signal of a reword.
+  const human = gh212();
+  await reviewRework212(human);
+  await approvedReview212(human);
+  human.label = "factory:approved";
+  const t = await transition212({ gh: human, issue: 212, to: "factory:rework", reason: "owner: one more change before merge", human: true, stage: "merge", env: {} });
+  expect(t.ok, t.reason).toBe(true);
+  const hw = await window212(human);
+  expect(hw.at(-1).body).toMatch(/^<!-- factory-transition:v1 from=factory:approved to=factory:rework by=human/);
+  expect(countTransitionsTo(hw, "factory:rework")).toBe(2);
+  expect(conflictExemptionNote212(hw)).toBeNull();
+});
