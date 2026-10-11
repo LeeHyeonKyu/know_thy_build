@@ -7078,9 +7078,9 @@ test("test_247_triage_recheck_unwired_is_admission_unwired_itself", async () => 
   expect(lines.filter((l) => /unwired|not wired|re-check skipped/i.test(l) && l !== ADMISSION_UNWIRED)).toEqual([]);
 });
 
-// ── #249 dw5 — the PRODUCTION local-entry call still queues an admissible issue ─────────────────────────────────────
+// ── #249 dw3 — the PRODUCTION local-entry call still queues an admissible issue ─────────────────────────────────────
 // Every other local-entry test injects its own `admission`, so they all stay green if main()'s own
-// `localEntry: makeLocalEntry({ … })` call loses the key — and then, because local entry now fails closed (dw3), every real
+// `localEntry: makeLocalEntry({ … })` call loses the key — and then, because local entry now fails closed (#247 dw3), every real
 // `factory run triage <n>` is refused. main() is not exported and does git/gh I/O inline (no refactor here — plan non_goal), so
 // the call is read from main()'s source the way breaker.test.js / qa-evidence.test.js pin main()'s wiring — and then RUN:
 // each argument main() passes is bound to the value main() binds under that name (`admission` = the one makeStageAdmission
@@ -7094,6 +7094,16 @@ test("test_249_local_entry_production_wiring_passes_admission", async () => {
   expect(mainSrc.match(/\bconst admission = makeStageAdmission\(\{ gh, getCharter: \(\) => charter, /g)).toHaveLength(1);
   expect(mainSrc).not.toMatch(/\bmakeQueueAdmission\(/);
   expect(mainSrc.replace(/\bconst admission = makeStageAdmission\(/, "")).not.toMatch(/(^|[^.\w])admission\s*=(?![=>])/);
+  // …and no second checker anywhere else in main(): exactly ONE makeStageAdmission( call (a second one — e.g. one built without
+  // factoryLogins and handed straight to makeTransitionDep — is a second checker on the queue door), and no `admission:` key
+  // with a value of its own: every consumer receives the one `admission` binding by shorthand.
+  expect(mainSrc.match(/\bmakeStageAdmission\(/g)).toHaveLength(1);
+  expect(mainSrc).not.toMatch(/\badmission\s*:/);
+  for (const consumer of ["makeTransitionDep", "makeHarnessIssueDep", "makeLocalEntry"]) {
+    const callArgs = [...mainSrc.matchAll(new RegExp(`\\b${consumer}\\(\\{([^}]*?)(?:buildExtra|\\}\\))`, "g"))];
+    expect(callArgs, consumer).toHaveLength(1);
+    expect(callArgs[0][1].split(",").map((s) => s.trim()), `${consumer} gets main()'s one admission`).toContain("admission");
+  }
   // the one production local-entry call, and the arguments it really passes
   const calls = [...mainSrc.matchAll(/localEntry: makeLocalEntry\(\{([^}]*)\}\)/g)];
   expect(calls).toHaveLength(1);
@@ -7182,6 +7192,13 @@ import { ADMISSION_UNWIRED as ADMISSION_UNWIRED_249 } from "../lib/transition.js
 // (makeStageAdmission → makeQueueAdmission over this stateful fake gh) judges it exactly as it judges a backlog newcomer, and
 // the entry re-check after it enforces queue_max like any other queued issue. The marker below is written by a NON-factory
 // author on purpose — who wrote it is not what these tests vary.
+// dw1 is a REGRESSION GUARD, not a test of new code: main's hop (runStage → makeTransitionDep → transition()) already runs the
+// whole door, caps included, whatever `prerequisite` says, and this PR leaves that path's code as it is. What the guard proves is
+// that a cap exemption on the hop cannot come back silently. Two mutations were run against it (#249 self-critique), and each turns
+// it red on behaviour (exit 0 instead of 2, #9 written to factory:queue), not on a missing symbol:
+//   (a) makeTransitionDep hands transition() an admission that passes when `entryRecheck` passes (caps ignored) on prerequisite hops;
+//   (b) runStage writes the hop label directly instead of calling d.transition.
+// The with-room control below stays green under (a), so under that mutation the refusal cannot come from disabling the hop.
 const FORGED_ORIGIN_249 = { body: "<!-- factory-blocked-origin from=factory:queue stage=triage cause=api-error -->", author: { login: "mallory" } };
 const blocked249 = (issues) => {
   const { gh, writes } = counted247(issues);
