@@ -6657,15 +6657,17 @@ test("test_257_no_environmental_note_when_verdicts_match_heads_or_levels_differ_
   await suppressed("level mismatch",
     await review257({ implement: { head_sha: HEAD_257, gates: { status: "GREEN", level: "full" } }, reviewGates: red }),
     await review257({ implement: { head_sha: HEAD_257, gates: { status: "GREEN", level: "fast" } }, reviewGates: red }), redToday);
-  // 3. the implement gate ran on another sha: after a self-mirror commit builder_head_sha differs from head_sha
-  //    (sibling: builder_head_sha equal to head_sha)
-  await suppressed("builder_head_sha differs from head_sha",
-    await review257({ implement: { head_sha: HEAD_257, builder_head_sha: "b".repeat(40), mirror_sha: HEAD_257, gates: { status: "GREEN", level: "fast" } }, reviewGates: red }),
-    await review257({ implement: { head_sha: HEAD_257, builder_head_sha: HEAD_257, gates: { status: "GREEN", level: "fast" } }, reviewGates: red }), redToday);
-  //    …and a review gate that measured a different head than the implement gate (sibling: the same head)
+  // 3. a self-mirror round is NOT a sha mismatch: the implement stage commits the mirror BEFORE its gates run, so the implement
+  //    gate measured head_sha (= mirror_sha), the same head review checks out — #253's b4aac9b was such a round. The line stands.
+  const mirrorRound = await review257({ implement: { head_sha: HEAD_257, builder_head_sha: "b".repeat(40), mirror_sha: HEAD_257, gates: { status: "GREEN", level: "fast" } }, reviewGates: red });
+  expect(mirrorRound.lines.filter((l) => l === ENV_LINE_257)).toHaveLength(1);
+  expect(mirrorRound.lines.filter((l) => l !== ENV_LINE_257)).toEqual(redToday.lines);
+  //    The real mismatch: the review gate measured a different head than the implement gate (sibling: the same head, which
+  //    carries the line) — suppressed, and byte-identical to today's run of that review gate.
   const otherHead = gates257("RED", "fast", "d".repeat(40));
-  const otherRun = await review257({ implement: { head_sha: HEAD_257, gates: { status: "GREEN", level: "fast" } }, reviewGates: otherHead });
+  const otherRun = await review257({ implement: { head_sha: HEAD_257, builder_head_sha: "b".repeat(40), mirror_sha: HEAD_257, gates: { status: "GREEN", level: "fast" } }, reviewGates: otherHead });
   const otherToday = await today(otherHead);
+  expect(mirrorRound.lines).toContain(ENV_LINE_257);
   expect(otherRun.lines).not.toContain(ENV_LINE_257);
   expect(otherRun).toEqual(otherToday);
   // 4a. an old implement handoff with no gates field, through the real makeCheckoutHead (sibling: the same handoff with gates)
