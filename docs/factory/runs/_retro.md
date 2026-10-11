@@ -23,13 +23,13 @@
 | rounds/issue (plan/impl/review) | 0 / 0 / 0 | 1.05 / 2.1 / 1.71 |
 | escaped defects | 0 | 26 |
 | revert rate | 없음 | 0.00 (0/21) |
-| needs-human | 1 | 86 |
+| needs-human | 3 | 86 |
 | rejects by role | 없음 | spec-conformance 10, qa 4, correctness 13, architecture 7, security 5 |
 | reviewer overlap | 없음 | 0.49 (21/43, runs 50) |
 | unique findings by role | 없음 | spec-conformance 4, qa 4, correctness 6, architecture 4, security 4 |
-| qa na ratio | 없음 | 0.23 (61/268 claims, na-heavy 9/38 approvals) |
-| cost (usd) | 2.71 | 1346.15 |
-| tokens | input 161452 / output 12437 | input 32705479 / output 2694153 |
+| qa na ratio | 0.29 (2/7 claims, na-heavy 0/1 approvals) | 0.23 (61/268 claims, na-heavy 9/38 approvals) |
+| cost (usd) | 11.71 | 1346.15 |
+| tokens | input 456939 / output 37694 | input 32705479 / output 2694153 |
 | retro cost (usd) | 0.00 | 12.90 |
 | retro tokens | input 0 / output 0 | input 38 / output 33581 |
 | full retros | — | 11 |
@@ -2016,6 +2016,15 @@
           212
         ],
         "source": "dissent"
+      },
+      {
+        "role": "architect",
+        "kind": "good",
+        "text": "Overwriting `data.tier` makes the record false … `docs/factory/DECISIONS.md` §H3 (:2619-2621) says the tier the agent wrote is kept exactly as self-reported … this PR should add a short amendment under §H3 in `docs/factory/DECISIONS.md`. It records P-12 … This follows CLAUDE.md SDD rule 3.",
+        "runs": [
+          254
+        ],
+        "source": "dissent"
       }
     ],
     "flaky": [],
@@ -2177,8 +2186,8 @@
       },
       {
         "issue": 254,
-        "reason": "protected paths changed — human merge required: .factory/bin/run-stage.js, .factory/lib/verify-stage.js, factory/bin/run-stage.js, factory/lib/verify-stage.js, factory/test/context.test.js, factory/test/merge-stage.test.js, factory/test/run-stage.test.js, factory/test/verify-stage.test.js (see PR #255)",
-        "at": "2026-10-11T01:02:35Z"
+        "reason": "agent role sections edited outside Examples/Perspectives — human merge required: .factory/bin/run-stage.js, .factory/lib/verify-stage.js (see PR #255)",
+        "at": "2026-10-11T23:52:58Z"
       },
       {
         "issue": 253,
@@ -2257,8 +2266,8 @@
       },
       {
         "issue": 212,
-        "reason": "lifetime cost $61.21 over 168 run(s) exceeds [budget].usd_per_issue $60 — a person raises the budget (`:proposal`), splits the issue, or closes it (wont-do); the counter spans re-queues and human retries on purpose",
-        "at": "2026-10-11T22:34:41Z"
+        "reason": "gates file missing",
+        "at": "2026-10-11T23:16:36Z"
       }
     ]
   },
@@ -2279,17 +2288,17 @@
     "overlapping_findings": 0,
     "unique_findings_by_role": {},
     "overlap_ratio": 0,
-    "needs_human": 1,
-    "qa_approvals": 0,
-    "qa_claims_total": 0,
-    "qa_na_total": 0,
-    "qa_na_ratio": 0,
+    "needs_human": 3,
+    "qa_approvals": 1,
+    "qa_claims_total": 5,
+    "qa_na_total": 2,
+    "qa_na_ratio": 0.29,
     "qa_na_heavy_approvals": 0,
     "usage": {
-      "cost_usd": 2.709569,
+      "cost_usd": 11.710138,
       "tokens": {
-        "input": 161452,
-        "output": 12437
+        "input": 456939,
+        "output": 37694
       }
     }
   },
