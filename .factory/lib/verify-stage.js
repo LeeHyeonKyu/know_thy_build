@@ -273,9 +273,12 @@ export function normalizePlanHandoff(plan, { maxDoneWhen = 6 } = {}) {
       const raw = typeof d.objection === "string" ? d.objection : typeof d.text === "string" ? d.text : "";
       return { id: d.id, role: d.role.trim(), text: raw.slice(0, SIGNOFF_TEXT_MAX) };   // the first 120 characters, verbatim
     });
+  // The role is agent text bound for the agent-unwritable run record (same class as review-r1's sec1): any
+  // whitespace/control run — line terminators included — becomes `_`, so it can never start a line of its own.
+  const oneLine = (t) => String(t ?? "?").replace(/[\s\u0000-\u001f\u007f-\u009f]+/g, "_");
   const notes = [
     // one record line per objection: each whitespace character becomes one space (no collapsing, the cut does not move).
-    ...signoffObjections.map((o) => `plan: unresolved sign-off objection from ${o.role}: ${o.text.replace(/\s/g, " ")}`),
+    ...signoffObjections.map((o) => `plan: unresolved sign-off objection from ${oneLine(o.role)}: ${o.text.replace(/\s/g, " ")}`),
     ...(dropped.length ? [`plan: skeptic items beyond max_done_when dropped: ${dropped.join(", ")}`] : []),
   ];
   return { doneWhen, dropped, signoffObjections, notes };
