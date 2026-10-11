@@ -11,8 +11,9 @@ import { neverAutomateHits } from "./verify-stage.js";
  *   3. **큐 길이**(`back_pressure.queue_max`) — 외부 에이전트의 큐 홍수. `awaiting_review_max`는 리뷰 대기 수지 큐 길이가 아니다.
  *   4. **자기생성 이슈의 상한**(`self_generated.open_max`, `depth_max`) — 실측 증식률(캠페인 28머지 → 자기생성 7 = 0.25/머지)에서
  *      루프는 이미 수렴한다. 이 상한은 지문 드리프트 같은 결함에 대한 보험이다. 자기생성인지는 **러너가 쓴 마커와 작성 계정**으로
- *      판정한다 — 제출자의 자기 신고(`by=`)가 아니다. 상한의 판정(`isSelfGenerated`)은 넓은 쪽(마커 또는 라벨 또는 공장 작성자)
- *      그대로다(#231): 좁히면 공장이 사람 계정(PAT 폴백)으로 연 이슈가 세지지 않아 증식 상한이 조용히 풀린다.
+ *      판정한다 — 제출자의 자기 신고(`by=`)가 아니다. 심사하는 이슈와 기원 사슬의 상한은 **마커 또는 라벨**로 건다(#231 rework cf1):
+ *      gh.issue()가 작성자를 싣기 전에는 작성자 갈래가 프로덕션에서 돈 적이 없고, 그것을 켜면 공유 계정(PAT 폴백)에서 소유자가 쓴
+ *      보통 피처가 open_max에, 그 피처에서 수확한 flaky가 depth_max에 걸린다. 공장이 연 이슈는 어느 계정이든 마커·라벨을 단다.
  *
  * 리허설(ADR-025)과 같은 자리에서, 같은 방식(배선된 검사기, fail closed)으로 돈다. 상한 상수는 CHARTER에 있고 사람만 고친다.
  */
@@ -31,8 +32,8 @@ const isFactoryLogin = (login, factoryLogins) => !!login && (Array.isArray(facto
 
 /**
  * 공장이 만든 이슈인가 — 마커(개선·하네스·flaky) **또는** 공장 라벨 **또는** 작성 계정이 팩토리 계정.
- * **상한(open_max·depth_max)·진행 중 자기생성 수·기원 사슬**이 쓰는 넓은 판정이다. #231은 이것을 좁히지 않는다: 공장이 소유자 PAT으로
- * 연 이슈(ADR-038 폴백)와 마커만 남은 옛 이슈도 상한에는 세져야 한다 — 좁히면 증식 상한이 조용히 풀린다(fail open).
+ * 진행 중 자기생성 수가 쓰는 넓은 판정이다. 공장이 소유자 PAT으로 연 이슈(ADR-038 폴백)와 마커만 남은 옛 이슈도 상한에는 세진다.
+ * `queueAdmission`은 심사하는 이슈와 기원 사슬에 `factoryLogins` 없이 부른다(rework cf1 — 마커·라벨만, 작성자 갈래 없이).
  * done_when 면제는 더 좁은 `doneWhenExemption`이 따로 판정한다.
  */
 export function isSelfGenerated(issue, factoryLogins = []) {
@@ -86,17 +87,25 @@ const ABBREV_RE = /^(?:[a-z]\.)+[a-z]?$/i;
  * 백틱은 빈 배열이 됐고 NEVER_AUTOMATE 조기 차단이 아무 경로도 보지 못했다. 이제:
  *   - 백틱 토큰은 어디에 있든 전부 읽는다(공백이 섞이면 공백으로 나눠 각각). 백틱은 쓴 사람이 "이것은 경로다"라고 말한 것이므로
  *     `/`·`.` 모양 검사는 하지 않는다(`Dockerfile`도 경로다) — 예전 규칙 그대로다.
- *   - 목록 항목(`- `·`* `·`+ `·`1. `·`1) `)은 백틱 밖의 글도 읽는다: `(…)` 설명과 백틱 구간을 떼고, 공백·쉼표로 나눈 **모든**
- *     토큰 중 경로 모양(`/`나 `.`을 포함하고 `e.g`·`i.e` 같은 약어가 아닌 것)만 받는다 — 산문 항목(`- 없음`, `- none`)을
- *     경로로 읽지 않기 위해서다. 끝의 `,`·`.`·`;`·`:`는 떼어 낸다. 백틱 설명이 붙은 항목(`- a/b.toml (see \`ci.yml\`)`)도,
- *     백틱 없는 쉼표 목록의 두 번째 경로(`- a.js, templates/x.toml`)도 그래서 읽힌다(self-critique, #231).
+ *   - 목록 항목(`- `·`* `·`+ `·`1. `·`1) `)은 백틱 밖의 글도 읽는다: 백틱 구간을 떼고, 경로 문자가 아닌 글자(공백·쉼표·괄호·
+ *     따옴표·한글 조사·`、`…)에서 끊은 **모든** 조각 중 경로 모양(`/`나 `.`을 포함하고 `e.g`·`i.e` 같은 약어가 아닌 것)만 받는다 —
+ *     산문 항목(`- 없음`, `- none`)을 경로로 읽지 않기 위해서다. 끝의 `,`·`.`·`;`·`:`는 떼고, `**굵게**`로 감싼 조각은 속도 읽는다.
+ *     괄호는 버리지 않고 끊는 자리일 뿐이다: `(신규)` 설명은 경로 모양이 아니라 떨어지고, `(templates/x.toml)`·`[링크](a/b.toml)`의
+ *     경로는 읽힌다. 조사가 붙은 `a/b.toml에서`도 `a/b.toml`이 된다(self-critique, #231).
+ *   - 절의 끝을 찾을 때 코드 펜스(```·~~~) 안의 `# …` 줄은 제목이 아니다.
  * 넓게 읽는 쪽은 fail closed 쪽이다: 경로를 더 보면 거부가 늘 뿐이다.
  */
 export function impactPathsOf(body) {
   const text = String(body ?? "");
   const m = /^#{2,3}[ \t]+Impact paths.*$/m.exec(text);
   if (!m) return [];
-  const section = text.slice(m.index + m[0].length).split(/^#{1,3}\s/m)[0];
+  const lines = [];
+  let fence = false;
+  for (const line of text.slice(m.index + m[0].length).split("\n")) {
+    if (/^\s*(?:```|~~~)/.test(line)) fence = !fence;
+    else if (!fence && /^#{1,3}\s/.test(line)) break;
+    lines.push(line);
+  }
   const out = [];
   const keep = (raw, { shaped }) => {
     const p = String(raw).trim().replace(/[,.;:]+$/, "");
@@ -104,12 +113,16 @@ export function impactPathsOf(body) {
     if (shaped && (!/[/.]/.test(p) || ABBREV_RE.test(p))) return;
     if (!out.includes(p)) out.push(p);
   };
-  for (const line of section.split("\n")) {
+  for (const line of lines) {
     for (const t of line.matchAll(/`([^`\n]+)`/g)) for (const tok of t[1].trim().split(/\s+/)) keep(tok, { shaped: false });
     const item = LIST_ITEM_RE.exec(line);
     if (!item) continue;
-    const plain = item[1].replace(/`[^`\n]*`/g, " ").replace(/\([^)]*\)/g, " ");
-    for (const tok of plain.split(/[\s,]+/)) keep(tok, { shaped: true });
+    const plain = item[1].replace(/`[^`\n]*`/g, " ");
+    for (const tok of plain.split(/[^\w.*/@{}!\[\]-]+/)) {
+      keep(tok, { shaped: true });
+      const bold = /^(\*\*|__)([^/].*[^/])\1$/.exec(tok);
+      if (bold) keep(bold[2], { shaped: true });
+    }
   }
   return out;
 }
@@ -124,7 +137,11 @@ export function queueAdmission({ issue, charter, queued = [], openSelfGenerated 
   const caps = { ...SELF_GENERATED_DEFAULTS, ...(charter?.self_generated || {}) };
   const queueMax = Number.isInteger(charter?.back_pressure?.queue_max) ? charter.back_pressure.queue_max : caps.queue_max;
   const reasons = [];
-  const self = isSelfGenerated(issue, factoryLogins);
+  // rework cf1 — 상한은 러너가 쓴 마커·라벨로만 건다(작성자 갈래 없이: 공유 계정에서는 소유자의 피처도 공장 작성자다).
+  // plan non_goal "open_max/depth_max·openSelfGenerated·기원 사슬의 판정을 바꾸지 않는다"와의 관계: #231 전의 gh.issue()는 작성자를
+  // 싣지 않아 작성자 갈래가 프로덕션에서 한 번도 참이 된 적이 없다 — 지금까지 실제로 돈 판정은 마커 또는 라벨이고, 세 상한 입력
+  // (이 이슈, openSelfGenerated, 기원 사슬)이 모두 `[]`로 그 판정을 그대로 지킨다. 작성자를 실은 것이 상한을 바꾸지 않게 하는 것이다.
+  const self = isSelfGenerated(issue, []);
   const body = String(issue?.body ?? "");
 
   // #231 — done_when 면제는 상한의 판정(`self`)보다 좁다: 마커는 공장 로그인이 연 이슈에서만 면제한다(`doneWhenExemption`).
@@ -162,7 +179,7 @@ export function queueAdmission({ issue, charter, queued = [], openSelfGenerated 
     let depth = gen(issue), cur = originOf(issue), hops = 0;
     while (cur && hops++ < 10) {
       const parent = byNumber(cur.number);
-      if (!parent || !isSelfGenerated(parent, factoryLogins)) break;
+      if (!parent || !isSelfGenerated(parent, [])) break;
       depth += gen(parent);
       cur = originOf(parent);
     }
@@ -195,7 +212,8 @@ export function makeQueueAdmission({ gh, charter, factoryLogins = null }) {
       for (const c of candidates.values()) {
         if (c.number === it.number) continue;
         const full = await gh.issue(c.number);
-        if (labelsOf(full).some((l) => ACTIVE.includes(l)) && isSelfGenerated(full, logins)) openSelfGenerated.push({ number: c.number });
+        // 상한 입력은 셋 다 같은 판정(마커 또는 라벨, rework cf1 — queueAdmission의 `self` 주석)으로 센다.
+        if (labelsOf(full).some((l) => ACTIVE.includes(l)) && isSelfGenerated(full, [])) openSelfGenerated.push({ number: c.number });
       }
       const cache = new Map();
       const byNumber = (n) => cache.get(n) ?? null;
