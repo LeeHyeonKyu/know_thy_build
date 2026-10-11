@@ -285,6 +285,9 @@ test("test_231_impact_paths_reads_backticked_and_plain_list_items", () => {
   // 백틱 없는 경로 뒤에 백틱 설명이 붙어도 그 경로를 읽는다(백틱 토큰도 함께 읽는다 — 넓게 읽는 쪽이 fail closed)
   expect(impactPathsOf("## Impact paths\n- templates/factory/harness.toml (see `ci.yml`)\n")).toEqual(["ci.yml", "templates/factory/harness.toml"]);
   expect(impactPathsOf("## Impact paths\n- templates/factory/harness.toml — guarded by `test_1_a`\n")).toContain("templates/factory/harness.toml");
+  // self-critique (#231) — 배열 전체를 핀한다(백틱 토큰은 어디서든 읽는다는 예전 규칙 그대로). 버전 번호(`v1.2`)는 경로 모양이 아니다
+  expect(impactPathsOf("## Impact paths\n- templates/factory/harness.toml — guarded by `test_1_a`\n")).toEqual(["test_1_a", "templates/factory/harness.toml"]);
+  expect(impactPathsOf("## Impact paths\n- a/b.ts — guarded by `test_1_a` and v1.2 or 2.0.1\n- README.md\n")).toEqual(["test_1_a", "a/b.ts", "README.md"]);
   // 백틱 없는 쉼표 목록: 두 번째 자리의 금지 경로도 읽힌다
   expect(impactPathsOf("## Impact paths\n- factory/lib/a.js, templates/factory/harness.toml\n")).toEqual(["factory/lib/a.js", "templates/factory/harness.toml"]);
   // 번호 목록도 목록이다
@@ -307,6 +310,8 @@ test("test_231_impact_paths_reads_backticked_and_plain_list_items", () => {
   for (const [name, item] of Object.entries(leaky)) {
     const sectionBody = `## Impact paths\n${item}\n\n## done_when\n- [ ] \`test_1_a\``;
     expect(impactPathsOf(sectionBody), name).toContain("templates/factory/harness.toml");
+    // self-critique (#231) — 정확히 그 경로 하나다: `**…**`를 벗기기 전의 별표 토큰 같은 찌꺼기 항목이 섞이지 않는다
+    expect(impactPathsOf(sectionBody), name).toEqual(["templates/factory/harness.toml"]);
     const refused = queueAdmission({ issue: { ...person, body: sectionBody }, charter: realCharter231, ...base });
     expect(refused.ok, name).toBe(false);
     expect(refused.reasons.join(" "), name).toContain("NEVER_AUTOMATE: templates/factory/harness.toml (glob templates/factory/**)");
@@ -331,7 +336,7 @@ function filledIssueTemplate(paths) {
   return { md, block, body: block.replace("{{path_1}}", paths[0]).replace("{{path_2}}", paths[1]).replace(/\{\{(\w+)\}\}/g, "filled $1").replace("test_NNN_<slug>", "test_12_button_crash") };
 }
 
-test("test_231_issue_template_impact_paths_are_backticked", () => {
+test("test_231_issue_template_impact_paths_are_backticked", async () => {
   const { md, block } = filledIssueTemplate(["x", "y"]);
   // 템플릿의 Impact paths 항목은 백틱이다
   expect(block).toMatch(/^## Impact paths\n- `\{\{path_1\}\}`\n- `\{\{path_2\}\}`$/m);
@@ -350,6 +355,10 @@ test("test_231_issue_template_impact_paths_are_backticked", () => {
   // 같은 본문에서 금지 경로만 빼면 들어간다(템플릿의 done_when 초안이 job 모양을 채운다)
   const admitted = queueAdmission({ issue: { number: 12, body: clean, labels: ["backlog"], author: "LeeHyeonKyu" }, charter: realCharter, ...base });
   expect(admitted).toEqual({ ok: true, reasons: [], self_generated: false });
+  // self-critique (#231) — 사용자가 실제로 보는 문: 템플릿대로 채운 이슈를 진짜 `makeGh().issue()`(가짜는 gh 실행 경계뿐)로 읽는 큐 심사기
+  const viaGh = (body) => makeQueueAdmission({ gh: ghOver({ 12: { number: 12, body, labels: ["backlog"], author: humanAuthor("LeeHyeonKyu") } }), charter: realCharter, factoryLogins: FACTORY })({ issue: 12 });
+  expect(await viaGh(forbidden)).toEqual({ ok: false, reasons: [refused.reasons[0]], self_generated: false });
+  expect(await viaGh(clean)).toEqual({ ok: true, reasons: [], self_generated: false });
 });
 
 // ── 프로덕션 배선: 가짜는 `gh` 실행 경계에만 둔다. 작성자는 진짜 `makeGh().issue()`가 `gh issue view --json` 출력에서 읽는다.
@@ -523,9 +532,11 @@ test("test_231_factory_flaky_issue_under_pat_author_still_admitted", async () =>
   // 같은 이슈를 사람이 쓰면 자기생성이 아니다
   const byPerson = await makeQueueAdmission({ gh: ghOver({ ...appFeature, 90: { ...appFeature[90], author: humanAuthor("LeeHyeonKyu") } }, lists), charter: charter(), factoryLogins: FACTORY })({ issue: 90 });
   expect(byPerson).toEqual({ ok: true, reasons: [], self_generated: false });
-  // 알려진 한계(plan non_goals[3] — 공유 계정에서는 사람과 에이전트를 가를 수 없다, 고치지 않고 핀한다): 공장이 소유자 계정으로
-  // 도는 저장소(PAT 폴백)에서는 소유자가 쓴 보통 피처도 공장 작성자라 open_max에 세지고, 그 피처에서 수확한 flaky는 2세대다.
-  const SHARED = async () => ({ ok: true, logins: ["LeeHyeonKyu"] });
+  // self-critique (#231, dw5 "factory work is not refused") — 공장이 소유자 계정으로 도는 저장소(PAT 폴백)에서는 소유자 로그인이
+  // 공장 로그인 목록에 든다. 작성자 갈래가 그 로그인으로 서면 소유자의 보통 피처가 전부 자기생성이 되어 open_max에 막히고, 그 피처에서
+  // 수확한 flaky는 2세대로 depth_max에 막힌다 — #231 전에는 gh.issue()가 작성자를 싣지 않아 일어나지 않던 일이다. 그래서 상한의 작성자
+  // 갈래는 저장소 소유자 로그인을 공장 작성자로 세지 않는다(gh.js identityOf와 같은 공유 신원 규칙). 마커·라벨 갈래와 앱 작성자는 그대로다.
+  const SHARED = async () => ({ ok: true, logins: ["LeeHyeonKyu", "ktb-factory[bot]"] });
   const full = {
     ...busy,
     80: { number: 80, body: person.body, labels: ["backlog"], author: humanAuthor("LeeHyeonKyu") },
@@ -535,12 +546,19 @@ test("test_231_factory_flaky_issue_under_pat_author_still_admitted", async () =>
   for (const k of [53, 54, 55]) full[k] = { ...flakyFrom(k, 7, humanAuthor("LeeHyeonKyu")), labels: ["factory:queue", "factory:flaky"] };
   full[41] = { ...full[41], labels: ["factory:in-progress", "factory:flaky"] };
   const sharedAdmit = makeQueueAdmission({ gh: ghOver(full, { lists: { "factory:flaky": fiveOpen.map((number) => ({ number })) } }), charter: { ...charter(), self_generated: { open_max: 5, depth_max: 1 } }, factoryLogins: SHARED });
-  expect(await sharedAdmit({ issue: 80 })).toEqual({ ok: false, reasons: ["self-generated open 6 ≥ 5 (self_generated.open_max)"], self_generated: true });
-  // 같은 배선에서 공장의 flaky도 open_max에 걸린다(상한은 풀리지 않았다)
-  expect((await sharedAdmit({ issue: 81 })).reasons.join(" ")).toMatch(/self-generated open 6 ≥ 5/);
-  // 소유자가 쓴 #7은 공유 로그인에서 공장 세대다 — 그 아래 flaky는 2세대로 depth_max에 걸린다(공장 로그인을 모르면 1세대)
-  const quiet = makeQueueAdmission({ gh: ghOver({ 7: issues[7], 81: full[81] }), charter: charter(), factoryLogins: SHARED });
-  expect((await quiet({ issue: 81 })).reasons).toEqual(["self-generated generation 2 > 1 (self_generated.depth_max) — an issue the factory made from an issue the factory made"]);
-  const unshared = makeQueueAdmission({ gh: ghOver({ 7: issues[7], 81: full[81] }), charter: charter(), factoryLogins: FACTORY });
-  expect(await unshared({ issue: 81 })).toEqual({ ok: true, reasons: [], self_generated: true });
+  // 소유자의 사람 일은 자기생성 상한에 막히지 않는다
+  expect(await sharedAdmit({ issue: 80 })).toEqual({ ok: true, reasons: [], self_generated: false });
+  // 상한은 풀리지 않았다: 같은 배선에서 공장의 flaky(라벨)는 open_max에 걸린다
+  expect((await sharedAdmit({ issue: 81 })).reasons).toEqual(["self-generated open 6 ≥ 5 (self_generated.open_max)"]);
+  // 앱 작성자의 피처는 공유 계정 저장소에서도 작성자 갈래로 센다
+  const sharedApp = await makeQueueAdmission({ gh: ghOver({ ...full, 90: appFeature[90] }, { lists: { "factory:flaky": fiveOpen.map((number) => ({ number })) } }), charter: { ...charter(), self_generated: { open_max: 5, depth_max: 1 } }, factoryLogins: SHARED })({ issue: 90 });
+  expect(sharedApp).toEqual({ ok: false, reasons: ["self-generated open 6 ≥ 5 (self_generated.open_max)"], self_generated: true });
+  // 소유자 피처에서 수확한 flaky는 1세대다 — 공장 로그인 목록에 소유자가 있든 없든 똑같이 들어간다
+  for (const logins of [SHARED, FACTORY]) {
+    const quiet = makeQueueAdmission({ gh: ghOver({ 7: issues[7], 81: full[81] }), charter: charter(), factoryLogins: logins });
+    expect(await quiet({ issue: 81 })).toEqual({ ok: true, reasons: [], self_generated: true });
+  }
+  // 소유자가 쓴 부모라도 마커를 달았으면 여전히 공장의 세대다(마커 갈래는 소유자 규칙과 무관하다)
+  const markedParent = makeQueueAdmission({ gh: ghOver({ 7: issues[7], 60: { number: 60, body: "Detected while implementing #7. evidence: {}", labels: ["backlog"], author: humanAuthor("LeeHyeonKyu") }, 61: flakyFrom(61, 60, humanAuthor("LeeHyeonKyu")) }), charter: charter(), factoryLogins: SHARED });
+  expect((await markedParent({ issue: 61 })).reasons.join(" ")).toMatch(/generation 2 > 1/);
 });
