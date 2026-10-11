@@ -2858,11 +2858,16 @@ test("test_179_judge_path_unanimity_is_provenance_bound", async () => {
 });
 
 // ── #179 self-critique — NEVER_AUTOMATE은 자기 변경 경로 안에서도 사람 머지다 ─────────────────────────────────────
-// `templates/factory/docs/**`는 비판정 목록에 있지만 CHARTER NEVER_AUTOMATE의 `templates/factory/**`에도 걸린다. 스위치가 켜져도
-// 그런 PR은 창을 열지 않고(게이트도 돌지 않고) 오늘의 보호 경로 hand-off 그대로 사람에게 간다. 글롭은 실제 CHARTER에서 읽는다.
+// `templates/factory/docs/**`는 비판정 목록에 있는데, 2026-10-11(허점 원장 P-4)까지는 CHARTER NEVER_AUTOMATE의 `templates/factory/**`에도
+// 걸렸다. 스위치가 켜져도 그런 PR은 창을 열지 않고(게이트도 돌지 않고) 오늘의 보호 경로 hand-off 그대로 사람에게 간다. P-4 뒤 실제 CHARTER는
+// 판정 로직 템플릿만 적어 그 교집합이 **없다** — 그래서 여기서는 실제 목록에 `templates/factory/docs/**`를 더해 넣어 메커니즘을 핀한다
+// (NEVER_AUTOMATE이 비판정 경로를 덮을 때의 동작은 CHARTER가 무엇을 적든 같아야 한다). 실제 목록의 모양도 함께 핀한다.
 test("test_179_never_automate_beats_self_change", async () => {
   const QA_DOC = "templates/factory/docs/QA.md";
-  expect(NEVER_AUTOMATE_179).toContain("templates/factory/**");                 // 실제 CHARTER의 항목이다
+  expect(NEVER_AUTOMATE_179).not.toContain("templates/factory/**");             // P-4: 템플릿 전체 금지는 사라졌다
+  // 정확히 일곱 — 넓은 글롭이 조용히 돌아오면 여기서 소리 난다(P-4 뒤 실제 CHARTER의 모양 그대로).
+  expect([...NEVER_AUTOMATE_179].sort()).toEqual([".env*", ".github/workflows/publish.yml", "factory/hooks/**", "templates/factory/claude/settings.json", "templates/factory/factory/ci-settings*.json", "templates/factory/factory/harness.toml", "templates/factory/github/workflows/**"]);
+  const NEVER_AUTOMATE_WITH_DOCS = [...NEVER_AUTOMATE_179, "templates/factory/docs/**"];
   expect(classifyProtected179([QA_DOC], { engine: true })).toEqual({ non_judge: [QA_DOC], judge: [] });   // 구멍의 전제: 비판정이다
 
   const cases = [
@@ -2871,7 +2876,7 @@ test("test_179_never_automate_beats_self_change", async () => {
     ["judge path with both switches on", ["factory/lib/gates.js", QA_DOC], { auto_merge_non_judge: true, auto_merge_judge: true, veto_minutes: 60 }],
   ];
   for (const [label, files, selfChange] of cases) {
-    const d = selfD179({ protectedPaths: vi.fn(async () => ({ ok: true, files })), selfChange, reviewRoster: vi.fn(async () => ({ ok: true, roles: ["correctness", "qa"], tier: "load-bearing" })) });
+    const d = selfD179({ protectedPaths: vi.fn(async () => ({ ok: true, files })), selfChange, neverAutomate: NEVER_AUTOMATE_WITH_DOCS, reviewRoster: vi.fn(async () => ({ ok: true, roles: ["correctness", "qa"], tier: "load-bearing" })) });
     const { code, lines } = await run179(d);
     const reason = `protected paths changed — human merge required: ${files.join(", ")}`;
     expect(code, label).toBe(2);
@@ -2881,7 +2886,7 @@ test("test_179_never_automate_beats_self_change", async () => {
     expect(lines, label).toEqual([
       "merge: PR #9 is OPEN",
       "merge: PR #9 not conflicting (MERGEABLE)",
-      `merge: self-change path refused — CHARTER NEVER_AUTOMATE matches ${QA_DOC} (templates/factory/**); a NEVER_AUTOMATE path is always human-merged`,
+      `merge: self-change path refused — CHARTER NEVER_AUTOMATE matches ${QA_DOC} (templates/factory/docs/**); a NEVER_AUTOMATE path is always human-merged`,
       `merge: ${reason}`,
     ]);
     for (const dep of [d.vetoWindow.open, d.vetoWindow.read, d.vetoLabel, d.sleep, d.gates, d.mergePr]) expect(dep, label).not.toHaveBeenCalled();
@@ -3021,6 +3026,35 @@ test("test_179_job_budget_keeps_a_post_window_margin", async () => {
   expect((await run179(fits)).code).toBe(0);
   expect(fits.vetoWindow.open).toHaveBeenCalledTimes(1);
   expect(fits.mergePr).toHaveBeenCalledTimes(1);
+});
+
+// ADR-038 보정(2026-10-11, #249·#212) — 잡 예산만이 아니라 잡의 **git 자격증명**도 창보다 오래 살아야 한다. App 설치 토큰은 민팅 뒤
+// 60분에 만료되는데 창이 60분이라, 창이 닫힌 뒤의 records fetch·push·락 해제가 전부 인증 실패로 죽었고 그것이 "review evidence not
+// bound to a factory run"으로 읽혀 needs-human이 됐다. 워크플로가 `FACTORY_GIT_TOKEN_TTL_MINUTES`로 수명을 싣고, 창 + 여유가 그 안에
+// 들어야 연다 — 아니면 열지 않고 blocked로 이유를 말한다. 만료 없는 머지 PAT(두 배우 모드)는 null/0 = 검사 없음.
+test("test_adr038_veto_window_refuses_when_the_checkout_token_expires_before_it_closes", async () => {
+  // 잡 시작 2분 뒤에 창을 연다(clock179 기본값). 수명 60 → 남은 58분 < 창 60 + 여유 10: 열지 않는다. 수명 71 → 남은 69분도 모자란다.
+  for (const [ttl, left] of [[60, 58], [71, 69]]) {
+    const d = selfD179({ jobTimeoutMinutes: 90, gitTokenTtlMinutes: ttl });
+    const r = await run179(d);
+    const at = `ttl ${ttl}`;
+    expect(r.code, at).toBe(2);
+    const last = d.transition.mock.calls.at(-1)[0];
+    expect(last.to, at).toBe("factory:blocked");
+    expect(last.reason, at).toMatch(/veto window outlives this job's git credential/);
+    expect(last.reason, at).toMatch(new RegExp(`expires ${ttl} min after the job started \\(${left} min left\\)`));
+    expect(last.reason, at).toMatch(/veto_minutes: 60/);
+    expect(last.reason, at).toMatch(/set FACTORY_MERGE_TOKEN in the factory-merge environment/);
+    for (const dep of [d.vetoWindow.open, d.comment, d.sleep, d.mergePr]) expect(dep, at).not.toHaveBeenCalled();
+    expect(r.lines.some((l) => /^merge: veto window not started — .*git credential/.test(l)), at).toBe(true);
+  }
+  // 남은 70분 = 창 60 + 여유 10 → 연다(경계는 포함). 수명 없음(null·0 — 만료 없는 머지 PAT)도 연다.
+  for (const [label, ttl] of [["ttl 72", 72], ["no ttl", null], ["ttl 0", 0]]) {
+    const fits = selfD179({ jobTimeoutMinutes: 90, gitTokenTtlMinutes: ttl });
+    expect((await run179(fits)).code, label).toBe(0);
+    expect(fits.vetoWindow.open, label).toHaveBeenCalledTimes(1);
+    expect(fits.mergePr, label).toHaveBeenCalledTimes(1);
+  }
 });
 
 // 창 뒤에 검증한 head가 곧 머지되는 head다 — 자기 변경 경로는 `mergePr`에 그 sha를 넘겨(`--match-head-commit`) 재검증과

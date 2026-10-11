@@ -45,6 +45,21 @@ const harnessAt = join(root, ".factory", "harness.toml");
 const projectName = existsSync(harnessAt) ? /^\s*name\s*=\s*"([^"]+)"/m.exec(readFileSync(harnessAt, "utf8"))?.[1] : undefined;
 const engine = isEngineCheckout({ projectName, exists: (rel) => existsSync(join(root, rel)) });
 
-const v = operatorMergeVerdict(pr, { defaultBranch, engine });
+// ADR-039 — CHARTER `self_change.operator_merge_judge`가 true면 판정 경로도 운영 door를 지난다. CHARTER를 못 읽으면 꺼진 것으로 본다
+// (fail closed: 스위치는 켜져 있다고 증명될 때만 켜진 것이다).
+let judgeAllowed = false;
+try {
+  const { loadCharter } = await import("../lib/config.js");
+  judgeAllowed = loadCharter(root)?.self_change?.operator_merge_judge === true;
+} catch (e) {
+  // 조용한 기본값은 "켰다고 믿는 소유자"를 만든다 — 왜 꺼진 것으로 보는지 한 줄은 남긴다(판정은 그대로 fail closed).
+  process.stderr.write(`operator-merge: CHARTER self_change could not be read (${String(e?.message || e).split("\n")[0]}) — treating operator_merge_judge as off\n`);
+  judgeAllowed = false;
+}
+
+const v = operatorMergeVerdict(pr, { defaultBranch, engine, judgeAllowed });
 if (!v.ok) refuse(`PR #${n}: ${v.reasons.join("; ")}`);
-process.stdout.write(`operator-merge: PR #${n} — ${pr.files.length} file(s), all non-judge paths, checks green — the operator may merge\n`);
+const judgeNote = v.judge.length
+  ? `, ${v.judge.length} judge path(s) allowed by CHARTER self_change.operator_merge_judge (${v.judge.slice(0, 4).join(", ")}${v.judge.length > 4 ? ", …" : ""})`
+  : ", all non-judge paths";
+process.stdout.write(`operator-merge: PR #${n} — ${pr.files.length} file(s)${judgeNote}, checks green — the operator may merge\n`);

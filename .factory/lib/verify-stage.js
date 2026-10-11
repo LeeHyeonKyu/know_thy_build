@@ -318,7 +318,7 @@ export function neverAutomateHits(paths, globs) {
   return hits;
 }
 
-export function verifyStage({ stage, out, transcriptText, agentsLog, roster = [], rolePrefix = "", expectedRounds, orchestration, gates, planLimits, issueBody, neverAutomate = [], loadBearing = [], qaManifest = null }) {
+export function verifyStage({ stage, out, transcriptText, agentsLog, roster = [], rolePrefix = "", expectedRounds, orchestration, gates, planLimits, issueBody, neverAutomate = [], qaManifest = null }) {
   const reasons = [];
   /** A-SF1 — qa 리뷰어 자신의 증거 부족. 스테이지 실패가 아니라 **이 라운드의 판정 재료**로 나간다. */
   let qaShortfall = null;
@@ -399,24 +399,6 @@ export function verifyStage({ stage, out, transcriptText, agentsLog, roster = []
         data.disposition = "wont-do";
         data.reason = `CHARTER NEVER_AUTOMATE matches this issue's impact paths — ${where}. (script override of the triage verdict; audit M1)`;
       }
-    }
-    /*
-     * #254 (#233 re-land; gap P-12 / ledger M-6) — 같은 자리, 같은 방식으로 `[load_bearing].paths`도 다시 댄다.
-     * plan 시점에는 diff가 없어 `tierFloor`가 docs를 내므로, 이 재확인이 없으면 plan 모드(단일/토론)·로스터는
-     * triage의 자기 신고 tier가 정했다. 걸리면 handoff의 `tier` **자체**를 load-bearing으로 덮는다 — 그 필드를
-     * context.js(plan·review 로스터), review-roster.js(merge 정족수), 그리고 review handoff를 거쳐 sweeper가 이미
-     * 읽으므로 소비자 쪽 변경 없이 모두 따라온다. 덮어쓴 신고는 `tier_declared`로, 무엇이 덮었는지는
-     * `load_bearing_hit`으로 남는다(NEVER_AUTOMATE의 `never_automate_hit`과 같은 모양). 내리는 쪽은 없다.
-     * 두 필드는 러너의 것이라 에이전트가 적은 값은 먼저 지운다 — 이 스크립트만 쓸 수 있어야 그 기록이 뜻을 가진다.
-     * 글롭 대조는 NEVER_AUTOMATE와 같은 함수(`neverAutomateHits`)다 — 규칙이 둘로 갈라지지 않게.
-     */
-    delete data.load_bearing_hit;
-    delete data.tier_declared;
-    const lbHits = neverAutomateHits(data.impact_paths, loadBearing);
-    if (lbHits.length && data.tier !== "load-bearing") {
-      data.tier_declared = data.tier;
-      data.tier = "load-bearing";
-      data.load_bearing_hit = lbHits;
     }
   }
   if (data && orchestration && data.orchestration !== orchestration) reasons.push(`orchestration ${data.orchestration} != configured ${orchestration}`);

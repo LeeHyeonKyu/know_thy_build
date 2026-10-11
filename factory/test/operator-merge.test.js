@@ -1,6 +1,5 @@
 import { test, expect } from "vitest";
-import { readFileSync, existsSync, mkdtempSync, mkdirSync, copyFileSync, writeFileSync, chmodSync } from "node:fs";
-import { realpathSync } from "node:fs";
+import { readFileSync, existsSync, mkdtempSync, mkdirSync, copyFileSync, writeFileSync, chmodSync, symlinkSync, rmSync, realpathSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { tmpdir } from "node:os";
 import { spawnSync } from "node:child_process";
@@ -78,6 +77,72 @@ test("a docs-only, green, non-draft PR against the default branch is allowed; ea
   // 기본 브랜치는 호출자가 준다
   expect(operatorMergeVerdict(pr({ baseRefName: "trunk" }), { defaultBranch: "trunk" }).ok).toBe(true);
 });
+
+// ── ADR-039 (2026-10-10, 소유자 결정): 운영 door는 CHARTER `self_change.operator_merge_judge`가 켜지면 판정 경로도 지난다 ──────
+test("test_adr039_operator_door_passes_judge_paths_only_when_the_charter_switch_is_on", () => {
+  const mixed = pr({ files: [{ path: "docs/research/x.md" }, { path: "factory/lib/gh.js" }, { path: ".github/workflows/factory-merge.yml" }] });
+  // 꺼짐(기본): 오늘과 같다 — 판정 경로가 사유에 이름 붙어 거부된다
+  const off = operatorMergeVerdict(mixed);
+  expect(off.ok).toBe(false); expect(off.judge).toEqual(["factory/lib/gh.js", ".github/workflows/factory-merge.yml"]); expect(off.reasons[0]).toMatch(/judge path/);
+  // 켜짐: 판정 경로는 거부 사유가 아니지만 목록은 그대로 돌아온다(호출자가 소리내어 적는다)
+  const on = operatorMergeVerdict(mixed, { judgeAllowed: true });
+  expect(on).toEqual({ ok: true, reasons: [], judge: ["factory/lib/gh.js", ".github/workflows/factory-merge.yml"] });
+  // 나머지 자물쇠는 스위치와 무관하다 — draft·충돌·다른 base·빨간 체크는 켜져 있어도 거부
+  expect(operatorMergeVerdict(pr({ files: [{ path: "factory/lib/gh.js" }], isDraft: true }), { judgeAllowed: true }).reasons.join()).toMatch(/draft/);
+  expect(operatorMergeVerdict(pr({ files: [{ path: "factory/lib/gh.js" }], mergeable: "CONFLICTING" }), { judgeAllowed: true }).ok).toBe(false);
+  expect(operatorMergeVerdict(pr({ files: [{ path: "factory/lib/gh.js" }], statusCheckRollup: [{ name: "factory/integrity", conclusion: "FAILURE" }] }), { judgeAllowed: true }).ok).toBe(false);
+  expect(operatorMergeVerdict(pr({ files: [] }), { judgeAllowed: true }).ok).toBe(false);
+});
+
+test("test_adr039_the_door_cannot_open_itself", async () => {
+  const { DOOR_FILES, isDoorFile } = await import("../lib/operator-merge.js");
+  // door를 이루는 파일(판정 코드·양의 목록·bin·훅, 설치본 포함)은 스위치가 켜져도 사람이 머지한다
+  for (const f of DOOR_FILES) {
+    const v = operatorMergeVerdict(pr({ files: [{ path: "docs/x.md" }, { path: f }] }), { judgeAllowed: true, engine: true });
+    expect(v.ok, f).toBe(false); expect(v.reasons.join(), f).toMatch(/the door cannot open itself/);
+  }
+  expect(isDoorFile("./factory/lib/operator-merge.js")).toBe(true);
+  expect(isDoorFile("factory/lib/operator-merge.test.js")).toBe(false);
+  // 스위치가 꺼져 있으면 사유는 오늘의 "judge path" 하나다(door 문장은 켜졌을 때의 것)
+  expect(operatorMergeVerdict(pr({ files: [{ path: "factory/bin/operator-merge-check.js" }] })).reasons.join()).not.toMatch(/door cannot/);
+});
+
+test("test_adr039_operator_merge_check_bin_reads_the_charter_switch", () => {
+  // 설치된 bin을 엔진 체크아웃 모양의 임시 루트에서 돌린다 — CHARTER의 스위치만 바꿔 가며 같은 판정 경로 PR을 묻는다.
+  const repo = new URL("../../", import.meta.url).pathname;
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "omc-adr039-")));
+  for (const d of [".factory/bin", ".factory/lib", "docs/factory", "fakebin"]) mkdirSync(join(root, d), { recursive: true });
+  copyFileSync(join(repo, "factory/bin/operator-merge-check.js"), join(root, ".factory/bin/operator-merge-check.js"));
+  for (const f of ["operator-merge.js", "non-judge-paths.js", "glob.js", "config.js", "frontmatter.js"]) copyFileSync(join(repo, "factory/lib", f), join(root, ".factory/lib", f));
+  symlinkSync(join(repo, "node_modules"), join(root, "node_modules"));   // config.js의 smol-toml
+  writeFileSync(join(root, ".factory/harness.toml"), '[project]\nname           = "know-thy-build"\ndefault_branch = "main"\n');
+  for (const m of ENGINE_MARKERS) { mkdirSync(dirname(join(root, m)), { recursive: true }); writeFileSync(join(root, m), ""); }
+  writeFileSync(join(root, "fakebin/gh"), "#!/bin/sh\ncat \"$(dirname \"$0\")/pr.json\"\n");
+  chmodSync(join(root, "fakebin/gh"), 0o755);
+  const charter = (selfChange) => writeFileSync(join(root, "docs/factory/CHARTER.md"), `---\nschema: factory.charter.v1\nstatus: ready\n${selfChange}---\n# CHARTER\n`);
+  const ask = (files) => {
+    writeFileSync(join(root, "fakebin/pr.json"), JSON.stringify(pr({ files })));
+    return spawnSync(process.execPath, [join(root, ".factory/bin/operator-merge-check.js"), "12"], {
+      cwd: root, encoding: "utf8", env: { ...process.env, PATH: `${join(root, "fakebin")}:${process.env.PATH}`, GITHUB_ACTIONS: "" },
+    });
+  };
+  const judgePr = [{ path: "docs/x.md" }, { path: ".github/workflows/factory-merge.yml" }];
+  // 꺼짐(키 없음): 오늘과 같다
+  charter(""); let r = ask(judgePr);
+  expect(r.status, r.stderr).toBe(2); expect(r.stderr).toMatch(/judge path\(s\) in the PR — a person merges these/);
+  // 켜짐: 같은 PR이 허용되고, 허용한 판정 경로를 소리내어 적는다
+  charter("self_change: { operator_merge_judge: true }\n"); r = ask(judgePr);
+  expect(r.status, r.stderr).toBe(0); expect(r.stdout).toMatch(/1 judge path\(s\) allowed by CHARTER self_change\.operator_merge_judge \(\.github\/workflows\/factory-merge\.yml\)/);
+  // 켜져도 door 자신은 안 열린다
+  r = ask([{ path: "factory/bin/operator-merge-check.js" }]);
+  expect(r.status, r.stderr).toBe(2); expect(r.stderr).toMatch(/the door cannot open itself/);
+  // CHARTER가 깨졌으면 꺼진 것으로 보고(fail closed) 그 사실을 stderr에 말한다
+  charter("self_change: { operator_merge_judge: \"yes\" }\n"); r = ask(judgePr);
+  expect(r.status, r.stderr).toBe(2); expect(r.stderr).toMatch(/CHARTER self_change could not be read .* treating operator_merge_judge as off/);
+  // CHARTER 파일이 없어도 같다
+  rmSync(join(root, "docs/factory/CHARTER.md")); r = ask(judgePr);
+  expect(r.status, r.stderr).toBe(2); expect(r.stderr).toMatch(/treating operator_merge_judge as off/);
+}, 60000);
 
 // ── #178 rework (cf1·arch1): 운영 세션의 문은 엔진 저장소에서만 엔진 파일을 연다 ─────────────────────────────────────
 
