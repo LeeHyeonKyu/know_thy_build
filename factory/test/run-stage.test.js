@@ -7128,6 +7128,39 @@ test("test_249_local_entry_production_wiring_passes_admission", async () => {
   expect(refusedLine).toBe(`local entry refused: ${await doorReason230(NO_DONE_WHEN_230)}`);
   expect(stateOf230(bad, 12)).toBe("backlog");
   expect(bad.store.get(12).comments).toEqual([]);
+
+  // …and that one production checker still carries the factory logins (#261, App mode). main()'s `admission` binding is read
+  // out of its source — exactly one `factoryLogins:` argument, and it is the real resolver over main()'s env — then rebuilt with
+  // the real `resolveFactoryLogins` and an injected App-mode env (FACTORY_BOT_LOGIN, outside Actions: no viewer read).
+  const bindingArgs = /\bconst admission = makeStageAdmission\(\{ gh, getCharter: \(\) => charter, (.*)\}\);/.exec(mainSrc)?.[1] ?? "";
+  expect(bindingArgs.trim()).toBe("factoryLogins: () => resolveFactoryLogins({ gh, env: process.env })");
+  const APP_ENV_249 = { FACTORY_BOT_LOGIN: "ktb-factory[bot]" };
+  const appEntry = (issues, n) => {
+    const g = store230(issues);
+    const a = makeStageAdmission({ gh: g, getCharter: () => CHARTER_230, factoryLogins: () => resolveFactoryLogins195({ gh: g, env: APP_ENV_249 }) });
+    return { g, admit: a, run: makeLocalEntry({ ...args, gh: g, issue: n, admission: a, log: () => {} }) };
+  };
+  // (1) a marker-only issue the App opened (no done_when, no factory label): admitted, and counted as self-generated —
+  //     never the "factory logins could not be resolved" refusal a checker built without logins gives
+  const marker = appEntry([
+    { number: 4, labels: ["factory:in-progress"], body: WELL_FORMED_230 },
+    { number: 12, labels: ["backlog"], body: "Detected while implementing #4. evidence: {}", author: "ktb-factory[bot]" },
+  ], 12);
+  expect(await marker.admit({ issue: 12 })).toEqual({ ok: true, reasons: [], self_generated: true });
+  expect(await marker.run()).toBe("local entry: backlog → factory:queue");
+  expect(stateOf230(marker.g, 12)).toBe("factory:queue");
+  // (2) an issue whose ONLY self-generation signal is the App author (done_when, no marker, no factory label) counts against
+  //     self_generated.open_max: two open factory issues fill it, so local entry refuses it on that cap and writes nothing
+  const authorOnly = appEntry([
+    ...[21, 22].map((number) => ({ number, labels: ["factory:in-progress", "factory:flaky"], body: "Detected while implementing #4. evidence: {}", author: "ktb-factory[bot]" })),
+    { number: 13, labels: ["backlog"], body: WELL_FORMED_230, author: "ktb-factory[bot]" },
+  ], 13);
+  const capped = await authorOnly.admit({ issue: 13 });
+  expect(capped).toMatchObject({ ok: false, self_generated: true });
+  expect(capped.reasons).toEqual(["self-generated open 2 ≥ 2 (self_generated.open_max)"]);
+  expect(await authorOnly.run()).toBe("local entry refused: queue admission refused — self-generated open 2 ≥ 2 (self_generated.open_max)");
+  expect(stateOf230(authorOnly.g, 13)).toBe("backlog");
+  expect(authorOnly.g.store.get(13).comments).toEqual([]);
 });
 import { ADMISSION_UNWIRED as ADMISSION_UNWIRED_249 } from "../lib/transition.js";
 
