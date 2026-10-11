@@ -6577,7 +6577,7 @@ test("test_200_scope_check_fails_open_visibly_on_git_read_error", async () => {
 // #253 head b4aac9b: implement `unit` GREEN, review `unit` RED, requeue GREEN — same head, same command. The review record now
 // says so next to FACTORY_GATES; the line is diagnostic only (verdict, transition, factory/gates status and exit code unchanged).
 const HEAD_257 = "c".repeat(40);
-const review257 = async ({ implement, reviewGates }) => {
+const review257 = async ({ implement, reviewGates, checkoutHead = null }) => {
   const lines = [], transitions = [], statuses = [];
   const gh = {
     comments: vi.fn(async () => [{ id: 1, createdAt: "2026-10-11T00:00:00Z", body: renderHandoff({ stage: "implement", issue: 253, summary: "s", data: { pr: 31, ...implement } }) }]),
@@ -6588,7 +6588,7 @@ const review257 = async ({ implement, reviewGates }) => {
     { match: (c, a) => c === "git" && a[0] === "checkout", result: { code: 0, stdout: "", stderr: "" } },
   ]);
   const deps = baseDeps({
-    checkoutHead: makeCheckoutHead({ gh, run, root: "/repo", issue: 253 }),
+    checkoutHead: checkoutHead ?? makeCheckoutHead({ gh, run, root: "/repo", issue: 253 }),
     gates: async () => reviewGates,
     // A review whose gates are not GREEN fails verification (the #253 path: needs-human); GREEN verifies.
     verifyStage: ({ gates }) => (gates.status === "GREEN" ? { ok: true, reasons: [], data: { decision: "approved", verdicts: [] } } : { ok: false, reasons: [`gates ${gates.status}: failing=${gates.failing.join(",")}`], data: null }),
@@ -6627,38 +6627,55 @@ test("test_257_review_gate_notes_a_verdict_differing_from_implement_on_the_same_
 });
 
 test("test_257_no_environmental_note_when_verdicts_match_heads_or_levels_differ_or_implement_gates_missing", async () => {
-  const control = await review257({ implement: { head_sha: HEAD_257 }, reviewGates: gates257("RED") });
-  const same = async (implement, reviewGates) => {
-    const r = await review257({ implement, reviewGates });
-    expect(r.lines).not.toContain(ENV_LINE_257);
-    return r;
+  // Each suppression case is run next to a SIBLING that differs from it only in the one field that suppresses the line, and the
+  // sibling must carry the line — so every "absent" below is absent because of that field, not because nothing writes it.
+  // "Behaves exactly as today" = same exit code, transitions, posted statuses and record lines as the sibling minus its line,
+  // and identical to today's run of the same review gates with no implement gate data at all.
+  const today = async (reviewGates) => review257({ implement: { head_sha: HEAD_257 }, reviewGates });
+  const suppressed = async (name, run, sibling, baseline) => {
+    expect(sibling.lines.filter((l) => l === ENV_LINE_257), `${name}: sibling`).toHaveLength(1);
+    expect(run.lines, name).not.toContain(ENV_LINE_257);
+    expect(run.code, name).toBe(sibling.code);
+    expect(run.transitions, name).toEqual(sibling.transitions);
+    expect(run.statuses, name).toEqual(sibling.statuses);
+    expect(run.lines, name).toEqual(sibling.lines.filter((l) => l !== ENV_LINE_257));
+    expect(run, name).toEqual(baseline);
   };
-  // 1. statuses match (both GREEN; both RED)
-  const bothGreen = await same({ head_sha: HEAD_257, gates: { status: "GREEN", level: "fast" } }, gates257("GREEN"));
-  const greenControl = await review257({ implement: { head_sha: HEAD_257 }, reviewGates: gates257("GREEN") });
-  expect(bothGreen).toEqual(greenControl);
-  expect(await same({ head_sha: HEAD_257, gates: { status: "RED", level: "fast" } }, gates257("RED"))).toEqual(control);
-  // 2. levels differ — implement fast vs review full is a different gate set, not the environment
-  const fullRed = gates257("RED", "full");
-  const fullControl = await review257({ implement: { head_sha: HEAD_257 }, reviewGates: fullRed });
-  expect(await same({ head_sha: HEAD_257, gates: { status: "GREEN", level: "fast" } }, fullRed)).toEqual(fullControl);
+  const red = gates257("RED"), green = gates257("GREEN");
+  const redToday = await today(red), greenToday = await today(green);
+  expect(redToday.code).toBe(2);
+  expect(JSON.parse(redToday.transitions[0]).to).toBe("factory:needs-human");
+  expect(greenToday.lines.some((l) => l.startsWith("FACTORY_GATES: level=fast status=GREEN "))).toBe(true);
+  // 1. statuses match — both GREEN (sibling: implement RED), and both RED (sibling: implement GREEN)
+  await suppressed("both GREEN",
+    await review257({ implement: { head_sha: HEAD_257, gates: { status: "GREEN", level: "fast" } }, reviewGates: green }),
+    await review257({ implement: { head_sha: HEAD_257, gates: { status: "RED", level: "fast" } }, reviewGates: green }), greenToday);
+  await suppressed("both RED",
+    await review257({ implement: { head_sha: HEAD_257, gates: { status: "RED", level: "fast" } }, reviewGates: red }),
+    await review257({ implement: { head_sha: HEAD_257, gates: { status: "GREEN", level: "fast" } }, reviewGates: red }), redToday);
+  // 2. levels differ — implement full vs review fast is a different gate set, not the environment (sibling: implement fast)
+  await suppressed("level mismatch",
+    await review257({ implement: { head_sha: HEAD_257, gates: { status: "GREEN", level: "full" } }, reviewGates: red }),
+    await review257({ implement: { head_sha: HEAD_257, gates: { status: "GREEN", level: "fast" } }, reviewGates: red }), redToday);
   // 3. the implement gate ran on another sha: after a self-mirror commit builder_head_sha differs from head_sha
-  expect(await same({ head_sha: HEAD_257, builder_head_sha: "b".repeat(40), mirror_sha: HEAD_257, gates: { status: "GREEN", level: "fast" } }, gates257("RED"))).toEqual(control);
-  //    …and a review gate that measured a different head than the implement gate
+  //    (sibling: builder_head_sha equal to head_sha)
+  await suppressed("builder_head_sha differs from head_sha",
+    await review257({ implement: { head_sha: HEAD_257, builder_head_sha: "b".repeat(40), mirror_sha: HEAD_257, gates: { status: "GREEN", level: "fast" } }, reviewGates: red }),
+    await review257({ implement: { head_sha: HEAD_257, builder_head_sha: HEAD_257, gates: { status: "GREEN", level: "fast" } }, reviewGates: red }), redToday);
+  //    …and a review gate that measured a different head than the implement gate (sibling: the same head)
   const otherHead = gates257("RED", "fast", "d".repeat(40));
-  const otherControl = await review257({ implement: { head_sha: HEAD_257 }, reviewGates: otherHead });
-  expect(await same({ head_sha: HEAD_257, gates: { status: "GREEN", level: "fast" } }, otherHead)).toEqual(otherControl);
-  // 4. no implement gate data: an old handoff (covered by `control`), or a fake checkoutHead without the field
-  const lines = [];
-  const deps = baseDeps({
-    checkoutHead: async () => ({ ok: true, sha: HEAD_257, pr: 31 }),
-    gates: async () => gates257("RED"),
-    verifyStage: () => ({ ok: false, reasons: ["gates RED"], data: null }),
-    transition: vi.fn(async (t) => ({ ok: true, to: t.to })),
-    runRecord: (l) => lines.push(...l),
-  });
-  expect(await runStage({ stage: "review", issue: 253, deps })).toBe(2);
-  expect(lines.some((l) => l.startsWith("FACTORY_GATES: "))).toBe(true);
-  expect(lines).not.toContain(ENV_LINE_257);
-  expect(control.lines).not.toContain(ENV_LINE_257);
+  const otherRun = await review257({ implement: { head_sha: HEAD_257, gates: { status: "GREEN", level: "fast" } }, reviewGates: otherHead });
+  const otherToday = await today(otherHead);
+  expect(otherRun.lines).not.toContain(ENV_LINE_257);
+  expect(otherRun).toEqual(otherToday);
+  // 4a. an old implement handoff with no gates field, through the real makeCheckoutHead (sibling: the same handoff with gates)
+  await suppressed("old handoff without gates",
+    await review257({ implement: { head_sha: HEAD_257, builder_head_sha: HEAD_257 }, reviewGates: red }),
+    await review257({ implement: { head_sha: HEAD_257, builder_head_sha: HEAD_257, gates: { status: "GREEN", level: "fast" } }, reviewGates: red }), redToday);
+  // 4b. a fake checkoutHead that never returns the field (the ~64 fakes in this file) — sibling: the same fake returning it
+  const fakeCo = (extra) => async () => ({ ok: true, sha: HEAD_257, pr: 31, ...extra });
+  await suppressed("fake checkoutHead without implement_gates",
+    await review257({ implement: { head_sha: HEAD_257 }, reviewGates: red, checkoutHead: fakeCo({}) }),
+    await review257({ implement: { head_sha: HEAD_257 }, reviewGates: red, checkoutHead: fakeCo({ implement_gates: { status: "GREEN", level: "fast", head_sha: HEAD_257 } }) }),
+    redToday);
 });
