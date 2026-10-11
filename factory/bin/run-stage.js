@@ -25,7 +25,7 @@ import { makeQueueAdmission } from "../lib/admission.js";
 import { mirrorStep, mirrorMatchesHead, inMirrorFamily, regenerateMirror, mirrorApplicable, isUnionMergePath, MIRROR_FAMILIES } from "../lib/mirror.js";
 import { REHEARSAL_UNWIRED } from "../lib/transition.js";
 export { HARNESS_LABEL };   // 재수출 — retro.js와 이 값이 같은 소스에서 왔다는 것을 테스트가 import equality로 확인한다
-import { buildContext, resolveTier, contextManifestLines } from "../lib/context.js";
+import { buildContext, resolveTier, contextManifestLines, loadedJsonLine } from "../lib/context.js";
 import { resolveReviewRoster } from "../lib/review-roster.js";
 import { startHeartbeat } from "../lib/heartbeat.js";
 import { readProgress, progressMarker } from "../lib/progress.js";
@@ -900,11 +900,43 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runAt
       }
       if (m.applicable) { record([mirrorLine(m)]); if (stage === "implement" && m.changed.length && m.sha) mirrorSha = m.sha; }
     }
+    /**
+     * #207 — **워크플로의 fail-closed 반환은 디스패처 전달 고장이다.** 네 워크플로는 `args.loaded`를 못 받거나 다른 이슈의 것을
+     * 받으면 `{issue, error: "context payload missing" | "context issue mismatch…", orchestration, guarantee}`를 돌려준다. 그것은
+     * 에이전트 산출물의 결함이 아니라 판정 불가다 — 사람이 할 일이 없다(run 37140542370: 잘린 6,604바이트 args → needs-human,
+     * 운영 세션이 재큐). blocked/undecidable로 세워 sweeper의 재시도에 맡긴다. 빌더는 돌지 않았으므로 게이트는 손대지 않은 브랜치
+     * head를 잰 것이다 — 그래서 **게이트가 어떤 상태든**(던짐·BLOCKED·실패 테스트 없는 RED·RED·GREEN) 이 원인이 이긴다. 다만 그
+     * 게이트 상태들이 어차피 실패로 끝나는 자리에서만 끼어든다(GREEN·보통 RED는 verify 실패 뒤 아래 자리) — 성공할 런을 막지 않는다.
+     * selfGateRetry·plan 리페어도 띄우지 않는다(빌더가 고칠 것이 없다). 턴 한도·API 오류는 먼저 자기 자리로 간다. 새 마커 필드는
+     * 없다 — K·R·예산 면제는 ADR-036 개정 이슈의 몫이다(plan non_goals).
+     */
+    let payloadErrorMemo;
+    let payloadCtx = ctx;                                             // 디스패처가 옮겨 쓴 loaded.json을 쓴 ctx — plan 리페어 턴이면 그 턴의 것
+    const payloadError = async () => {
+      if (payloadErrorMemo === undefined) {
+        payloadErrorMemo = hitMaxTurns(out) || hitApiError(out) ? null
+          : ((d.dispatcherPayloadError ? await d.dispatcherPayloadError(out) : dispatcherPayloadErrorOf({ out })) ?? null);
+      }
+      return payloadErrorMemo;
+    };
+    // Known gaps, deferred to #240 (spec2: outside this plan — non_goals "Any design beyond the b881484 port" and "Changing the sweeper's
+    // retry or escalation behaviour"): (1) `error` reaches `reason` verbatim, so a session-produced `context issue mismatch…` tail can carry a
+    // forged `factory-blocked-origin` marker ahead of transition.js's own; (2) a triage retry (blocked → queue) opens a fresh sweeper window, so a
+    // triage run that keeps failing closed is re-blocked each time and only the lifetime budget stops it — dw3's sweeper cap is pinned for implement only.
+    const blockOnPayload = async (error, lines) => {
+      const size = Number.isInteger(payloadCtx?.loaded_json?.bytes) ? `loaded.json ${payloadCtx.loaded_json.bytes} bytes` : "loaded.json size unknown";
+      const reason = `dispatcher payload: ${error} (${size})`;
+      const t = await d.transition({ to: "factory:blocked", reason, cause: "undecidable" });
+      record([...lines, `verify: ${reason} — not an agent artifact defect`, ...refusal(t), usage]);
+      return 2;
+    };
     let gates = null;
     if (!out?.is_error || hitMaxTurns(out) || hitApiError(out)) {
       try { gates = await d.gates(ctx); }                             // 게이트 없는 스테이지(triage/plan)는 null
       catch (e) {
         if (!isMergeBaseError(e) && !isGitDiffError(e)) throw e;
+        const pe = await payloadError();
+        if (pe) return blockOnPayload(pe, [`gates: BLOCKED — ${e.message}`]);
         const reason = isMergeBaseError(e) ? MERGE_BASE_BLOCKED_REASON : GIT_DIFF_BLOCKED_REASON;
         const t = await d.transition({ to: "factory:blocked", reason });
         record([`gates: BLOCKED — ${e.message}`, ...refusal(t), usage]);
@@ -928,6 +960,8 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runAt
       : gates.schema === "factory.gates.v1" ? [verdictLine(gates), ...gatesDetailLines(gates, stamp), ...testEnvNote] : [];
     // BLOCKED은 "판정 불가"다 — GREEN도 RED도 아니므로 needs-human이 아니라 blocked로 세운다.
     if (gates?.status === "BLOCKED") {
+      const pe = await payloadError();
+      if (pe) return blockOnPayload(pe, [`gates: BLOCKED — ${gates.blocked_reason || "unknown"}`, ...gatesNote]);
       const t = await d.transition({ to: "factory:blocked", reason: gates.blocked_reason || "gates could not be decided" });
       record([`gates: BLOCKED — ${gates.blocked_reason || "unknown"}`, ...refusal(t), ...gatesNote, usage]);
       return 2;
@@ -949,6 +983,8 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runAt
      */
     const unhandled = unhandledGateReason(gates);
     if (unhandled) {
+      const pe = await payloadError();
+      if (pe) return blockOnPayload(pe, [`gates: RED (unhandled) — ${unhandled}`, ...gatesNote]);
       const t = await d.transition({ to: "factory:blocked", reason: unhandled, cause: "gates-unhandled" });
       record([`gates: RED (unhandled) — ${unhandled}`, ...refusal(t), ...gatesNote, usage]);
       return 2;
@@ -993,8 +1029,9 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runAt
       const repairReasons = v.planRepair;
       record([`plan repair (KTB-51): one repair turn — feeding ${repairReasons.length} validator reason(s) back: ${repairReasons.join("; ")}`]);
       let repairOut = null;
+      let repairCtx = null;
       try {
-        const repairCtx = await d.buildContext({ setupDirty, planRepair: repairReasons });
+        repairCtx = await d.buildContext({ setupDirty, planRepair: repairReasons });
         /**
          * Task 1 (리뷰 SF-5) — 이 두 번째 `buildContext`가 `context.<role>.json`을 **다시 쓰고**
          * `plan_repair`를 투영에 더한다. 곧 리페어 턴의 플래너가 실제로 읽은 문맥은 이것인데, 첫
@@ -1012,6 +1049,7 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runAt
       }
       if (repairOut) {
         out = repairOut;
+        payloadCtx = repairCtx ?? ctx;                                // #207 — 이제 실패를 말하는 것은 리페어 턴의 반환과 그 턴의 loaded.json이다(memo는 리페어 전에 계산되지 않는다 — plan엔 게이트가 없다)
         try { finalProgress = d.progress?.() ?? null; } catch { /* best-effort */ }
         usage = usageLine(out, finalProgress);
         // plan is a no-write stage — re-assert the worktree exactly as the first pass did (KTB-14).
@@ -1056,6 +1094,9 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runAt
       const apiError = hitApiError(out);
       const qaPath = qaEvidenceUnusable(v.reasons);
       const blocked = hitMaxTurns(out) || qaPath || (apiError && !isNonTransientApiError(out));
+      // #207 — 디스패처 전달 고장(위 §payloadError). 턴 한도·API 오류·qa 증거 경로는 먼저 자기 자리로 간다.
+      const pe = !blocked && !apiError ? await payloadError() : null;
+      if (pe) return blockOnPayload(pe, ["verify: FAIL", ...v.reasons.map((r) => `- ${r}`), ...gatesNote]);
       /**
        * 1.4.23 (L26, 데모 #7) — **빌더의 커밋 뒤 gates RED는 빌더가 고칠 수 있는 가장 흔한 실패다**(기존 테스트를 깨뜨렸다).
        * 그런데 이 가지는 그것을 "산출물 결함"으로 읽어 곧장 needs-human으로 세웠다 — 검증자 거부(1.4.9)와 self-gate 발견
@@ -2010,6 +2051,37 @@ export function implementHeadShaOf({ out, transcriptText = "" } = {}) {
   });
   const sha = a.ok ? a.data?.head_sha : null;
   return typeof sha === "string" && SHA40.test(sha) ? sha : null;
+}
+
+/**
+ * #207 — 세션 산출물 중 **워크플로의 fail-closed 반환**이 있으면 그 `error` 문구, 없으면 null. 후보 탐색은 `verifyStage`와 같은
+ * 추출기(`extractStageArtifact`)이고, 채점 기준만 다르다: 네 워크플로 템플릿이 돌려주는 모양 그대로 — `issue`가 숫자(implement는
+ * 사건에서 0) 또는 null(triage/plan/review는 `Number(undefined)` = NaN이 JSON에서 null이 된다),
+ * `orchestration: "workflow"`, `guarantee: "structural"`, 그리고 `error`가 정확히 `context payload missing`이거나
+ * `context issue mismatch`로 시작한다. `error` 키 하나뿐인 객체, 다른 에러 문구, `issue: 0`만 있는 객체는 여기 해당하지 않는다 —
+ * 그런 산출물은 예전처럼 needs-human이다(일반 산출물 결함이 이 길로 빠져나가지 못하게).
+ */
+export const DISPATCHER_PAYLOAD_MISSING = "context payload missing";
+export const DISPATCHER_PAYLOAD_MISMATCH = "context issue mismatch";
+// `orchestration: "workflow"`은 아래 후보 검사가 이미 요구한다 — 여기서는 나머지 모양만 본다.
+const isWorkflowFailClosed = (o) => Boolean(o) && typeof o === "object"
+  && (typeof o.issue === "number" || o.issue === null) && o.guarantee === "structural"
+  && typeof o.error === "string" && (o.error === DISPATCHER_PAYLOAD_MISSING || o.error.startsWith(DISPATCHER_PAYLOAD_MISMATCH));
+export function dispatcherPayloadErrorOf({ out, transcriptText = "" } = {}) {
+  // 후보 순서는 **채널 순서**다(완료 알림 → Read/tool_result → 전경 Workflow 결과 → 최종 메시지, §extractStageArtifact) — 시간
+  // 순서가 아니고, "최신이 먼저"는 **한 채널 안에서만** 참이다. 그 순서로 첫 번째 워크플로 반환(`orchestration: "workflow"` + `issue`
+  // 키 + `guarantee: "structural"` — 네 템플릿의 스테이지 산출물과 fail-closed 반환 둘 다 그 모양이다. `guarantee`가 빠지면 디스패처가
+  // 먼저 Read하는 loaded.json(`issue`·`orchestration`은 있고 `guarantee`는 없다)이 후보로 뽑혀 진짜 반환을 가린다 — rework cf1)을
+  // 고르고, 그것이 fail-closed일 때만 답한다. 그래서 재시도가 **같은 채널이나 더 앞선 채널**로 스키마가 틀린 산출물을 냈다면 그것이
+  // 뽑혀 산출물 결함(needs-human)이 된다. 그러나 옛 fail-closed가 완료 알림으로 왔고 재시도의 반환이 더 뒤의 채널(전경 Workflow 결과·
+  // 최종 메시지)로 왔다면 옛 fail-closed가 뽑혀 blocked/undecidable이 된다 — b881484를 그대로 옮긴 동작이다(plan non_goals: "Any design
+  // beyond the b881484 port"; 교차 채널 순서는 이 이슈 밖이다).
+  const a = extractStageArtifact({
+    envelopeResult: out?.result,
+    transcriptText,
+    validate: (o) => (o && o.orchestration === "workflow" && "issue" in o && o.guarantee === "structural" ? { ok: true, errors: [] } : { ok: false, errors: ["not a workflow return"] }),
+  });
+  return a.ok && isWorkflowFailClosed(a.data) ? a.data.error : null;   // verbatim (b881484) — sanitising is #240, see §blockOnPayload
 }
 
 /**
@@ -3072,6 +3144,10 @@ export const makeBuildContextDep = ({ root, gh, issue, stage, run, mergeBase, re
     catch (e) { if (!isMergeBaseError(e)) throw e; recordLine("tier: merge-base unresolved — tier floor not computed (gates will block)"); }
     const ctx = await produce({ root, gh, issue, stage, run, base, setupDirty, planRepair, mergeConflicts });
     onBuilt(ctx);
+    // #207 — 이 buildContext가 쓴 `loaded.json`의 디스크 위 크기(디스패처가 손으로 옮겨 쓸 파일, 모든 스테이지). 매 호출이 한 줄이다:
+    // plan 리페어 턴의 두 번째 buildContext는 `plan_repair`가 붙어 커진 파일을 다시 쓰므로 그 크기도 따로 선다. 모르면 줄이 없다.
+    const loadedNote = loadedJsonLine(ctx);
+    if (loadedNote) recordLine(loadedNote);
     return ctx;
   };
 
@@ -3628,6 +3704,8 @@ async function main() {
      * 않고 같은 추출기를 한 번 더 돌린다(후보 채점은 동일하다 — §implementHeadShaOf).
      */
     handoffHeadSha: (out) => (stage === "implement" ? implementHeadShaOf({ out, transcriptText: transcriptTextFor(root, out) }) : null),
+    /** #207 — 워크플로의 fail-closed 반환(디스패처 전달 고장)을 트랜스크립트까지 훑어 찾는다(§dispatcherPayloadErrorOf). */
+    dispatcherPayloadError: (out) => dispatcherPayloadErrorOf({ out, transcriptText: transcriptTextFor(root, out) }),
     /** KTB-43 — 핸드오프 뒤에 붙은 드리프트 전용 커밋을 떨어뜨린다(리스 없는 force는 없다). */
     dropPostHandoffDrift: async ({ handoffSha, baseline }) => makeDropPostHandoffDrift({ run, root, issue })({
       handoffSha, baseline,
