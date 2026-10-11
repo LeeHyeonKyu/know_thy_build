@@ -351,3 +351,28 @@ test("test_212_conflict_round_cost_is_revoked_when_the_next_review_transition_is
   appendRunRecord({ root: approved.root, issue: 212, stage: "review", runnerId: "gha-3", lines: ["verify: ok", "transition: factory:approved"] });
   expect(lifetimeCostOf(approved.read())).toEqual({ usd: 55, runs: 2, priced: 1, conflictUsd: 9.5, conflictRuns: 1 });
 });
+
+test("test_212_a_non_round_implement_section_does_not_hide_the_rejection", () => {
+  // cf1/spec1 (round 3) — runStage writes implement sections that are not rounds: a duplicate-run skip (run-stage M13), a PENDING
+  // re-dispatch's "entry state … nothing to do", a "lock: release failed" from the finally block. None of them ran a round (no usage
+  // line), so a rejecting review after one still belongs to the conflict round before it: cost counts as today, as the K side does.
+  const nonRound = [
+    "duplicate-run: skipped — implement already completed for head cccccccccccc (handoff 2026-10-10T00:00Z)",
+    "entry state factory:awaiting-review != expected factory:planned|factory:rework — nothing to do",
+    "lock: release failed for issue 212 — delete refs/heads/factory/lock-212 by hand",
+  ];
+  for (const line of nonRound) {
+    const rec = record212();
+    rec.conflict("gha-1", 10);
+    appendRunRecord({ root: rec.root, issue: 212, stage: "implement", runnerId: "gha-3", lines: [line] });
+    appendRunRecord({ root: rec.root, issue: 212, stage: "review", runnerId: "gha-2", lines: ["verify: ok", "transition: factory:rework", usage212(5)] });
+    expect(lifetimeCostOf(rec.read()), line).toEqual({ usd: 15, runs: 3, priced: 2, conflictRevokedUsd: 10, conflictRevokedRuns: 1 });
+    expect(budgetCheck({ charter: { budget: { usd_per_issue: 12 } }, recordText: rec.read() }).ok, line).toBe(false);
+  }
+  // control: a real next round (it ran — it carries a usage line) still owns the rejection that follows it.
+  const real = record212();
+  real.conflict("gha-1", 10);
+  real.normal("gha-3", 4);
+  appendRunRecord({ root: real.root, issue: 212, stage: "review", runnerId: "gha-2", lines: ["verify: ok", "transition: factory:rework", usage212(5)] });
+  expect(lifetimeCostOf(real.read())).toEqual({ usd: 9, runs: 2, priced: 2, conflictUsd: 10, conflictRuns: 1 });
+});
