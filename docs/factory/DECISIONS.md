@@ -4537,3 +4537,50 @@ doctor-ci의 토큰 검사는 `continue-on-error`라 잡을 죽이지 않지만 
 `loadCharter`가 던져 **모든 스테이지가 멈춘다** → 미러를 이 PR에서 재생성(러너와 같은 `regenerateMirror`); (2) bin의 새 경로에 테스트가
 없다 → 스위치 on/off·깨진 CHARTER·door 자기 파일을 bin 호출로 핀. 또한 **문은 자기 자신을 열지 못한다**(`DOOR_FILES`: door의 판정
 코드·양의 목록·bin·훅과 그 설치본)는 리뷰어의 blast-radius 지적에서 왔다. 이 PR 자체는 door 파일을 바꾸므로 마지막 사람 머지다.
+
+## ADR-040 base가 움직여 생긴 충돌 해소 라운드는 평생 상한과 K에서 빠진다 — 러너가 잰 GREEN일 때만, 이슈당 두 번까지 — 2026-10-11 (#212)
+
+**질문**: 리뷰가 전원 승인한 PR이 base 이동으로 충돌해 `factory:rework`로 돌아오면(머지 스테이지 `merge conflict — rebase onto <base>`), 그
+라운드의 비용과 rework 한 칸을 누가 내는가. #196(2026-10-04)은 승인 뒤 충돌 재큐 라운드 하나로 평생 예산($62.38/117런)을 넘겨 needs-human이 됐다.
+
+**이 ADR이 고치는 것**: ADR-031("돈은 이슈의 평생을 센다")과 ADR-036("상한에서 빠지는 것은 엔진 결함의 닫힌 집합뿐")에 **두 번째 제외 범주**를
+더한다 — 사람도 에이전트도 고르지 않은, base가 움직여서 생긴 비용. 두 ADR의 나머지는 그대로다.
+
+**결정**
+1. **언제가 충돌 해소 전용 라운드인가 — 러너 사실 셋**(`lib/context.js` `conflictOnlyOf` → `loaded.conflict_only` + `approved_head`;
+   `test_212_conflict_only_is_derived_from_runner_facts`): (i) 창의 마지막 rework 전이가 진짜 `runMergeStage`가 CONFLICTING에서 내는 코멘트와
+   모양이 같다(`lib/retro/issue-comments.js` `mergeConflictRework` — 코멘트 전체, `by=` 러너); (ii) 러너가 base 병합에서 넘긴 `merge_conflicts`가
+   비어 있지 않다; (iii) review 핸드오프가 `approved`이고 verdict가 하나 이상이며 전부 `approve`다. 아니면 키가 없고 `loaded`는 오늘과 바이트까지 같다.
+2. **판정은 진짜 merge 커밋에서 잰다**(`bin/run-stage.js` `conflictScopeInput` → `lib/self-gate.js` `conflict-scope`;
+   `test_212_conflict_scope_against_a_real_merge`): HEAD^1 = 승인 head, HEAD^2 = 러너가 병합한 base, 그 뒤에는 이 런의 러너 미러 커밋만.
+   충돌 경로 밖에서 git 자신의 병합(`git merge-tree --write-tree`)과 다른 경로, 충돌 블록 밖의 줄을 바꾼 충돌 경로, merge 앞뒤의 빌더 커밋은
+   `conflict round changed <path> outside the merge`이다. 측정 실패도 RED다(GREEN이 아니다).
+3. **RED는 막지 않는다**(plan d3): 워크플로가 아직 self-critique를 돌리므로, 막으면 충돌을 만난 승인 PR이 오늘보다 나빠진다. RED 라운드는 그냥
+   충돌 라운드가 아니다 — 비용도 K도 오늘처럼 세고 리뷰도 오늘의 전체 리뷰다(`test_212_failed_conflict_round_falls_back_to_today`).
+4. **GREEN일 때만 둘을 쓴다, 둘 다 아니면 하나도 아니다**(`test_212_failed_conflict_round_falls_back_to_today`): 이슈 코멘트에 러너 마커
+   `<!-- factory-conflict-round:v1 … -->`, 그리고 그 런의 마지막 기록 섹션 첫 줄에 `conflict-round: stage=implement runner=… run_id=… approved=… head=…`
+   (`lib/usage.js` `conflictRoundLine`). usage 줄에 `conflict=true` 키를 붙이지 않는다 — 그 줄의 모양은 `USAGE_RE`가 소유하고, 키 하나는 ADR-036 2의
+   위조 방어를 다시 연다.
+5. **비용**(`lib/budget.js`; `test_212_conflict_round_cost_is_tagged_and_excluded_from_the_cap`): `parseRunRecord`는 자리가 맞는(implement 섹션의
+   첫 줄, 그 섹션의 러너) `conflict-round:` 줄에만 `conflict_round`를 세우고, `lifetimeCostOf`는 그 섹션을 `usd`·`runs`에서 빼 `conflictUsd`·`conflictRuns`로
+   돌려준다. `budgetCheck`는 `usd`로만 판정한다. 기록의 다른 자리·다른 러너·개행 뒤에 옮겨 적힌 같은 문구는 아무것도 빼지 않는다(쓰는 쪽
+   `quoteConflictRoundLines`·`neutralizeRecordLine`이 인용한다).
+6. **상한은 런 개수다 — `CONFLICT_ROUND_EXCLUDED_RUNS = 2`**(같은 테스트가 핀한다). 뜨거운 파일을 고친 PR은 "승인 → 충돌 → 해소 → 승인 → 다시 충돌"을
+   되풀이할 수 있고, 거기서 아무것도 세지 않으면 멈출 장치가 없다. 기록 순서로 앞의 두 섹션만 빠지고 그 뒤는 센다.
+7. **사람이 읽는 줄**(`budgetLine`; `test_212_budget_line_names_excluded_conflict_cost`): 빠진 돈과 런 수를 적고, 상한을 넘어 다시 센 런도
+   `further conflict round run(s) … counted in the cap`으로 적는다. 충돌 섹션이 없는 기록의 값과 줄은 이 변경 전 코드와 같다.
+8. **K**(`lib/retro/issue-comments.js` `countedTransitionIndices`; `test_212_merge_conflict_rework_is_not_a_review_round`): 그 뒤에 러너 마커가
+   있는 머지 스테이지의 CONFLICTING rework는 K로 세지 않는다 — 같은 상수까지. 규칙은 그 함수 하나라 `reviewRounds`와 #174 재시작의 `offset`이
+   같은 셈을 본다. 2K 천장의 셈(`attempts`, 취소를 따르지 않는 셈)은 면제하지 않는다 — 마커도 factory 계정의 코멘트라 위조할 수 있고, 위조는
+   많아야 두 칸만큼 K를 늦출 뿐 천장을 넘기지 못한다. 충돌 전이가 없는 창의 K·재시작·`reviewRoundOf`는 이 변경 전 규칙과 같다
+   (`test_212_windows_without_a_conflict_transition_count_as_before`). R(sweeper 재시도)은 이 경로에 없어 손대지 않는다.
+9. **조용히 꺼지지 않는다**(같은 dw5·dw1 테스트): 머지 스테이지의 문구가 바뀌면 그 rework는 보통 K 라운드로 세고, implement 런 기록에
+   `conflict-only: not applied — …` 한 줄이 남는다. `merge-stage.js`는 이 이슈가 건드릴 수 없어 문구를 상수로 나눠 쓰지 못한다 — 그 결합은 남는다.
+
+**되돌리면**: 이 변경을 revert하면 옛 파서가 `conflict-round:` 줄을 모르는 줄로 읽고 그 런을 다시 센다 — 던지지 않는다
+(`test_212_budget_line_names_excluded_conflict_cost`가 이 변경 전 코드로 확인한다). 이미 남은 마커가 있는 창의 K도 옛 규칙으로 다시 센다 —
+세는 쪽으로 기우는 실패다.
+
+**미룬 것(이 ADR이 짓지 않는 것)**: 빌더 브리프를 "충돌만 푼다"로 바꾸고 self-critique·skeptic을 건너뛰는 것, 리뷰를 승인 head → 현재 head의
+diff로 좁히는 것은 `templates/factory/**`에 있고 #212의 must_not이다 — 그래서 이슈의 Why("사람은 머지 한 번")는 이 변경으로 충족되지 않는다.
+워크플로가 `loaded.conflict_only`를 읽기 전까지 대부분의 충돌 라운드는 self-critique가 코드를 더해 RED로, 곧 오늘의 경로로 간다.

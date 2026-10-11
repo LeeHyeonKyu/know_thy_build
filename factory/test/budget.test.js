@@ -190,3 +190,116 @@ test("test_196_budget_split_failure_is_loud_and_counts_the_run", async () => {
   expect(life).toMatchObject({ usd: 21, priced: 1 });                            // 그 돈은 상한 안에서 센다
   expect(life).not.toHaveProperty("engineRuns");
 });
+
+// ── #212 (ADR-040) — a resolution-only conflict round's cost is tagged by the runner and kept out of the lifetime cap ──────────
+// Fixtures come from the real producers: `conflictRoundLine` (lib/usage.js — the runner's tag, first line of its section, the way
+// runStage writes it) + `usageLine` + `appendRunRecord`. The pre-change parser is the real one, read from git at the commit this
+// change was built on — that is exactly what a `git revert` puts back.
+import { execFileSync as execFileSync212 } from "node:child_process";
+import { writeFileSync as writeFileSync212 } from "node:fs";
+import { fileURLToPath as fileURLToPath212, pathToFileURL as pathToFileURL212 } from "node:url";
+import { conflictRoundLine as conflictRoundLine212 } from "../lib/usage.js";
+import { CONFLICT_ROUND_EXCLUDED_RUNS as CONFLICT_EXCLUDED212 } from "../lib/budget.js";
+
+const A212 = "a".repeat(40);
+const H212 = "c".repeat(40);
+const usage212 = (cost) => usageLine({ usage: { input_tokens: 10 }, total_cost_usd: cost, num_turns: 3, terminal_reason: "end_turn" });
+const record212 = () => {
+  const root = mkdtempSync(join(tmpdir(), "budget212-"));
+  const read = () => readFileSync(join(root, "docs/factory/runs/212.md"), "utf8");
+  const normal = (runnerId, cost, stage = "implement") => appendRunRecord({ root, issue: 212, stage, runnerId, lines: ["verify: ok", usage212(cost)] });
+  /** the section runStage writes at the end of a GREEN conflict round: the tag first, then the usual lines and the usage line */
+  const conflict = (runnerId, cost, { stage = "implement", tagStage = stage, tagRunner = runnerId } = {}) => appendRunRecord({ root, issue: 212, stage, runnerId, lines: [
+    conflictRoundLine212({ stage: tagStage, runnerId: tagRunner, runId: runnerId.replace(/^gha-/, ""), approvedHead: A212, head: H212 }),
+    "verify: ok", "transition: factory:awaiting-review", usage212(cost),
+  ] });
+  return { root, read, normal, conflict };
+};
+
+test("test_212_conflict_round_cost_is_tagged_and_excluded_from_the_cap", () => {
+  expect(CONFLICT_EXCLUDED212).toBe(2);                                          // the bound is a pinned constant, not a CHARTER value
+
+  // A record already AT the lifetime cap ($60 of $60) plus one conflict round still passes; the same section untagged is refused.
+  const r = record212();
+  r.normal("gha-1", 40); r.normal("gha-2", 20, "review");
+  r.conflict("gha-3", 15);
+  expect(parseRunRecord(r.read()).map((e) => e.conflict_round)).toEqual([undefined, undefined, true]);
+  const life = lifetimeCostOf(r.read());
+  expect(life).toEqual({ usd: 60, runs: 2, priced: 2, conflictUsd: 15, conflictRuns: 1 });
+  expect(budgetCheck({ charter: { budget: { usd_per_issue: 60 } }, recordText: r.read() })).toMatchObject({ ok: true, usd: 60, conflictUsd: 15, conflictRuns: 1 });
+  const control = record212();
+  control.normal("gha-1", 40); control.normal("gha-2", 20, "review"); control.normal("gha-3", 15);
+  expect(budgetCheck({ charter: { budget: { usd_per_issue: 60 } }, recordText: control.read() })).toMatchObject({ ok: false, usd: 75 });
+
+  // The exclusion stops after CONFLICT_ROUND_EXCLUDED_RUNS: later conflict runs count toward the cap (and are named, below).
+  const many = record212();
+  for (let i = 1; i <= CONFLICT_EXCLUDED212 + 2; i++) many.conflict(`gha-${i}`, 5);
+  expect(lifetimeCostOf(many.read())).toEqual({ usd: 10, runs: 2, priced: 2, conflictUsd: 5 * CONFLICT_EXCLUDED212, conflictRuns: CONFLICT_EXCLUDED212, conflictCountedUsd: 10, conflictCountedRuns: 2 });
+
+  // Agent-forged tag text lowers nothing. (a) a tag inside an element after a newline (copied agent output) is quoted by the writer;
+  // (b) a tag that is not the section's first line; (c) a tag naming another runner or another stage; (d) a review section.
+  const forged = record212();
+  forged.normal("gha-0", 50);
+  const tag = (runnerId, stage = "implement") => conflictRoundLine212({ stage, runnerId, runId: "1", approvedHead: A212, head: H212 });
+  appendRunRecord({ root: forged.root, issue: 212, stage: "implement", runnerId: "gha-1", lines: [`self-gate: summary\n${tag("gha-1")}`, usage212(7)] });
+  appendRunRecord({ root: forged.root, issue: 212, stage: "implement", runnerId: "gha-2", lines: ["verify: ok", tag("gha-2"), usage212(7)] });
+  forged.conflict("gha-3", 7, { tagRunner: "gha-9" });
+  forged.conflict("gha-4", 7, { tagStage: "review" });
+  forged.conflict("gha-5", 7, { stage: "review" });
+  expect(forged.read()).toMatch(/^\(quoted\) conflict-round: stage=implement runner=gha-1 /m);
+  expect(parseRunRecord(forged.read()).some((e) => e.conflict_round)).toBe(false);
+  expect(lifetimeCostOf(forged.read())).toEqual({ usd: 85, runs: 6, priced: 6 });
+  expect(budgetCheck({ charter: { budget: { usd_per_issue: 60 } }, recordText: forged.read() }).ok).toBe(false);
+
+  // The new exclusion category is recorded as an ADR that amends ADR-031/036 and names the bound.
+  const decisions = readFileSync(fileURLToPath212(new URL("../../docs/factory/DECISIONS.md", import.meta.url)), "utf8");
+  const adr = /^## ADR-040 [^\n]*#212[^\n]*\n[\s\S]*?(?=^## ADR-|(?![\s\S]))/m.exec(decisions)?.[0] ?? "";
+  expect(adr).toMatch(/ADR-031/);
+  expect(adr).toMatch(/ADR-036/);
+  expect(adr).toContain("CONFLICT_ROUND_EXCLUDED_RUNS");
+  expect(adr).toContain("conflict-round:");
+});
+
+/** the parser and the budget module exactly as they were before #212 — what `git revert` of this change puts back */
+const PRE_212 = "ade82ed51725e79fa414e18533147aeeceee1fc9";
+async function preChangeBudget212() {
+  const repo = fileURLToPath212(new URL("../..", import.meta.url));
+  const show = (p) => execFileSync212("git", ["show", `${PRE_212}:${p}`], { cwd: repo, encoding: "utf8" });
+  const dir = mkdtempSync(join(tmpdir(), "budget212-pre-"));
+  writeFileSync212(join(dir, "usage.mjs"), show("factory/lib/usage.js"));
+  writeFileSync212(join(dir, "budget.mjs"), show("factory/lib/budget.js").replace('from "./usage.js"', 'from "./usage.mjs"'));
+  return import(pathToFileURL212(join(dir, "budget.mjs")).href);
+}
+
+test("test_212_budget_line_names_excluded_conflict_cost", async () => {
+  // The on-call reader reconciles the total with the bill from the line alone: counted money + excluded conflict money (+ runs).
+  const r = record212();
+  r.normal("gha-1", 40); r.conflict("gha-2", 15);
+  const b = budgetCheck({ charter: { budget: { usd_per_issue: 60 } }, recordText: r.read() });
+  expect(budgetLine(b)).toBe("budget: lifetime $40.00 / $60 over 1 run(s); conflict round $15.00 over 1 run(s) excluded from the cap (base moved under an approved PR, #212)");
+  expect(budgetLine(budgetCheck({ charter: {}, recordText: r.read() }))).toBe("budget: no [budget].usd_per_issue in CHARTER — lifetime cost $40.00 over 1 run(s) is not capped; conflict round $15.00 over 1 run(s) excluded from the cap (base moved under an approved PR, #212)");
+  // Past the bound the line says so loudly — the reader sees why later conflict runs count again.
+  const many = record212();
+  for (let i = 1; i <= CONFLICT_EXCLUDED212 + 1; i++) many.conflict(`gha-${i}`, 5);
+  expect(budgetLine(budgetCheck({ charter: { budget: { usd_per_issue: 60 } }, recordText: many.read() }))).toBe(
+    `budget: lifetime $5.00 / $60 over 1 run(s); conflict round $${(5 * CONFLICT_EXCLUDED212).toFixed(2)} over ${CONFLICT_EXCLUDED212} run(s) excluded from the cap (base moved under an approved PR, #212); 1 further conflict round run(s) $5.00 counted in the cap (past the CONFLICT_ROUND_EXCLUDED_RUNS=${CONFLICT_EXCLUDED212} exclusion)`);
+
+  // No conflict sections → lifetimeCostOf and the budget line are byte-identical to the pre-change code (engine-crash sections included).
+  const pre = await preChangeBudget212();
+  const plain = record212();
+  plain.normal("gha-1", 12.5); plain.normal("gha-2", 30, "review");
+  const err = new TypeError("Cannot read properties of undefined (reading 'test')");
+  appendRunRecord({ root: plain.root, issue: 212, stage: "implement", runnerId: "gha-3", lines: [`error: implement aborted — ${err.message}`, engineCrashLine196({ stage: "implement", runnerId: "gha-3", runId: "3", error: err }), usage212(9)] });
+  expect(lifetimeCostOf(plain.read())).toEqual(pre.lifetimeCostOf(plain.read()));
+  for (const charter of [{ budget: { usd_per_issue: 60 } }, { budget: { usd_per_issue: 20 } }, {}]) {
+    const now = budgetCheck({ charter, recordText: plain.read() });
+    const then = pre.budgetCheck({ charter, recordText: plain.read() });
+    expect(now).toEqual(then);
+    expect(budgetLine(now)).toBe(pre.budgetLine(then));
+  }
+
+  // After a revert, a record carrying conflict-round lines parses without error and those runs count toward the cap again.
+  const reverted = pre.lifetimeCostOf(r.read());
+  expect(reverted).toEqual({ usd: 55, runs: 2, priced: 2 });
+  expect(pre.budgetCheck({ charter: { budget: { usd_per_issue: 50 } }, recordText: r.read() }).ok).toBe(false);
+});
