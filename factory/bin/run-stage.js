@@ -44,7 +44,7 @@ import { parseHeartbeatComment } from "../lib/board.js";
 import { syncRecords, hydrateRecord, readRecordsDetailed } from "../lib/records-branch.js";
 import { budgetCheck, budgetLine } from "../lib/budget.js";
 import { trustWorkspace } from "./trust-workspace.js";
-import { scrubText, SECRET_ENV } from "./scrub-artifacts.js";
+import { scrubText, secretValues } from "./scrub-artifacts.js";
 import { runMergeStage, idlessFailedSuites, VETO_WINDOW_CONTEXT } from "../lib/merge-stage.js";
 import { readBreaker, makeRecordsUploadGuard, makeMergeAbortVouch, persistSelfMergeEvidence } from "../lib/breaker.js";
 import { isEngineCheckout } from "../lib/non-judge-paths.js";
@@ -149,7 +149,8 @@ const GATE_LOG_TAIL_CUT = 2000;
  * id가 있는 게이트는 예전 그대로 `failing: <id…≤10>`이다. #206: id가 없는 게이트(must-not·lint·prove-test의 계약 위반)는
  * **그 게이트의 `log`가 곧 사유**다 — #195 attempt 1에서 빌더는 `(no test names; see the gate log)`만 보고 추측으로 재시도했다.
  * 이 detail은 공개 이슈 코멘트(`selfGateRetryComment`, 스크럽 없음)와 브리프로 간다. 그래서 순서가 계약이다:
- * ① `scrubText` + `SECRET_ENV`(gates.js의 gates-detail과 같은 규칙 원천 — 새 정규식이 아니다)로 스크럽,
+ * ① `scrubText` + `secretValues(env)`(scrub-artifacts.js의 공용 수집기 — gates.js의 gates-detail과 같은 규칙 원천, 새 정규식도
+ *   새 목록도 아니다)로 스크럽,
  * ② 개행 → 공백, ③ 코드펜스(```)를 깨뜨린다 — 코멘트의 JSON 블록은 `}` 뒤 첫 ```에서 끝나는 lazy 정규식으로 읽히므로
  * (issue-comments.js SELF_GATE_FINDINGS_JSON) 로그 속 `} ```` 하나가 블록을 잘라 findings 전체를 잃게 한다,
  * ⓪ 생산자가 스크럽 전에 꼬리를 자른 log — **명령 게이트**(정수 `code`)의 `GATE_LOG_TAIL_CUT`자 log뿐 — 는 잘린 첫 줄을
@@ -159,7 +160,7 @@ const GATE_LOG_TAIL_CUT = 2000;
  * log가 비어 있으면 예전 문구다. ` — ${reason}` 접미 규칙은 바뀌지 않는다.
  */
 export function gateRedFindings(gates, { env = process.env } = {}) {
-  const secrets = SECRET_ENV.map((k) => env?.[k]).filter((v) => typeof v === "string" && v);
+  const secrets = secretValues(env); // #271 arch1: the one shared collector (scrub-artifacts.js), not a hand-built copy
   const logReason = (raw, tailCut) => {
     if (typeof raw !== "string") return "";
     // sec1: a command gate's log is the RAW tail `(stderr + stdout).slice(-GATE_LOG_TAIL_CUT)` (gates.js), cut before any

@@ -45,6 +45,15 @@ export const REDACTED = (kind) => `[REDACTED:${kind}]`;
 export const SECRET_ENV = ["FACTORY_BOT_TOKEN", "FACTORY_MERGE_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY", "GITHUB_TOKEN"];
 
 /**
+ * #271 arch1 — **"env에서 시크릿 값 모으기"의 유일한 소유자.** `scrubText`의 `secrets`로 넘길 리터럴 목록을 만드는
+ * 규칙은 이 함수 하나다(예전엔 run-stage·runCli·qa-evidence·gates ×2·progress에 손으로 조립한 복사본이 여섯 있었다).
+ * 순수 함수다: 받은 `env`에서 `SECRET_ENV` 순서대로 비어 있지 않은 문자열 값만 돌려주고, `env`가 null/undefined면
+ * `[]`이며, **`process.env`를 스스로 읽지 않는다** — 어느 env가 잡의 것인지는 호출자가 정한다(gates.js의
+ * `env ?? process.env`처럼 각 호출자의 기본값은 호출자 쪽에 남는다).
+ */
+export const secretValues = (env) => SECRET_ENV.map((n) => env?.[n]).filter((v) => typeof v === "string" && v.length > 0);
+
+/**
  * 리터럴 치환의 최소 길이. `GITHUB_TOKEN=x` 같은 값(플레이스홀더·테스트 더미)을 그대로 치환하면
  * 파일에서 모든 `x`가 사라진다 — 아티팩트를 지키려다 아티팩트를 망가뜨린다. 짧은 값은 건드리지 않고
  * **개수만** 보고한다(`ignored`). 모양 기반 규칙 (a)~(c)는 그 값도 여전히 덮는다.
@@ -215,7 +224,7 @@ scrubPaths.summary = ({ scanned, changed, skippedBinary, ignored, unreadable = 0
 export function runCli(argv = process.argv.slice(2), env = process.env, log = console.log) {
   const paths = argv.filter((a) => !a.startsWith("--"));
   if (!paths.length) { console.error("usage: scrub-artifacts.js <path>…"); return 2; }
-  const secrets = SECRET_ENV.map((n) => env[n]).filter((v) => typeof v === "string" && v.length > 0);
+  const secrets = secretValues(env);
   if (argv.includes("--collect-transcripts")) {
     const c = collectTranscripts({ home: env.HOME, workspace: env.GITHUB_WORKSPACE, sinceSec: env.FACTORY_JOB_STARTED, dest: join(env.GITHUB_WORKSPACE || ".", TRANSCRIPTS_OUT) });
     log(`factory: scrub-artifacts transcripts collected=${c.collected}${c.reason ? ` (${c.reason})` : ""}`);

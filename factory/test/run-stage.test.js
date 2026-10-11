@@ -6813,3 +6813,54 @@ test("test_206_long_single_line_must_not_log_keeps_its_reason_from_the_start", a
   const [ml] = gateRedFindings(redGates({ "must-not": { status: "RED", code: null, log: log.replace("; ", "\n") } }), { env: {} });
   expect(ml.detail).toBe(`gate must-not RED — ${log.replace("; ", " ").slice(0, GATE_LOG_FINDING_MAX)}`);
 });
+
+/**
+ * ── #271 arch1 — the gates-RED scrub list comes from ONE owner ─────────────────────────────────────────────────
+ * Which env values get redacted before text reaches a public comment is one rule. It lived in six hand-built
+ * `SECRET_ENV.map(...)` copies (run-stage, scrub-artifacts runCli, qa-evidence, gates ×2, progress); now it is
+ * scrub-artifacts.js `secretValues(env)` and nothing else under factory/bin or factory/lib touches SECRET_ENV in code.
+ */
+import { secretValues } from "../bin/scrub-artifacts.js";
+import { readdirSync as readdirSync271 } from "node:fs";
+
+// Code lines only: JSDoc/line comments and trailing `// …` are dropped (a comment NAMING the rule is documentation).
+const codeOnly271 = (src) => src.split("\n").map((line) => {
+  const t = line.trim();
+  if (t.startsWith("*") || t.startsWith("//") || (t.startsWith("/*") && !t.includes("*/"))) return "";
+  return line.replace(/\/\*.*?\*\//g, "").replace(/(^|[^:"'`\\])\/\/.*$/, "$1");
+}).join("\n");
+const engineSources271 = () => ["bin", "lib"].flatMap((dir) => {
+  const base = new URL(`../${dir}/`, import.meta.url);
+  const walk = (u, rel) => readdirSync271(u, { withFileTypes: true }).flatMap((e) => e.isDirectory()
+    ? walk(new URL(`${e.name}/`, u), `${rel}${e.name}/`)
+    : e.name.endsWith(".js") ? [{ path: `factory/${dir}/${rel}${e.name}`, src: readFileSync(new URL(e.name, u), "utf8") }] : []);
+  return walk(base, "");
+});
+
+test("test_271_gate_red_finding_scrub_list_comes_from_the_shared_collector", () => {
+  // behaviour: every SECRET_ENV name, each holding a distinct literal no shape rule recognises, is redacted
+  const env = Object.fromEntries(SECRET_ENV.map((k, i) => [k, `plainLiteral${i}-${k.toLowerCase()}-0x9f3e`]));
+  expect(SECRET_ENV.length).toBeGreaterThanOrEqual(5);
+  const log = `lint failed\n${SECRET_ENV.map((k) => `${k} leaked as ${env[k]} here`).join("\n")}\n`;
+  for (const v of Object.values(env)) expect(log).toContain(v);
+  const [f] = gateRedFindings(redGates({ lint: { status: "RED", code: 1, log } }), { env });
+  for (const [k, v] of Object.entries(env)) expect(f.detail, k).not.toContain(v);
+  expect(f.detail.split("[REDACTED:env-value]").length - 1).toBe(SECRET_ENV.length);
+  expect(f.detail.startsWith("gate lint RED — lint failed")).toBe(true);
+  // the shared collector is the one that knows these values (and the same env gives the same list)
+  expect(secretValues(env)).toEqual(SECRET_ENV.map((k) => env[k]));
+
+  // single owner: no module under factory/bin or factory/lib except scrub-artifacts.js names SECRET_ENV in code
+  const sources = engineSources271();
+  const runStageSrc = sources.find((s) => s.path === "factory/bin/run-stage.js");
+  expect(runStageSrc).toBeTruthy();
+  expect(sources.length).toBeGreaterThan(20);
+  const owners = sources.filter((s) => /\bSECRET_ENV\b/.test(codeOnly271(s.src))).map((s) => s.path);
+  expect(owners).toEqual(["factory/bin/scrub-artifacts.js"]);
+  expect(runStageSrc.src).not.toContain("SECRET_ENV.map(");
+  // run-stage takes the list from the collector, and the deleted private copies stay deleted
+  expect(codeOnly271(runStageSrc.src)).toMatch(/import\s*\{[^}]*\bsecretValues\b[^}]*\}\s*from\s*"\.\/scrub-artifacts\.js"/);
+  expect(codeOnly271(runStageSrc.src)).toMatch(/secrets\s*=\s*secretValues\(env\)/);
+  const helpers = sources.filter((s) => /\b(secretsFrom|toolSecrets)\b/.test(codeOnly271(s.src))).map((s) => s.path);
+  expect(helpers).toEqual([]);
+});

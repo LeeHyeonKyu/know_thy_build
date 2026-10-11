@@ -1065,3 +1065,36 @@ test("implement: in KTB's own repo the runner-generated mirror paths are exclude
     expect(r.gates["must-not"].log).toMatch(/runner-generated mirror paths excluded: 2/);
   } finally { rmSync(self, { recursive: true, force: true }); }
 });
+
+// #271 arch1 (dw6) — folding gates.js's two private copies into the shared `secretValues` must keep its process.env
+// fallback: with NO env argument, gateDetail and gatesDetailLines (the last gate before the never-expiring public records
+// branch) still redact a SECRET_ENV value set in process.env. The literal matches no shape rule, so only the env path can
+// redact it — a refactor that passes `env` (undefined) to the collector without `?? process.env` leaks it here.
+test("test_271_gate_detail_without_env_still_scrubs_a_process_env_secret", () => {
+  const secret = "plainLiteralProcEnv-7c41-value";
+  const prev = process.env.FACTORY_BOT_TOKEN;
+  process.env.FACTORY_BOT_TOKEN = secret;
+  try {
+    const stdout = [
+      `FAILED tests/test_auth.py::test_login[${secret}] - boom`,
+      `context ${secret} in the tail`,
+    ].join("\n");
+    // control: the literal is not a shape — with an env that lacks it, it survives (so redaction below is the env path)
+    expect(gateDetail({ gate: "unit", stdout, env: { FACTORY_BOT_TOKEN: "" } }).snippet).toContain(secret);
+    const d = gateDetail({ gate: "unit", stdout });
+    expect(d.failing.length).toBeGreaterThan(0);
+    expect(d.failing.join("|")).not.toContain(secret);
+    expect(d.failing.join("|")).toContain("[REDACTED:env-value]");
+    expect(d.snippet).not.toContain(secret);
+    expect(d.snippet).toContain("[REDACTED:env-value]");
+    // gatesDetailLines re-scrubs failing and reason itself (no env parameter at all): a raw detail still comes out clean
+    const raw = { gate: "unit", failing: [`tests/test_auth.py::test_login[${secret}]`], snippet: "" };
+    const [line] = gatesDetailLines({ gates: { unit: { status: "RED", detail: raw, reason: `main is red on ${secret}` } } });
+    expect(line).not.toContain(secret);
+    const parsed = JSON.parse(line.slice(GATES_DETAIL_PREFIX.length));
+    expect(parsed.failing[0]).toContain("[REDACTED:env-value]");
+    expect(parsed.reason).toContain("[REDACTED:env-value]");
+  } finally {
+    if (prev === undefined) delete process.env.FACTORY_BOT_TOKEN; else process.env.FACTORY_BOT_TOKEN = prev;
+  }
+});
