@@ -587,3 +587,19 @@ test("test_232_every_admitted_done_when_spelling_yields_its_items", async () => 
     expect(notes).toEqual([]);
   }
 });
+
+test("test_232_check_ref_covers_only_test_ids_and_ignores_spelling", async () => {
+  const { validatePlanHandoff } = await import("../lib/verify-stage.js");
+  // check.ref matches an issue test id regardless of surrounding whitespace and case (L24, the dissent-id rule)
+  const body = "## done_when\n- [ ] `test_9_header` — the CSV has a header row\n";
+  expect(validatePlanHandoff(planFix({ done_when: [dw232(" TEST_9_Header ")] }), { issueBody: body }).filter((x) => x.startsWith(NOT_COVERED))).toEqual([]);
+  expect(validatePlanHandoff(planFix({ done_when: [dw232("test_9_footer")] }), { issueBody: body }).filter((x) => x.startsWith(NOT_COVERED))).toHaveLength(1);
+  // a positional id (`issue-dw<n>`) is not a test name: only covers_issue can cover it, never check.ref
+  const noIds = "## done_when\n- [ ] the export button downloads a CSV\n";
+  expect(validatePlanHandoff(planFix({ done_when: [dw232("issue-dw1")] }), { issueBody: noIds }).filter((x) => x.startsWith(NOT_COVERED)))
+    .toEqual([`${NOT_COVERED} issue-dw1 — "the export button downloads a CSV"`]);
+  // the reason quotes at most the first 80 characters of the item text
+  const long = "x".repeat(79) + "가나다";
+  const r = validatePlanHandoff(planFix({ done_when: [dw232("test_9_other")] }), { issueBody: `## done_when\n- [ ] \`test_9_long\` — ${long}\n` });
+  expect(r.filter((x) => x.startsWith(NOT_COVERED))).toEqual([`${NOT_COVERED} test_9_long — "${"x".repeat(79)}가"`]);
+});
