@@ -313,6 +313,15 @@ test("test_231_impact_paths_reads_backticked_and_plain_list_items", () => {
   }
   // 펜스 밖의 제목은 여전히 절을 끝낸다
   expect(impactPathsOf("## Impact paths\n```\n# note\n```\n- a/b.ts\n## done_when\n- c/d.ts")).toEqual(["a/b.ts"]);
+  // rework cf1·qa1 — 웹 UI로 쓴 이슈 본문은 CRLF로 저장된다: 백틱 없는 목록 항목도 LF와 똑같이 읽히고, 같은 절 끝에서 멈추며, 진짜 CHARTER에서 거부된다
+  for (const [name, section] of Object.entries(shapes)) {
+    expect(impactPathsOf(`## What\nx\n\n${section}\n## done_when (draft)\n- [ ] \`test_1_a\` — a`.replace(/\n/g, "\r\n")), `crlf ${name}`).toEqual(want);
+  }
+  const crlf = "## Impact paths\r\n- templates/factory/harness.toml\r\n- .github/workflows/publish.yml\r\n\r\n## done_when\r\n- [ ] `test_1_a`\r\n";
+  expect(impactPathsOf(crlf)).toEqual(["templates/factory/harness.toml", ".github/workflows/publish.yml"]);
+  const crlfRefused = queueAdmission({ issue: { ...person, body: crlf }, charter: realCharter231, ...base });
+  expect(crlfRefused.ok).toBe(false);
+  expect(crlfRefused.reasons.join(" ")).toContain("NEVER_AUTOMATE: templates/factory/harness.toml (glob templates/factory/**)");
 });
 
 /** 진짜 `:issue` 템플릿의 첫 마크다운 블록(Impact paths가 든 것)을 그대로 꺼내고, 자리표시자를 실제 값으로 채운다. */

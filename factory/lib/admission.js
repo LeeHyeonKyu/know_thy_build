@@ -101,7 +101,8 @@ export function impactPathsOf(body) {
   if (!m) return [];
   const lines = [];
   let fence = false;
-  for (const line of text.slice(m.index + m[0].length).split("\n")) {
+  // rework cf1·qa1 — 웹 UI로 쓴 본문은 CRLF다: `\r`이 남으면 LIST_ITEM_RE의 `(.*)$`가 맞지 않아 백틱 없는 항목이 사라진다.
+  for (const line of text.slice(m.index + m[0].length).split(/\r?\n/)) {
     if (/^\s*(?:```|~~~)/.test(line)) fence = !fence;
     else if (!fence && /^#{1,3}\s/.test(line)) break;
     lines.push(line);
