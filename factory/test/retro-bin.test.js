@@ -1498,3 +1498,38 @@ test("test_249_retro_history_records_queued_false_with_the_refusal_reason", asyn
   expect(ok.promo.labels).toEqual(["factory:harness", "factory:queue"]);
   expect(ok.step).toEqual([{ step: "harness", title: PROMO_230, issue: ok.promo.number }]);
 });
+
+// ── #249 dw5 (skeptic) — retro's admission checker carries the factory logins retro resolves from ITS env ─────────────────────
+// test_230/test_249 above vary only queue_max and a throwing door; neither outcome depends on logins, so a retro that built its
+// checker as `makeQueueAdmission({ gh, charter })` (no logins) still passed them. Here the request is one whose admission DOES
+// depend on logins: a factory marker, no `done_when`, and no factory label (the label alone would exempt it, lib/admission.js
+// doneWhenExemption) — so it is admitted only if its author is a login retro resolved. Driven through main()'s own assembly
+// (`retroMainDeps` → `createIssue`), with the env the caller injects; the fake gh records the author as `factory-bot`.
+test("test_249_retro_admission_uses_the_factory_logins_retro_resolves", async () => {
+  const { root, hash } = checkout230();
+  const req = { title: "marker-only promotion", body: "<!-- factory-harness-request for=7 -->\nno done-when section here", labels: ["factory:queue"] };
+  const runWith = async (env) => {
+    const gh = ghFor230({ variable: hash });
+    const assembled = retroMainDeps({ root, repo: "o/r", runnerId: "test/249", gh, env, now: NOW });
+    expect(assembled.dormant).toBeUndefined();
+    const r = await assembled.deps.createIssue(req);
+    return { r, issue: gh.store.get(r.issue) };
+  };
+
+  // retro's env names the factory login = the author → the marker exempts it, the door admits it
+  const ok = await runWith({ FACTORY_BOT_LOGIN: "factory-bot" });
+  expect(ok.r).toMatchObject({ queued: true });
+  expect(ok.issue.labels).toEqual(["factory:queue"]);
+
+  // no login resolvable from retro's env → fail closed with the unresolved-logins reason, not the "not a factory login" one
+  const none = await runWith({});
+  expect(none.r.queued).toBe(false);
+  expect(none.issue.labels).toEqual(["backlog"]);
+  expect(none.r.queue_reason).toMatch(/factory logins could not be resolved, so author `factory-bot` cannot be checked/);
+
+  // a different login in retro's env → refused as a non-factory author (the logins are retro's, not a constant)
+  const other = await runWith({ FACTORY_BOT_LOGIN: "someone-else[bot]" });
+  expect(other.r.queued).toBe(false);
+  expect(other.issue.labels).toEqual(["backlog"]);
+  expect(other.r.queue_reason).toMatch(/its author `factory-bot` is not a factory login/);
+});
