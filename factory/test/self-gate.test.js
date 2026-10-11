@@ -821,6 +821,9 @@ test("test_212_conflict_scope_fails_closed_on_every_git_read", async () => {
   await measured(g, failOn((a) => a[0] === "rev-list" && a.includes("--parents")), { mirrorSha }, "rev-list");
   await measured(g, failOn((a) => a[0] === "show" && String(a[1]).endsWith(`:${C212}`)), { mirrorSha }, "show of the conflicted path");
   await measured(g, failOn((a) => a[0] === "ls-tree"), { mirrorSha }, "tree lookup of the conflicted path");
+  // one side at a time: git's auto-merge tree, then the merge commit
+  await measured(g, failOn((a) => a[0] === "show" && String(a[1]).endsWith(`:${C212}`) && !String(a[1]).startsWith(mergeSha)), { mirrorSha }, "show of the auto-merge side");
+  await measured(g, failOn((a) => a[0] === "show" && String(a[1]) === `${mergeSha}:${C212}`), { mirrorSha }, "show of the merge side");
   await measured(g, failOn((a) => a[0] === "diff" && a.includes("-z") && a.at(-1) === mergeSha), { mirrorSha }, "auto-merge vs merge diff");
   // (b) a commit after the merge that is not the mirror: its diff-tree read
   await measured(g, failOn((a) => a[0] === "diff-tree"), { mirrorSha: null }, "diff-tree of a commit after the merge");
