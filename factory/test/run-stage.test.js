@@ -5690,8 +5690,10 @@ test("test_196_crash_after_handoff_never_tells_owner_to_requeue", async () => {
 });
 
 // ── #195 — run-stage wires the PR-body evidence through the gh.js adapter ──────────────────────────────────────────────────
-// PR-body I/O is the runner's: `gh.prBody` (`gh pr view --json body`) read immediately before `gh.editPrBody`
-// (`gh pr edit --body-file -`, the body on stdin — never a shell string), each with a timeout and no retry.
+// PR-body I/O is the runner's: `gh.prBody` (REST GET `repos/<repo>/pulls/<n>`) read immediately before `gh.editPrBody`
+// (REST PATCH, `{body}` JSON on stdin — never a shell string), each with a timeout and no retry.
+// #217 dw3 (plan: "the test_195 argv assertions are moved to the new shape, with no `pr edit` fallback kept") — `gh pr view` /
+// `gh pr edit` need `read:org` over GraphQL, which the bot token lacks; the argv pins below follow the REST shape.
 import { makePrEvidenceDeps } from "../bin/run-stage.js";
 import { makeGh as makeGh195 } from "../lib/gh.js";
 import { EVIDENCE_START as EVIDENCE_START_195 } from "../lib/evidence.js";
@@ -5702,16 +5704,16 @@ test("test_195_run_stage_wires_pr_body_edit_through_gh_adapter", async () => {
   const repo = "acme/app";
   // (1) the adapter: argv shape, the body on stdin, one call each.
   const run = makeFakeRun([
-    { match: (c, a) => c === "gh" && a[0] === "pr" && a[1] === "view", result: { code: 0, stdout: JSON.stringify({ body: "Closes #7\n" }), stderr: "" } },
-    { match: (c, a) => c === "gh" && a[0] === "pr" && a[1] === "edit", result: { code: 0, stdout: "", stderr: "" } },
+    { match: (c, a) => c === "gh" && a[0] === "api" && !a.includes("-X"), result: { code: 0, stdout: JSON.stringify({ body: "Closes #7\n" }), stderr: "" } },
+    { match: (c, a) => c === "gh" && a[0] === "api" && a.includes("PATCH"), result: { code: 0, stdout: "", stderr: "" } },
   ]);
   const gh = makeGh195({ run, repo });
   expect(await gh.prBody(9)).toBe("Closes #7\n");
-  expect(run.calls[0].args).toEqual(["pr", "view", "9", "-R", repo, "--json", "body"]);
+  expect(run.calls[0].args).toEqual(["api", `repos/${repo}/pulls/9`]);
   const hostile = "line | pipe\n> quote; $(rm -rf /)\n";
   await gh.editPrBody(9, hostile);
-  expect(run.calls[1].args).toEqual(["pr", "edit", "9", "-R", repo, "--body-file", "-"]);
-  expect(run.calls[1].opts.input).toBe(hostile);
+  expect(run.calls[1].args).toEqual(["api", "-X", "PATCH", `repos/${repo}/pulls/9`, "--input", "-"]);
+  expect(run.calls[1].opts.input).toBe(JSON.stringify({ body: hostile }));
   expect(run.calls).toHaveLength(2);
   // A hanging gh times out — one call, no retry.
   const hang = makeFakeRun([{ match: () => true, result: () => new Promise(() => {}) }]);
