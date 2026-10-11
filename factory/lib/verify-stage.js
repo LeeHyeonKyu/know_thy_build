@@ -148,7 +148,8 @@ const GUARD_REQUESTED = /\bguard\b|가드|\[guard\]/i;
  * (admission은 이미 이 모듈을 import하므로 순환이 생기지 않는다; 반대 방향으로 두면 순환이다).
  */
 export const DONE_WHEN_RE = /^#{2,3}\s*done[_ ]when\b|^done_when:/im;
-const CHECKLIST_ITEM = /^ {0,3}[-*+]\s+\[[ xX]\]\s+(.*?)\s*$/;
+/** GFM 태스크 목록 항목 — 글머리(`-`/`*`/`+`)와 순서 목록(`1.`/`1)`) 둘 다(#232: 순서 목록 항목을 놓치면 "항목 없음"으로 열린다). */
+const CHECKLIST_ITEM = /^ {0,3}(?:[-*+]|\d{1,9}[.)])\s+\[[ xX]\]\s+(.*?)\s*$/;
 const LEADING_TEST_ID = /^`(test_[A-Za-z0-9_]+)`\s*(?:[—–:-]+\s*)?/;
 const ANY_TEST_ID = /`(test_[A-Za-z0-9_]+)`/;
 const NEXT_HEADING = /^#{1,6}\s/;
@@ -166,15 +167,24 @@ const FENCE_LINE = /^ {0,3}(`{3,}|~{3,})(.*)$/;
  * **펜스 코드 블록 안의 줄은 아무것도 아니다**(#232 cf1): 인용한 plan 핸드오프의 `done_when:`은 절이 아니고,
  * 절 안 셸 블록의 `# run`은 다음 제목이 아니며, 펜스 안의 `- [ ]`는 항목이 아니다. 펜스 밖에서 `DONE_WHEN_RE`에
  * 맞는 줄이 여럿이면 **항목이 나오는 첫 절**을 쓴다 — 항목 없는 앞 절이 진짜 절을 가리면 심사를 통과한 이슈가
- * "항목 없음"으로 읽혀 검사가 열린다(fail open).
+ * "항목 없음"으로 읽혀 검사가 열린다(fail open). 펜스 밖에서 항목이 하나도 안 나오면 **펜스를 무시하고 한 번 더**
+ * 읽는다 — 심사는 펜스를 가리지 않고 본문 전체에 `DONE_WHEN_RE`를 대므로, 펜스 안에만 절과 항목이 있는 이슈도
+ * 심사를 통과한다. 그때 `[]`를 돌려주면 둘이 갈라져 열리고, 펜스 안 항목을 읽으면 검사가 닫힌 쪽으로 남는다.
  * → `[{id, text}]`. id는 백틱 안 `test_…` 이름, 없으면 항목 순번 `issue-dw<n>`. text는 맨 앞의 백틱 id와
  * 구분자(`—`/`:`/`-`)를 뗀 나머지(id가 앞에 없으면 항목 전체). 절이 없거나 항목이 없으면 `[]`.
  */
 export function issueDoneWhenItems(body) {
+  const lines = String(body ?? "").split(/\r?\n/);
+  const outside = doneWhenItemsIn(lines, true);
+  return outside.length ? outside : doneWhenItemsIn(lines, false);
+}
+
+function doneWhenItemsIn(lines, honourFences) {
   let fence = null;   // 열린 펜스의 마커(``` / ~~~ …), 없으면 null
   let items = null;   // 지금 읽는 절의 항목, 절 밖이면 null
-  for (const line of String(body ?? "").split(/\r?\n/)) {
+  for (const line of lines) {
     const f = FENCE_LINE.exec(line);
+    if (f && !honourFences) continue;   // 펜스를 무시하는 둘째 읽기: 여닫는 줄만 건너뛴다
     if (fence) {
       if (f && f[1][0] === fence[0] && f[1].length >= fence.length && f[2].trim() === "") fence = null;
       continue;

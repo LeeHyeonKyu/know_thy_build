@@ -652,3 +652,31 @@ test("test_232_done_when_section_ignores_fenced_code_and_prose_keys", async () =
   const emptyFirst = "done_when:\nsee below\n\n## done_when\n- [ ] `test_1_a` — a\n";
   expect(issueDoneWhenItems(emptyFirst).map((i) => i.id)).toEqual(["test_1_a"]);
 });
+
+test("test_232_admitted_done_when_with_items_never_reads_as_no_items", async () => {
+  const { validatePlanHandoff } = await import("../lib/verify-stage.js");
+  const { issueDoneWhenItems } = await import("../lib/context.js");
+  const { queueAdmission } = await import("../lib/admission.js");
+  const admitted = (body) => !queueAdmission({ issue: { number: 1, body, labels: [] }, charter: {} }).reasons.some((r) => /not an explicit job/.test(r));
+  const rejectsDropped = (body, kept, dropped, text) => {
+    const notes = [];
+    const reasons = validatePlanHandoff(planFix({ done_when: [dw232(kept)] }), { issueBody: body, notes });
+    expect(reasons.filter((x) => x.startsWith(NOT_COVERED))).toEqual([`${NOT_COVERED} ${dropped} — "${text}"${FIX_TEST(dropped)}`]);
+    expect(notes).toEqual([]);
+  };
+  // an empty draft section that ends at an ordinary heading does not hide a later done_when section with items
+  const emptyDraft = "## done_when (draft)\n_TBD_\n\n## Notes\nsee the plan\n\n### Done when\n- [ ] `test_1_a` — a\n- [ ] `test_1_b` — b\n";
+  expect(admitted(emptyDraft)).toBe(true);
+  expect(issueDoneWhenItems(emptyDraft).map((i) => i.id)).toEqual(["test_1_a", "test_1_b"]);
+  rejectsDropped(emptyDraft, "test_1_a", "test_1_b", "b");
+  // the only done_when heading and its checklist sit inside a fence: admission counts it, so the parser reads it too
+  const fencedOnly = "## What\n```md\n## done_when\n- [ ] `test_1_a` — a\n- [ ] `test_1_b` — b\n```\n";
+  expect(admitted(fencedOnly)).toBe(true);
+  expect(issueDoneWhenItems(fencedOnly).map((i) => i.id)).toEqual(["test_1_a", "test_1_b"]);
+  rejectsDropped(fencedOnly, "test_1_a", "test_1_b", "b");
+  // GFM ordered task lists (`1. [ ]`, `2) [x]`) are checklist items too
+  const ordered = "## done_when\n1. [ ] `test_9_a` — first\n2) [x] `test_9_b` — second\n3. not a task item\n";
+  expect(admitted(ordered)).toBe(true);
+  expect(issueDoneWhenItems(ordered)).toEqual([{ id: "test_9_a", text: "first" }, { id: "test_9_b", text: "second" }]);
+  rejectsDropped(ordered, "test_9_a", "test_9_b", "second");
+});
