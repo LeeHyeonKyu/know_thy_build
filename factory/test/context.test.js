@@ -743,3 +743,118 @@ test("test_174_builder_context_takes_the_brief_bound_to_the_restart_transition",
   expect(loaded.k_restart_brief.findings).toEqual(real);
   expect(loaded.k_restart_brief.paths).toEqual(["factory/lib/self-gate.js"]);
 });
+
+// ── #233 → #254 (gap P-12 / ledger M-6) — triage 검증이 올린 tier를 plan·review·merge가 따른다 ─────────
+// plan 시점에는 diff가 없어 바닥이 docs(또는 null)이다 — 그래서 triage 검증이 impact_paths로 올린 tier
+// (handoff의 `tier`, 신고는 `tier_declared`)가 모든 스테이지의 입력으로 남아야 한다. diff가 생긴 뒤에도 내려가지 않는다.
+import { verifyStage } from "../lib/verify-stage.js";
+import { parseHandoffs } from "../lib/handoff.js";
+import * as runStage233 from "../bin/run-stage.js";
+import { loadCharter, loadHarness } from "../lib/config.js";
+import { verifyReviewQuorum } from "../lib/review-quorum.js";
+
+const root233 = () => {
+  const r = mkdtempSync(join(tmpdir(), "ctx-233-"));
+  mkdirSync(join(r, ".factory"), { recursive: true }); mkdirSync(join(r, "docs/factory"), { recursive: true });
+  writeFileSync(join(r, ".factory/harness.toml"), `schema = 1\n[harness]\nmaturity = "M0"\n[factory]\norchestration = "workflow"\n[commands]\nunit = "npm test"\n[gates]\nrequired = ["unit"]\nfast = ["unit"]\nfull = ["unit"]\ndeep = ["unit"]\n[load_bearing]\npaths = ["factory/bin/run-stage.js"]\n`);
+  // standard와 load-bearing이 갈리도록: 로스터 크기가 다르고, 토론은 load-bearing에서만 돈다
+  writeFileSync(join(r, "docs/factory/CHARTER.md"), `---\nschema: factory.charter.v1\nstatus: ready\ntier_default: standard\nroster:\n  docs: [correctness]\n  standard: [correctness, qa]\n  load-bearing: [correctness, qa, security, architecture]\nplan_roles:\n  default: [architect, skeptic, operator]\nplan_rounds: { default: 3 }\nplan:\n  debate_tiers: [load-bearing]\n---\n`);
+  writeFileSync(join(r, ".factory/roles.toml"), `[review.correctness]\nagent = "c.md"\n[review.qa]\nagent = "q.md"\n[review.security]\nagent = "s.md"\n[review.architecture]\nagent = "ar.md"\n[plan.architect]\nagent = "a.md"\n[plan.skeptic]\nagent = "sk.md"\n[plan.operator]\nagent = "o.md"\n[plan.synthesizer]\nagent = "syn.md"\n`);
+  return r;
+};
+/** 실제 생산 경로로 만든 triage handoff: verifyStage(load_bearing 글롭 주입) → 그 검증된 객체를 handoff로 렌더. */
+const verifiedTriage233 = (issue, impact_paths) => {
+  const out = { is_error: false, result: JSON.stringify({ schema: "factory.triage.v1", issue, disposition: "ready", tier: "standard", impact_paths, reason: "r" }) };
+  const v = verifyStage({ stage: "triage", out, agentsLog: { completed: [] }, loadBearing: ["factory/bin/run-stage.js"] });
+  expect(v.ok).toBe(true);
+  return { id: 1, body: renderHandoff({ stage: "triage", issue, summary: "s", data: v.data }), createdAt: "2026-10-10T00:00:00Z" };
+};
+const gh233 = (issue, comments) => ({ issue: vi.fn(async () => ({ number: issue, title: "T", body: "", labels: [] })), comments: vi.fn(async () => comments) });
+const LB_ROSTER = ["correctness", "qa", "security", "architecture"];
+const parseHandoffs233 = (bodies) => parseHandoffs(bodies.map((body, i) => ({ id: i, body, createdAt: "2026-10-10T00:00:00Z" })))[0].data;
+
+test("test_233_plan_mode_follows_the_raised_tier", async () => {
+  // raised — 생산 경로(run-stage의 plan)는 run/base 없이도, 빈 diff(바닥 docs)로도 plan을 짓는다: 둘 다 토론이다
+  const raised = [verifiedTriage233(41, ["factory/lib/context.js", "factory/bin/run-stage.js"])];
+  for (const extra of [{}, { run: diffRun(""), base: "b" }]) {
+    const r = root233();
+    const ctx = await buildContext({ root: r, gh: gh233(41, raised), issue: 41, stage: "plan", ...extra });
+    expect(ctx.tier_effective).toBe("load-bearing");
+    expect(ctx.plan.mode).toBe("debate");
+    expect(ctx.rounds).toBe(3);
+    expect(ctx.roster).toEqual(["architect", "skeptic", "operator"]);
+    // 워크플로가 읽는 유일한 tier(loaded.json)도 올라간 쪽이다
+    const loaded = JSON.parse(readFileSync(join(r, ".factory/out/loaded.json"), "utf8"));
+    expect(loaded.tier).toBe("load-bearing");
+  }
+  // 리뷰 로스터도 같은 tier를 따른다(diff 없는 호출)
+  const rev = await buildContext({ root: root233(), gh: gh233(41, raised), issue: 41, stage: "review" });
+  expect(rev.tier_effective).toBe("load-bearing");
+  expect(rev.roster).toEqual(LB_ROSTER);
+
+  // not raised — 같은 standard 신고, load-bearing 경로 없음: 오늘과 같이 신고 tier(단일 패스·standard 로스터)
+  const plain = [verifiedTriage233(42, ["factory/lib/context.js"])];
+  const p = await buildContext({ root: root233(), gh: gh233(42, plain), issue: 42, stage: "plan" });
+  expect([p.tier_effective, p.tier_source]).toEqual(["standard", "triage"]);
+  expect(p.plan.mode).toBe("single");
+  expect(p.roster).toEqual(["synthesizer", "skeptic"]);
+  const pr = await buildContext({ root: root233(), gh: gh233(42, plain), issue: 42, stage: "review" });
+  expect(pr.roster).toEqual(["correctness", "qa"]);
+});
+
+test("test_233_raised_tier_is_not_lowered_once_a_diff_exists", async () => {
+  const raised = [verifiedTriage233(43, ["factory/bin/run-stage.js"])];
+  // diff가 load-bearing이 아닌 경로만 건드려도(바닥 docs·standard) 실효 tier는 load-bearing에 머문다
+  for (const diff of ["M\tdocs/a.md\n", "M\tfactory/lib/context.js\n"]) {
+    const r = root233();
+    const ctx = await buildContext({ root: r, gh: gh233(43, raised), issue: 43, stage: "review", run: diffRun(diff), base: "b" });
+    expect(ctx.tier_floor).not.toBe("load-bearing");                     // 바닥은 정말로 낮다 — 올림만이 tier를 지킨다
+    expect(ctx.tier_effective).toBe("load-bearing");
+    expect(ctx.roster).toEqual(LB_ROSTER);
+    // 그 컨텍스트로 리뷰 handoff를 내면(러너의 writeHandoff) tier_effective는 load-bearing이다 — sweeper가 읽는 값
+    const posted = [];
+    const write = runStage233.makeWriteHandoffDep({ gh: { comment: async (_i, body) => posted.push(body) }, issue: 43, stage: "review", getCtx: () => ctx });
+    await write({ data: { schema: "factory.review.v1", issue: 43, verdicts: [] } });
+    expect(parseHandoffs233(posted).tier_effective).toBe("load-bearing");
+  }
+  // 올리지 않은 handoff + 같은 diff → 신고/바닥 그대로
+  const plain = [verifiedTriage233(44, ["factory/lib/context.js"])];
+  const docsDiff = await buildContext({ root: root233(), gh: gh233(44, plain), issue: 44, stage: "review", run: diffRun("M\tdocs/a.md\n"), base: "b" });
+  expect([docsDiff.tier_effective, docsDiff.tier_source]).toEqual(["standard", "triage"]);
+  expect(docsDiff.roster).toEqual(["correctness", "qa"]);
+  // 바닥이 신고보다 진짜 높으면 여전히 그쪽이 이긴다(출처는 floor) — 올림은 max이지 대체가 아니다
+  const lbDiff = await buildContext({ root: root233(), gh: gh233(44, plain), issue: 44, stage: "review", run: diffRun("M\tfactory/bin/run-stage.js\n"), base: "b" });
+  expect([lbDiff.tier_effective, lbDiff.tier_source]).toEqual(["load-bearing", "floor"]);
+});
+
+test("test_233_merge_quorum_roster_follows_the_raised_tier", async () => {
+  // 두 문(review의 context.json, merge의 정족수 로스터)이 같은 handoff·같은 diff에서 같은 로스터를 내야 한다.
+  // 올린 이슈의 diff가 load-bearing 경로를 건드리지 않아도 merge는 리뷰가 실제로 돌린 4인 로스터로 정족수를 센다.
+  const mergeRoster = (r, comments, diff) => runStage233.makeMergeReviewRosterDep({
+    run: diffRun(diff), root: r, gh: gh233(0, comments), issue: 0,
+    getCharter: () => loadCharter(r), getHarness: () => loadHarness(r), mergeBase: async () => "b",
+  })();
+  const fourApprovals = { verdicts: LB_ROSTER.map((role) => ({ role, verdict: "approve", must_fix: [] })) };
+  const twoApprovals = { verdicts: ["correctness", "qa"].map((role) => ({ role, verdict: "approve", must_fix: [] })) };
+  const raised = [verifiedTriage233(45, ["factory/bin/run-stage.js"])];
+  for (const diff of ["M\tdocs/a.md\n", "M\tfactory/lib/context.js\n"]) {
+    const r = root233();
+    const rev = await buildContext({ root: r, gh: gh233(45, raised), issue: 45, stage: "review", run: diffRun(diff), base: "b" });
+    const ros = await mergeRoster(r, raised, diff);
+    expect(ros.ok).toBe(true);
+    expect(ros.tier).toBe("load-bearing");
+    expect(ros.roles).toEqual(LB_ROSTER);
+    expect(ros.roles).toEqual(rev.roster);
+    // 리뷰가 낸 4인 approve handoff는 merge 정족수를 통과하고, 2인짜리는 통과하지 못한다
+    expect(verifyReviewQuorum({ data: fourApprovals, rosterSize: ros.roles.length, rosterRoles: ros.roles })).toEqual({ ok: true });
+    expect(verifyReviewQuorum({ data: twoApprovals, rosterSize: ros.roles.length, rosterRoles: ros.roles }).ok).toBe(false);
+  }
+  // 올리지 않은 handoff + 같은 docs diff → 두 문 모두 신고 tier의 2인 로스터
+  const plain = [verifiedTriage233(46, ["factory/lib/context.js"])];
+  const r = root233();
+  const rev = await buildContext({ root: r, gh: gh233(46, plain), issue: 46, stage: "review", run: diffRun("M\tdocs/a.md\n"), base: "b" });
+  const ros = await mergeRoster(r, plain, "M\tdocs/a.md\n");
+  expect([ros.tier, ros.tier_source]).toEqual(["standard", "triage"]);
+  expect(ros.roles).toEqual(["correctness", "qa"]);
+  expect(ros.roles).toEqual(rev.roster);
+});

@@ -6572,3 +6572,49 @@ test("test_200_scope_check_fails_open_visibly_on_git_read_error", async () => {
     expect(r.ok, name).toBe(false);
   }
 });
+
+// ── #233 → #254 (gap P-12 / ledger M-6) — 올린 tier가 생산 경로에 닿는다 ──────────────────────────────
+// verifyStage는 자기 호출자가 넘긴 것만 본다: 러너의 triage 검증(`makeVerifyStageDep`)이 harness `[load_bearing].paths`를
+// 넘겨야 올림이 산다. 올린 tier는 실제 writer를 지난 triage handoff·tier 라벨·run 기록에 모두 닿는다.
+import * as rs233 from "../bin/run-stage.js";
+
+test("test_233_raised_tier_reaches_the_triage_handoff_and_run_record", async () => {
+  const runTriage = async ({ impact_paths, tier = "standard", loadBearing }) => {
+    const root = mkdtempSync(join(tmpdir(), "rs-233-"));
+    const ctx = { roster: [], orchestration: "workflow", limits: { K: 3 }, tier, tier_effective: tier, tier_source: "triage", tier_floor: "docs" };
+    const posted = [], lines = [], labels = [];
+    const gh = { comment: async (_issue, body) => posted.push(body) };
+    const deps = baseDeps({
+      buildContext: async () => ctx,
+      claudeP: async () => ({ is_error: false, result: JSON.stringify({ schema: "factory.triage.v1", issue: 7, disposition: "ready", tier, impact_paths, reason: "r", orchestration: "workflow" }) }),
+      verifyStage: rs233.makeVerifyStageDep({ root, stage: "triage", getCtx: () => ctx, getCharter: () => ({ never_automate: [] }), getHarness: () => ({ load_bearing: { paths: loadBearing } }) }),
+      writeHandoff: rs233.makeWriteHandoffDep({ gh, issue: 7, stage: "triage", getCtx: () => ctx }),
+      setTierLabel: async (t) => labels.push(t),
+      transition: async () => ({ ok: true, to: "factory:ready" }),
+      runRecord: (l) => lines.push(...l),
+    });
+    const code = await runStage({ stage: "triage", issue: 7, deps });
+    const handoffs = parseHandoffs(posted.map((body, i) => ({ id: i, body, createdAt: "2026-10-10T00:00:00Z" })));
+    return { code, lines, labels, handoff: handoffs.find((h) => h.stage === "triage")?.data };
+  };
+  const LB = ["factory/bin/run-stage.js", ".factory/bin/run-stage.js"];
+
+  const hit = await runTriage({ impact_paths: ["factory/lib/context.js", "factory/bin/run-stage.js"], loadBearing: LB });
+  expect(hit.code).toBe(0);
+  expect(hit.lines).toContain("tier: raised standard → load-bearing — impact path factory/bin/run-stage.js matches [load_bearing].paths");
+  expect([hit.handoff.tier, hit.handoff.tier_declared]).toEqual(["load-bearing", "standard"]);   // 실제 writer를 지나도 올림이 남는다
+  expect(hit.handoff.load_bearing_hit).toEqual([{ path: "factory/bin/run-stage.js", glob: "factory/bin/run-stage.js" }]);
+  expect(hit.labels).toEqual(["load-bearing"]);                                     // 사람이 보는 라벨도 올라간 쪽
+
+  // 같은 이슈, 하네스에 load_bearing이 없으면(= 글롭이 verifyStage에 안 닿으면) 올림도 기록도 없다
+  const unwired = await runTriage({ impact_paths: ["factory/bin/run-stage.js"], loadBearing: [] });
+  expect(unwired.lines.some((l) => /raised .*load-bearing/.test(l))).toBe(false);
+  expect(unwired.handoff.tier).toBe("standard");
+  expect(unwired.labels).toEqual(["standard"]);
+
+  // miss — 신고 tier 그대로(오늘의 동작)
+  const miss = await runTriage({ impact_paths: ["factory/lib/context.js"], loadBearing: LB });
+  expect(miss.lines.some((l) => /raised .*load-bearing/.test(l))).toBe(false);
+  expect([miss.handoff.tier, miss.handoff.load_bearing_hit]).toEqual(["standard", undefined]);
+  expect(miss.labels).toEqual(["standard"]);
+});

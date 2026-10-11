@@ -4046,3 +4046,78 @@ test("test_208_evidence_publish_count_across_merge_exits", async () => {
     expect(ev.publishPrEvidence.mock.calls.length, name).toBe(calls);
   }
 });
+
+// ── #254 (gap P-12 / ledger M-6) — 올린 tier의 패널 parity: 계획하는 패널 = 리뷰하는 패널 = 머지하는 패널 ──────────
+// 한 triage handoff(신고 standard, impact_paths는 load-bearing)를 **실제 생산 경로**로 만든다 — 러너의 verifyStage dep
+// (`[load_bearing].paths` 주입) → 러너의 writeHandoff(tier_effective 스탬프) → 이슈 코멘트 → parseHandoffs.
+// 그 하나의 기록에서 plan 컨텍스트, review 컨텍스트, resolveReviewRoster, merge 스테이지의 정족수 dep,
+// sweeper 사람-머지 팔(sweep.js와 같은 조립: review handoff의 tier_effective → tierFromReviewHandoff)이 모두
+// load-bearing의 역할 수를 내야 한다. 어디 한 곳이라도 신고(standard) 수를 내면 실패한다.
+import { mkdtempSync as mkdtemp254, mkdirSync as mkdir254, writeFileSync as write254 } from "node:fs";
+import { join as join254 } from "node:path";
+import { tmpdir as tmpdir254 } from "node:os";
+import { buildContext as buildContext254 } from "../lib/context.js";
+import { resolveReviewRoster as resolveReviewRoster254, tierFromReviewHandoff as tierFromReviewHandoff254 } from "../lib/review-roster.js";
+import { latestHandoff as latestHandoff254 } from "../lib/handoff.js";
+import { loadCharter as loadCharter254, loadHarness as loadHarness254, loadRoles as loadRoles254, rosterFor as rosterFor254 } from "../lib/config.js";
+import { makeVerifyStageDep as makeVerifyStageDep254, makeWriteHandoffDep as makeWriteHandoffDep254, makeMergeReviewRosterDep as makeMergeReviewRosterDep254 } from "../bin/run-stage.js";
+
+test("test_254_raised_tier_quorum_parity_plan_review_merge", async () => {
+  const fixtureRoot = () => {
+    const r = mkdtemp254(join254(tmpdir254(), "merge-254-"));
+    mkdir254(join254(r, ".factory"), { recursive: true }); mkdir254(join254(r, "docs/factory"), { recursive: true });
+    write254(join254(r, ".factory/harness.toml"), `schema = 1\n[harness]\nmaturity = "M0"\n[factory]\norchestration = "workflow"\n[commands]\nunit = "npm test"\n[gates]\nrequired = ["unit"]\nfast = ["unit"]\nfull = ["unit"]\ndeep = ["unit"]\n[load_bearing]\npaths = ["factory/bin/run-stage.js"]\n`);
+    write254(join254(r, "docs/factory/CHARTER.md"), `---\nschema: factory.charter.v1\nstatus: ready\ntier_default: standard\nroster:\n  docs: [correctness]\n  standard: [correctness, qa]\n  load-bearing: [correctness, qa, security, architecture]\nplan_roles:\n  default: [architect, skeptic, operator]\nplan_rounds: { default: 3 }\nplan:\n  debate_tiers: [load-bearing]\n---\n`);
+    write254(join254(r, ".factory/roles.toml"), `[review.correctness]\nagent = "c.md"\n[review.qa]\nagent = "q.md"\n[review.security]\nagent = "s.md"\n[review.architecture]\nagent = "ar.md"\n[plan.architect]\nagent = "a.md"\n[plan.skeptic]\nagent = "sk.md"\n[plan.operator]\nagent = "o.md"\n[plan.synthesizer]\nagent = "syn.md"\n`);
+    return r;
+  };
+  const docsDiff = () => makeFakeRun([{ match: (c, a) => c === "git" && a[0] === "diff", result: { code: 0, stdout: "M\tdocs/a.md\n", stderr: "" } }]);
+
+  const panels = async (issue, impact_paths) => {
+    const root = fixtureRoot();
+    const comments = [];
+    const gh = {
+      issue: async () => ({ number: issue, title: "T", body: "", labels: [] }),
+      comments: async () => comments.map((body, i) => ({ id: i + 1, body, createdAt: `2026-10-11T00:00:0${i}Z` })),
+      comment: async (_i, body) => { comments.push(body); },
+    };
+    const charter = loadCharter254(root), harness = loadHarness254(root), roles = loadRoles254(root);
+    // triage — 러너의 verifyStage dep와 writeHandoff dep(트리아지 전의 컨텍스트로 스탬프)를 그대로 지난다
+    const triageCtx = await buildContext254({ root, gh, issue, stage: "triage" });
+    const out = { is_error: false, result: JSON.stringify({ schema: "factory.triage.v1", issue, disposition: "ready", tier: "standard", impact_paths, reason: "r", orchestration: "workflow" }) };
+    const v = makeVerifyStageDep254({ root, stage: "triage", getCtx: () => triageCtx, getCharter: () => charter, getHarness: () => harness })({ out, gates: null });
+    expect(v.ok).toBe(true);
+    await makeWriteHandoffDep254({ gh, issue, stage: "triage", getCtx: () => triageCtx })({ data: v.data });
+    // plan — diff 없음
+    const plan = await buildContext254({ root, gh, issue, stage: "plan" });
+    // review — diff는 docs만(바닥이 tier를 지켜 주지 않는다), 그 컨텍스트로 review handoff를 실제 writer가 쓴다
+    const review = await buildContext254({ root, gh, issue, stage: "review", run: docsDiff(), base: "b" });
+    await makeWriteHandoffDep254({ gh, issue, stage: "review", getCtx: () => review })({ data: { schema: "factory.review.v1", issue, verdicts: [] } });
+    const all = await gh.comments();
+    const resolved = await resolveReviewRoster254({ charter, roles: () => roles, comments: all });
+    const merge = await makeMergeReviewRosterDep254({ run: docsDiff(), root, gh, issue, getCharter: () => charter, getHarness: () => harness, mergeBase: async () => "b" })();
+    // sweeper 사람-머지 팔: sweeper.js가 review handoff의 tier_effective를 꺼내고, sweep.js가 그것을 tierFromReviewHandoff로 넘긴다
+    const handoffTier = latestHandoff254(all, "review")?.data?.tier_effective ?? null;
+    const sweeper = await resolveReviewRoster254({ charter, roles: () => roles, comments: all, effectiveTier: handoffTier ? tierFromReviewHandoff254(handoffTier) : null });
+    return { charter, roles, plan, review, resolved, merge, sweeper };
+  };
+
+  const hit = await panels(254, ["factory/lib/context.js", "factory/bin/run-stage.js"]);
+  const LB_REVIEW = rosterFor254(hit.charter, hit.roles, "review", "load-bearing");
+  const LB_PLAN = rosterFor254(hit.charter, hit.roles, "plan", "load-bearing");
+  expect(LB_REVIEW).toHaveLength(4);                                   // 픽스처가 두 tier를 실제로 가른다
+  expect(rosterFor254(hit.charter, hit.roles, "review", "standard")).toHaveLength(2);
+  expect([hit.plan.tier_effective, hit.plan.plan.mode, hit.plan.rounds]).toEqual(["load-bearing", "debate", 3]);
+  expect(hit.plan.roster).toEqual(LB_PLAN);
+  expect(hit.review.roster).toEqual(LB_REVIEW);
+  for (const [name, ros] of [["resolveReviewRoster", hit.resolved], ["merge quorum", hit.merge], ["sweeper human-merged", hit.sweeper]]) {
+    expect(ros.ok, name).toBe(true);
+    expect(ros.roles, name).toEqual(LB_REVIEW);
+    expect(ros.roles.length, name).toBe(hit.review.roster.length);
+  }
+
+  // 대조 — 같은 신고, load-bearing 경로 없음: 다섯 소비자 모두 standard의 수(그래서 위의 4는 올림에서 온 것이다)
+  const plain = await panels(255, ["factory/lib/context.js"]);
+  expect(plain.plan.plan.mode).toBe("single");
+  for (const ros of [plain.review.roster, plain.resolved.roles, plain.merge.roles, plain.sweeper.roles]) expect(ros).toHaveLength(2);
+});
