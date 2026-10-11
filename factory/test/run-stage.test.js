@@ -6657,19 +6657,25 @@ test("test_257_no_environmental_note_when_verdicts_match_heads_or_levels_differ_
   await suppressed("level mismatch",
     await review257({ implement: { head_sha: HEAD_257, gates: { status: "GREEN", level: "full" } }, reviewGates: red }),
     await review257({ implement: { head_sha: HEAD_257, gates: { status: "GREEN", level: "fast" } }, reviewGates: red }), redToday);
-  // 3. a self-mirror round is NOT a sha mismatch: the implement stage commits the mirror BEFORE its gates run, so the implement
-  //    gate measured head_sha (= mirror_sha), the same head review checks out — #253's b4aac9b was such a round. The line stands.
+  // 3. a self-mirror round is NOT a sha mismatch (review cf1/spec1 on PR #264 — they supersede dw5's "self-mirror" example; dw5's
+  //    rule "the implement gate's sha differs from the reviewed head" stands): the implement stage commits the mirror BEFORE its
+  //    gates run (runStage: d.mirror("commit") → d.gates), so the implement gate measured head_sha (= mirror_sha), the same head
+  //    review checks out — #253's b4aac9b was such a round. builder_head_sha differing from head_sha therefore carries the line.
   const mirrorRound = await review257({ implement: { head_sha: HEAD_257, builder_head_sha: "b".repeat(40), mirror_sha: HEAD_257, gates: { status: "GREEN", level: "fast" } }, reviewGates: red });
   expect(mirrorRound.lines.filter((l) => l === ENV_LINE_257)).toHaveLength(1);
   expect(mirrorRound.lines.filter((l) => l !== ENV_LINE_257)).toEqual(redToday.lines);
-  //    The real mismatch: the review gate measured a different head than the implement gate (sibling: the same head, which
-  //    carries the line) — suppressed, and byte-identical to today's run of that review gate.
-  const otherHead = gates257("RED", "fast", "d".repeat(40));
-  const otherRun = await review257({ implement: { head_sha: HEAD_257, builder_head_sha: "b".repeat(40), mirror_sha: HEAD_257, gates: { status: "GREEN", level: "fast" } }, reviewGates: otherHead });
-  const otherToday = await today(otherHead);
+  //    The real sha mismatch: the review gates file's head_sha is `git rev-parse HEAD` taken when the gate runs (gates.js), so it
+  //    differs from the implement gate's head when HEAD moved in the review checkout between makeCheckoutHead and the gate. That
+  //    run is suppressed. Its sibling is the same mirror round whose gate stayed on HEAD_257 (it carries the line); the two differ
+  //    only in the review gate's head_sha, so the exit code and transitions match the sibling, and the whole run — including the
+  //    factory/gates status, which is posted on the gate's own head_sha — is byte-identical to today's run of that review gate.
+  const movedHead = gates257("RED", "fast", "d".repeat(40));
+  const movedRun = await review257({ implement: { head_sha: HEAD_257, builder_head_sha: "b".repeat(40), mirror_sha: HEAD_257, gates: { status: "GREEN", level: "fast" } }, reviewGates: movedHead });
   expect(mirrorRound.lines).toContain(ENV_LINE_257);
-  expect(otherRun.lines).not.toContain(ENV_LINE_257);
-  expect(otherRun).toEqual(otherToday);
+  expect(movedRun.lines).not.toContain(ENV_LINE_257);
+  expect(movedRun.code).toBe(mirrorRound.code);
+  expect(movedRun.transitions).toEqual(mirrorRound.transitions);
+  expect(movedRun).toEqual(await today(movedHead));
   // 4a. an old implement handoff with no gates field, through the real makeCheckoutHead (sibling: the same handoff with gates)
   await suppressed("old handoff without gates",
     await review257({ implement: { head_sha: HEAD_257, builder_head_sha: HEAD_257 }, reviewGates: red }),
