@@ -752,6 +752,9 @@ import { parseHandoffs } from "../lib/handoff.js";
 import * as runStage233 from "../bin/run-stage.js";
 import { loadCharter, loadHarness } from "../lib/config.js";
 import { verifyReviewQuorum } from "../lib/review-quorum.js";
+import { resolveTier as resolveTier233 } from "../lib/context.js";
+import { resolveReviewRoster as resolveReviewRoster233 } from "../lib/review-roster.js";
+import { loadRoles as loadRoles233 } from "../lib/config.js";
 
 const root233 = () => {
   const r = mkdtempSync(join(tmpdir(), "ctx-233-"));
@@ -836,11 +839,20 @@ test("test_233_merge_quorum_roster_follows_the_raised_tier", async () => {
   })();
   const fourApprovals = { verdicts: LB_ROSTER.map((role) => ({ role, verdict: "approve", must_fix: [] })) };
   const twoApprovals = { verdicts: ["correctness", "qa"].map((role) => ({ role, verdict: "approve", must_fix: [] })) };
+  // 정족수 해석기 자체(`resolveReviewRoster` + `resolveTier`, main에도 있는 lib 함수) — merge dep이 감싸는 그 호출이다.
+  // 이것을 **먼저** 단언해, 올림이 없을 때의 RED가 "export 없음"이 아니라 "2인 로스터"로 나오게 한다(prove-test의 증거).
+  const quorumRoster = async (r, comments, diff) => resolveReviewRoster233({
+    charter: loadCharter(r), roles: () => loadRoles233(r), comments,
+    effectiveTier: async (tier) => resolveTier233({ run: diffRun(diff), cwd: r, base: "b", harness: loadHarness(r), tier }),
+  });
   const raised = [verifiedTriage233(45, ["factory/bin/run-stage.js"])];
   for (const diff of ["M\tdocs/a.md\n", "M\tfactory/lib/context.js\n"]) {
     const r = root233();
+    const lib = await quorumRoster(r, raised, diff);
+    expect([lib.ok, lib.tier, lib.roles]).toEqual([true, "load-bearing", LB_ROSTER]);
     const rev = await buildContext({ root: r, gh: gh233(45, raised), issue: 45, stage: "review", run: diffRun(diff), base: "b" });
     const ros = await mergeRoster(r, raised, diff);
+    expect(ros).toEqual(lib);                                             // 러너의 merge dep은 그 해석기를 그대로 낸다
     expect(ros.ok).toBe(true);
     expect(ros.tier).toBe("load-bearing");
     expect(ros.roles).toEqual(LB_ROSTER);
