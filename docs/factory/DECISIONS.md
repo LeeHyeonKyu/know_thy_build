@@ -4510,3 +4510,37 @@ merge `timeout-minutes: 90`도 템플릿에 처음 반영한다(테스트 표의
 doctor-ci의 토큰 검사는 `continue-on-error`라 잡을 죽이지 않지만 **WARN으로 남는다**(후속: App 토큰이면 그 검사를 "해당 없음"으로).
 `gh pr edit`류의 GraphQL `viewer` 조회가 App 토큰에서 어떻게 되는지는 #217(REST PATCH)이 비켜 간다. own-calendar는 다음 릴리스로
 업그레이드하고 같은 두 시크릿을 넣는다. `bot-hk`가 복구되면 숨겨진 PR·코멘트가 다시 보이고, 그 계정은 PAT 폴백으로만 남는다.
+
+## ADR-039 PR 번호는 외부 상태다 — 쓰기 전에 확인하고, 확실히 없으면 review·merge는 planned로 되돌린다 — 2026-10-11 (#227)
+
+**사건**: 2026-10-10 #207 — ADR-038의 플래그로 공장이 연 PR #220이 모두에게 숨겨졌다. 재큐된 implement는 handoff의 `pr: 220`을 그대로
+믿었고, 빌더는 그 PR에 push했다고 보고했고, review는 `gh pr view 220`에서 죽어 needs-human이 됐다 — 사람이 할 수 있는 일이 없었고
+이슈를 재착륙(#226)으로 대체해야 했다.
+
+**결정**: PR 번호는 쓰기 전에 `gh.prView`로 확인한다. 판정 규칙은 `lib/context.js`의 `classifyHandoffPr` 하나이고, 세 호출자가 같이 쓴다.
+- **gone**: gh가 `Could not resolve to a PullRequest`라고 말하거나, head 브랜치가 `claude/fq-<n>`이 아니거나, CLOSED.
+  **merged**: MERGED. **unknown**: 그 밖의 gh 실패(5xx·rate limit·인증·타임아웃)와 알아볼 수 없는 응답. **ok**: 그 브랜치에서 OPEN.
+1. implement 컨텍스트(`buildContext`, 기대 브랜치는 run-stage의 `stageBranch`): gone이면 `loaded.pr`·`head_sha`·`disputed`와
+   `handoffs.implement.pr`(같은 번호면 `handoffs.review.pr`도)를 비우고, 런 기록에 `pr: #<n> not visible/not this branch — the builder
+   opens a new PR (<이유>)`를 남긴다. merged면 빌더를 띄우지 않고 needs-human. unknown이면 번호를 그대로 둔다.
+   — `test_227_implement_drops_an_invisible_pr_number_and_the_builder_opens_a_new_one`, `test_227_implement_drops_a_pr_on_another_branch_or_closed`
+2. 빌더 세션 뒤, handoff를 쓰는 어떤 경로보다도 먼저: 빌더가 돌려준 PR이 gone이거나 merged(OPEN이 아니다)면 awaiting-review로 가지 않고,
+   그 번호를 담은 handoff도 쓰지 않고 needs-human. 이 검사가 #207을 닫는다 — `loaded.pr`은 open-or-push를 정하지 않는다(빌더가 세션에서
+   정한다). unknown이면 예전처럼 넘긴다. — `test_227_implement_refuses_a_handoff_whose_pr_is_invisible_or_off_branch`
+3. review·merge의 체크아웃(`makeCheckoutHead`): gone이면 `factory:planned`로 되돌리고 세션을 띄우지 않는다. 그래프에 엣지 둘을 더한다:
+   `awaiting-review → planned`, `approved → planned`. merged와 그 밖의 체크아웃 실패(head가 움직였다, unknown)는 예전처럼 needs-human이다.
+   — `test_227_review_with_an_invisible_pr_returns_to_planned`(labels.test.js의 같은 이름이 두 엣지를 고정한다)
+4. 되돌리기는 재큐 창(`commentsSinceRequeue`)마다 한 번이다. 전이 사유가 `pr-not-visible:`로 시작하고(`prNotVisibleReason`), 다음 런은
+   창 안의 그 전이를 센다(`prNotVisibleReturns`). 두 번째는 PR 번호와 "not visible"을 담아 needs-human으로 간다.
+   — `test_227_a_second_invisible_pr_in_one_cycle_goes_to_needs_human`
+5. unknown과 MERGED는 번호를 버리지도, 다시 빌드하지도 않는다. — `test_227_a_transient_gh_failure_or_merged_pr_never_triggers_a_rebuild`
+
+**rework가 아니라 planned인 이유**: rework는 리뷰 판정이다. `must_fix`를 review handoff에서 되먹이고(`loadedFor`) K를 쓴다. 인프라 고장이
+K 한 라운드를 쓰고 낡은 must_fix를 다시 틀게 하면 안 된다. 새 엣지를 밟는 것은 run-stage의 not-visible 경로 하나뿐이다.
+
+**이슈 (c)와 다른 점**: 이슈는 MERGED도 비우라고 했다. 하지만 코드가 이미 들어간 PR 위에서 다시 빌드하면 안 된다. 이슈 자신의 근거
+("코드만 있고 PR만 없는 상태는 빌드 재시작이 답이다")를 따라 MERGED는 사람에게 넘긴다.
+
+**남는 것**: 숨겨졌지만 같은 브랜치에서 아직 OPEN인 PR(#207의 정확한 모양)에서 `gh pr create`가 거부되는지는 아무도 재 보지 않았다.
+거부되면 2번이 그 사실을 기록하고, 4번의 상한이 사람에게 넘긴다 — 복구를 약속하지는 않는다. 분류는 gh의 문구(`Could not resolve to a
+PullRequest`)에 기대고 있다. gh가 문구를 바꾸면 gone이 unknown으로 떨어진다(예전 동작이 된다).
