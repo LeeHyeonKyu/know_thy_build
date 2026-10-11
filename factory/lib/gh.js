@@ -103,18 +103,23 @@ export function bounded(start, { ms, what, signal = null }) {
  *
  * 두 배우 모드에서 이 잡의 `GH_TOKEN`은 머지 배우이지만 `factory/review` 상태를 올린 것은 **에이전트
  * 배우**다 — 그래서 둘 다 받는다. 봇 로그인은 워크플로가 `FACTORY_BOT_LOGIN`으로 넘긴다(이름은
- * 비밀이 아니라 env로 옮겨도 사본이 늘지 않는다). 잡 토큰의 로그인조차 해석되지 않으면 `ok:false` —
+ * 비밀이 아니라 env로 옮겨도 사본이 늘지 않는다). 잡 토큰의 로그인이 해석되지 않으면 `ok:false`다 — 봇 로그인이 있고 실패가
+ * 설치 토큰의 403(ADR-038 §2)일 때만 예외다. `ok:false`면
  * 호출자는 fail closed 한다(누가 올렸는지 모르는 상태는 통과가 아니다).
  *
  * KTB-46에 `bin/sweep.js`가 두 번째 호출자로 붙으면서 `bin/run-stage.js`의 클로저에서 여기로 옮겼다 —
  * `gh api user` 해석이 두 벌이 되면 그 둘이 갈라지는 날 한쪽만 위조 상태를 통과시킨다.
  *
  * ── T5 리뷰 MF-1: **이 함수가 어디서 도는지가 답을 바꾼다.** ──────────────────────────────────
- * 출처는 세 갈래이고, 각각 다른 자리에서만 참이다:
- *   ① `FACTORY_BOT_LOGIN` (워크플로가 넘긴다) — 어디서나 참.
- *   ② `gh api user` — **Actions 안에서만** 참(거기서 뷰어는 잡 토큰의 주인 = 봇).
+ * 출처는 네 갈래이고, 각각 다른 자리에서만 참이다:
+ *   ① `FACTORY_BOT_LOGIN` (워크플로가 넘긴다) — 어디서나 참. App 모드(ADR-038 §2)에서 잡 토큰의 이름은 이것으로만 온다:
+ *      워크플로가 토큰 민팅 직후 `<app-slug>[bot]`을 넘긴다.
+ *   ② `gh api user` — **Actions 안에서만** 참(거기서 뷰어는 잡 토큰의 주인이다 — PAT이면 그 계정). GitHub App 설치 토큰은
+ *      `GET /user`를 부를 수 없어 **403**이다(ADR-038 §2) — ①이 있으면 그 403은 후보 하나가 없을 뿐이다. ①이 없거나 실패가 403이
+ *      아니면(일시 장애) 예전 그대로 `ok:false`다.
  *   ③ 하트비트 코멘트의 작성자 — 어디서나 참(하트비트는 러너만 쓴다). `comments`를 넘기면 쓴다.
- * 셋 다 비면 `ok:false`다: 빈 목록은 "봇이 없다"로 읽혀 위조된 결정을 통과시킨다.
+ *   ④ 코멘트 작성자의 GitHub 계정 종류가 `Bot` — 어디서나 참. `comments`를 넘기면 쓴다.
+ * 모두 비면 `ok:false`다: 빈 목록은 "봇이 없다"로 읽혀 위조된 결정을 통과시킨다.
  *
  * ── 1.4.0 핫픽스: **`env`는 주입이지 주변 환경이 아니다** ────────────────────────────────────
  * `env = process.env`가 기본값이었고, 그래서 이 함수의 답은 호출자가 아무것도 고르지 않아도
@@ -145,16 +150,28 @@ export async function resolveFactoryLogins({ gh, env, comments = null, repo = gh
   if (bot) logins.push(bot);
 
   /**
-   * ① 뷰어는 **Actions 안에서만** 팩토리 계정이다. 거기서 `gh api user`가 돌려주는 것은 잡 토큰의
-   * 주인, 곧 봇이다. 노트북에서는 같은 호출이 **소유자**를 돌려준다 — 그런데 이 목록의 용도는
+   * ② 뷰어는 **Actions 안에서만** 팩토리 계정이다. 거기서 `gh api user`가 돌려주는 것은 잡 토큰의
+   * 주인이다 — PAT이면 그 계정(두 배우 모드의 merge 잡에서는 머지 배우), GitHub App 설치 토큰이면 **403**이다
+   * (ADR-038 §2: 설치 토큰은 `GET /user`를 부를 수 없다). 노트북에서는 같은 호출이 **소유자**를 돌려준다 — 그런데 이 목록의 용도는
    * "이 코멘트를 에이전트가 썼는가"이므로, 소유자를 팩토리 계정으로 세면 소유자가 직접 적은
    * `human-decision:v1`이 "봇이 쓴 결정"으로 기각된다(T5 리뷰 MF-1이 재현: 데모 #39의 `[ktb]`
    * 발견 둘이 통째로 사라졌다). 사람을 봇으로 오인하는 것은 fail-closed가 아니라 그냥 틀린 것이다.
+   *
+   * #260 — App 모드에서 워크플로는 민팅 직후 `<app-slug>[bot]`을 ①로 넘기고 뷰어는 403이다: 예전에는 그 403이 이미 손에 든 ①을
+   * 가리고 `ok:false`를 돌려줘, 이 함수의 모든 호출자가 Actions의 App 런마다 "공장 로그인을 모른다"로 떨어졌다. 이제 뷰어의 실패는
+   * **①이 있고 그 실패가 HTTP 403(설치 토큰은 `GET /user`를 부를 수 없다)일 때만** 치명적이지 않다 — 그 후보가 없을 뿐이고 종류도
+   * 모른다(`identity`는 ①만으로 `personal: null`). 그 밖의 실패(502·401·네트워크)는 ①이 있어도 예전 그대로 fail closed다: 두 배우
+   * 모드(ADR-021)에서 머지 배우의 로그인은 뷰어에서만 오고, 일시 장애로 그 배우를 목록에서 조용히 빼면 그 배우가 쓴 코멘트를 분류할
+   * 수 없다(run-stage.test.js test_195_two_actor_forged_marker_through_the_bot_login_is_overwritten이 502를 fail closed로 핀한다).
+   * 뷰어 조회 자체도 건너뛰지 않는다 — 같은 이유다. ①이 없으면 403이어도 fail closed다
+   * (test_260_app_mode_viewer_403_resolves_from_factory_bot_login · test_260_two_actor_mode_keeps_viewer_login_when_viewer_succeeds).
    */
+  let viewerRead = false, viewer;
   if (env.GITHUB_ACTIONS === "true") {
-    let viewer;
-    try { viewer = await gh.viewerLogin(...viewerOpts); }
-    catch (e) { return { ok: false, reason: `gh api user failed — ${e?.message || e}` }; }
+    try { viewer = await gh.viewerLogin(...viewerOpts); viewerRead = true; }
+    catch (e) { if (!bot || !isInstallTokenViewer403(e)) return { ok: false, reason: `gh api user failed — ${e?.message || e}` }; }
+  }
+  if (viewerRead) {
     logins.push(viewer);
     /**
      * Actions 안에서는 뷰어가 곧 팩토리 계정이므로 그 계정의 **종류**가 답이다 — `gh api user --jq .type`
@@ -166,7 +183,7 @@ export async function resolveFactoryLogins({ gh, env, comments = null, repo = gh
   }
 
   /**
-   * ② 하트비트 코멘트의 **작성자**는 구성상 러너다. 하트비트는 러너만 쓰는 산출물이고
+   * ③ 하트비트 코멘트의 **작성자**는 구성상 러너다. 하트비트는 러너만 쓰는 산출물이고
    * (`[protected].runner_only` + 훅이 그 경로를 에이전트에게서 닫는다), 그 코멘트가 존재한다는 것
    * 자체가 "이 로그인이 이 저장소에서 팩토리로 돈다"는 증거다. 그래서 노트북에서도 — `gh api user`가
    * 소유자를 주는 바로 그 자리에서도 — 봇 이름을 알 수 있다. env도 Actions도 필요 없다.
@@ -188,7 +205,7 @@ export async function resolveFactoryLogins({ gh, env, comments = null, repo = gh
   }
 
   /**
-   * ③ GitHub이 기록한 **작성자 사실**: `user.type === "Bot"`. 로그인 이름과 달리 이 값은 코멘트
+   * ④ GitHub이 기록한 **작성자 사실**: `user.type === "Bot"`. 로그인 이름과 달리 이 값은 코멘트
    * 본문이 아니라 GitHub이 계정에 붙인 종류라 에이전트가 고를 수 없다. 봇이 적은 결정은 사람의
    * 결정이 아니므로 봇은 전부 팩토리 계정으로 센다 — 이름을 몰라도 그 문은 닫힌다.
    */
@@ -224,12 +241,20 @@ export async function resolveFactoryLogins({ gh, env, comments = null, repo = gh
    * 옳지만 "팩토리가 **지금** 사람 계정"이라는 배너로는 틀렸다(bot-hk 전환 뒤에도 배너가 남았다). `current`는 러너가 아는 것만
    * 본다 — `FACTORY_BOT_LOGIN`, 없으면 Actions 안의 뷰어. 둘 다 없으면 `null`(모른다). 규칙은 같다: 소유자 로그인이면 personal.
    */
-  const viewerNow = env.GITHUB_ACTIONS === "true" ? (candidates[0]?.login ?? null) : null;   // Actions 안에서는 뷰어가 첫 후보다
+  const viewerNow = viewerRead ? (viewer ?? null) : null;   // Actions 안에서 읽힌 뷰어만(#260: 403이면 없다 — 하트비트 후보로 대신하지 않는다)
   const nowLogin = bot || viewerNow || null;
   const current = nowLogin
     ? { login: nowLogin, personal: owner ? String(nowLogin).toLowerCase() === owner : null, source: bot ? "FACTORY_BOT_LOGIN" : "viewer" }
     : null;
   return { ok: true, logins: out, identity: identityOf(candidates, out, { owner }), current };
+}
+
+/**
+ * #260 — `gh api user`의 실패가 **설치 토큰의 403**인가(ADR-038 §2). `gh`는 API 오류를 `gh: <message> (HTTP <status>)`로
+ * stderr에 내고, `makeGh`의 `gh()`는 그 stderr를 에러 메시지에 싣는다. 상태 코드만 본다 — 메시지 문구는 GitHub이 바꿀 수 있다.
+ */
+function isInstallTokenViewer403(e) {
+  return /\bHTTP 403\b/.test(String(e?.message ?? e ?? ""));
 }
 
 /**
@@ -268,8 +293,8 @@ function identityOf(candidates, logins, { owner = null } = {}) {
  * #231 — `gh issue view --json author`의 작성자를 **`resolveFactoryLogins`가 쓰는 REST 로그인 모양**으로. 출처는 gh CLI 소스
  * `api/queries_issue.go`의 `Author.MarshalJSON`(v2.102.0): GraphQL `author{login,...on User{id,name}}`에서 id가 비면(= User가 아닌
  * `Bot`) `{is_bot:true, login:"app/" + login}`을, 아니면 `{is_bot:false, login, id, name}`을 낸다. GraphQL의 Bot login은 `<slug>`
- * 이고 REST `user.login`(그리고 App 설치 토큰의 `gh api user`)은 `<slug>[bot]`이다 — 둘이 다르면 App이 연 이슈가 전부 사람의
- * 이슈로 읽힌다. 로그인이 없으면 `null`(지어내지 않는다).
+ * 이고 REST `user.login`(그리고 워크플로가 넘기는 `FACTORY_BOT_LOGIN` = `<app-slug>[bot]`, ADR-038 §2 — App 설치 토큰의
+ * `gh api user`는 403이다)은 `<slug>[bot]`이다 — 둘이 다르면 App이 연 이슈가 전부 사람의 이슈로 읽힌다. 로그인이 없으면 `null`(지어내지 않는다).
  */
 function issueAuthorLogin(a) {
   const login = typeof a?.login === "string" ? a.login.trim() : "";
@@ -712,7 +737,8 @@ export function makeGh({ run, repo, sleep = realSleep }) {
     },
     /**
      * ADR-021 doctor — **지금 이 토큰이 누구인가**. 값은 절대 찍지 않고 로그인 이름만 돌려준다.
-     * `gh api user`는 PAT이 붙은 계정을 그대로 말한다(GitHub App 설치 토큰이면 `<app>[bot]`).
+     * `gh api user`는 PAT이 붙은 계정을 그대로 말한다. GitHub App 설치 토큰이면 `GET /user`가 **403**이라 던진다(ADR-038 §2) —
+     * 그 자리의 봇 로그인은 워크플로가 넘기는 `FACTORY_BOT_LOGIN`이다(`resolveFactoryLogins` ①).
      */
     async viewerLogin({ signal = null } = {}) {
       // #195 — `signal` (optional) kills the gh child when the caller's bound fires; absent → exactly the old call.

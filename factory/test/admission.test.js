@@ -451,6 +451,22 @@ test("test_231_self_generated_needs_marker_and_factory_author", async () => {
   // 순수 심사도 같다: 작성자 미상 + 마커는 거부
   expect(queueAdmission({ issue: { number: 300, body: markers.flaky, labels: ["backlog"] }, charter: charter(), ...base }).ok).toBe(false);
   expect(queueAdmission({ issue: { number: 301, body: markers.flaky, labels: ["backlog"], author: "bot-hk" }, charter: charter(), ...base }).ok).toBe(true);
+  // #260 — App 모드 env 그대로(GITHUB_ACTIONS=true, FACTORY_BOT_LOGIN=ktb-factory[bot], `gh api user` 403): 로그인 목록을 손으로 주지
+  // 않고 진짜 해석기(`appModeAdmission260`, 아래)로 얻는다. 해석기의 ① 경로가 ②의 403에 가려지면 여기서 실패한다.
+  for (const body of Object.values(markers)) {
+    const appIssues = {
+      9: { number: 9, body: person.body, labels: ["backlog"], author: humanAuthor("LeeHyeonKyu") },
+      101: { number: 101, body, labels: ["backlog"], author: appAuthor("ktb-factory") },
+      102: { number: 102, body, labels: ["backlog"], author: humanAuthor("LeeHyeonKyu") },
+    };
+    const admitApp = appModeAdmission260(appIssues);
+    // 마커 + 공장 작성자(`ktb-factory[bot]`) → 들어간다
+    expect(await admitApp({ issue: 101 })).toEqual({ ok: true, reasons: [], self_generated: true });
+    // 같은 마커를 사람이 붙여 넣었다 → 들어가지 않고, 이유는 "로그인을 알아내지 못했다"가 아니라 "공장 로그인이 아니다"다
+    const pasted = await admitApp({ issue: 102 });
+    expect(pasted.ok).toBe(false);
+    expect(pasted.reasons.join(" ")).toMatch(/factory marker but its author `LeeHyeonKyu` is not a factory login/);
+  }
 });
 
 test("test_231_factory_flaky_issue_under_pat_author_still_admitted", async () => {
@@ -561,4 +577,42 @@ test("test_231_factory_flaky_issue_under_pat_author_still_admitted", async () =>
   // 소유자가 쓴 부모라도 마커를 달았으면 여전히 공장의 세대다(마커 갈래는 소유자 규칙과 무관하다)
   const markedParent = makeQueueAdmission({ gh: ghOver({ 7: issues[7], 60: { number: 60, body: "Detected while implementing #7. evidence: {}", labels: ["backlog"], author: humanAuthor("LeeHyeonKyu") }, 61: flakyFrom(61, 60, humanAuthor("LeeHyeonKyu")) }), charter: charter(), factoryLogins: SHARED });
   expect((await markedParent({ issue: 61 })).reasons.join(" ")).toMatch(/generation 2 > 1/);
+});
+
+// ── #260 cf1 — App 모드(ADR-038 §2)에서 큐 문을 **프로덕션 배선 그대로** 돌린다: `factoryLogins`는 진짜 `resolveFactoryLogins`이고
+// (sweep.js·transition.js처럼 `() => resolveFactoryLogins({ gh, env })`), gh는 진짜 `makeGh()`다. 가짜는 `gh` 실행 경계뿐이고,
+// 설치 토큰의 `gh api user`는 403으로 실패한다. env는 명시 주입이다(process.env를 읽지 않는다).
+import { resolveFactoryLogins as resolveFactoryLogins260 } from "../lib/gh.js";
+const APP_ENV260 = Object.freeze({ GITHUB_ACTIONS: "true", FACTORY_BOT_LOGIN: "ktb-factory[bot]" });
+/** ghOver와 같은 배선 + `gh api user` → 403(설치 토큰). 반환한 admit은 프로덕션 진입점과 같은 모양으로 resolver를 감싼다. */
+function appModeAdmission260(issues, { lists = {}, charter: ch = charter(), env = APP_ENV260 } = {}) {
+  const run = makeFakeRun231([
+    { match: (c, a) => c === "gh" && a[0] === "api" && a[1] === "user", result: { code: 1, stdout: "", stderr: "gh: Resource not accessible by integration (HTTP 403)" } },
+    { match: (c, a) => c === "gh" && a[0] === "issue" && a[1] === "view", result: (c, a) => (issues[a[2]] ? { code: 0, stdout: ghIssueJson(issues[a[2]]), stderr: "" } : { code: 1, stdout: "", stderr: "Could not resolve to an issue" }) },
+    { match: (c, a) => c === "gh" && a[0] === "issue" && a[1] === "list", result: (c, a) => ({ code: 0, stdout: JSON.stringify(lists[a[a.indexOf("--label") + 1]] ?? []), stderr: "" }) },
+  ]);
+  const gh = makeGh231({ run, repo: "LeeHyeonKyu/know_thy_build" });
+  return makeQueueAdmission({ gh, charter: ch, factoryLogins: () => resolveFactoryLogins260({ gh, env: { ...env } }) });
+}
+
+test("test_260_app_mode_self_generated_cap_applies_through_real_login_resolver", async () => {
+  // 각 픽스처는 **작성자 갈래로만** 자기생성이다: 마커도 공장 라벨도 없고 done_when이 있다.
+  const appIssue = (number) => ({ number, body: person.body, labels: ["backlog"], author: appAuthor("ktb-factory") });
+  const issues = {
+    90: appIssue(90),
+    91: { ...appIssue(91), author: humanAuthor("LeeHyeonKyu") },
+    // 진행 중인 자기생성 이슈 둘 — 후보는 공장 라벨 검색으로 찾지만, 자기생성 판정은 작성자 갈래로만 선다(그 라벨은 ACTIVE 상태 라벨이다)
+    51: { ...appIssue(51), labels: ["factory:in-progress"] },
+    52: { ...appIssue(52), labels: ["factory:queue"] },
+  };
+  const quiet = appModeAdmission260(issues);
+  // 상한이 비었으면: 공장 작성자 → 자기생성으로 들어가고, 사람 작성자 → 자기생성이 아니다
+  expect(await quiet({ issue: 90 })).toEqual({ ok: true, reasons: [], self_generated: true });
+  expect(await quiet({ issue: 91 })).toEqual({ ok: true, reasons: [], self_generated: false });
+  // 진행 중 자기생성(작성자 갈래)이 open_max(2)를 채우면 공장 작성자의 새 이슈는 거부되고, 이유가 상한을 이름으로 말한다
+  const lists = { "factory-improvement": [{ number: 51 }, { number: 52 }] };
+  const capped = await appModeAdmission260(issues, { lists })({ issue: 90 });
+  expect(capped).toEqual({ ok: false, reasons: ["self-generated open 2 ≥ 2 (self_generated.open_max)"], self_generated: true });
+  // 같은 상한 아래에서도 사람의 이슈는 막히지 않는다(작성자 갈래가 사람을 봇으로 세지 않는다)
+  expect(await appModeAdmission260(issues, { lists })({ issue: 91 })).toEqual({ ok: true, reasons: [], self_generated: false });
 });
