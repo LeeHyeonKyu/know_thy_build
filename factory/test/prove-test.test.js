@@ -2,6 +2,8 @@ import { test, expect } from "vitest";
 import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { vi, beforeEach, afterEach } from "vitest";
+import { rmSync, readdirSync } from "node:fs";
 import { proveTest, repeatNewTests, baseInstallCommand, inconclusiveOnBase } from "../lib/prove-test.js";
 import { runStageGates } from "../lib/gates.js";
 import { makeFakeRun } from "../lib/exec.js";
@@ -320,4 +322,116 @@ test("addedModuleNamedIn matches the added file's stem at a path/quote boundary,
   expect(addedModuleNamedIn("Cannot find module '../src/lib/other'", added)).toBeNull();
   // a stem that is merely a substring of another word does not match
   expect(addedModuleNamedIn("bloggerX is undefined", ["src/logger.js"])).toBeNull();
+});
+
+// ── #257: the fake-worktree fixtures must not read (or write) the runner's real filesystem ─────────────────────────────
+// #253 head b4aac9b: the implement `unit` gate was GREEN and the review `unit` gate RED on the same head — four fixtures above
+// died with `unexpected command: bash -lc npm ci`. They pass `tmp: "/tmp/wt"` with no `exists`, so baseInstallCommand fell back
+// to the real existsSync and a package-lock.json that happened to sit at /tmp/wt on that runner chose `npm ci`; proveTest's real
+// mkdirSync also wrote /tmp/wt/test onto the host. Those fixtures are load-bearing and stay byte-for-byte as they are (no
+// `tests_changed_allowed:` on #257), so the `exists` is injected at the module seam instead: every path under a fake-worktree
+// root ("/tmp/wt", or a root a test registers) resolves into a private directory that is created empty before each test and
+// removed after it — the fake `git worktree add` creates nothing, so the fake worktree holds nothing the test did not put there.
+const FAKE_WT_257 = vi.hoisted(() => ({ roots: new Set(["/tmp/wt"]), dir: null }));
+vi.mock("node:fs", async (importOriginal) => {
+  const fs = await importOriginal();
+  const redirect = (p) => {
+    const s = String(p);
+    for (const r of FAKE_WT_257.roots) {
+      if (s !== r && !s.startsWith(`${r}/`)) continue;
+      if (!FAKE_WT_257.dir) throw new Error(`#257: fake worktree path ${s} used outside a test`);
+      return FAKE_WT_257.dir + s.slice(r.length);
+    }
+    return p;
+  };
+  const existsSync = (p) => fs.existsSync(redirect(p));
+  const mkdirSync = (p, o) => fs.mkdirSync(redirect(p), o);
+  return { ...fs, existsSync, mkdirSync, default: { ...fs.default, existsSync, mkdirSync } };
+});
+beforeEach(() => { FAKE_WT_257.dir = mkdtempSync(join(tmpdir(), "ktb257-fake-wt-")); });
+afterEach(() => { rmSync(FAKE_WT_257.dir, { recursive: true, force: true }); FAKE_WT_257.dir = null; });
+
+test("test_257_prove_test_fixture_injects_exists_and_never_picks_npm_ci_from_the_host", async () => {
+  // A host directory that really holds a lockfile and a package.json — what the #253 review runner had at /tmp/wt.
+  const host = mkdtempSync(join(tmpdir(), "ktb257-host-"));
+  writeFileSync(join(host, "package-lock.json"), "{\"lockfileVersion\":3}\n");
+  writeFileSync(join(host, "package.json"), "{\"name\":\"host-residue\"}\n");
+  const fixture1 = () => makeFakeRun([...wt(ok), { match: (c) => c === "cp", result: ok }, { match: (c, a) => c === "bash" && a[1].includes("vitest run") && a[1].includes("test/new.test.js"), result: fail }]);
+  const npm = (run) => run.calls.filter((c) => c.cmd === "bash" && /\bnpm (ci|install)\b/.test(c.args[1]));
+  try {
+    // Control (the #253 failure, reproduced): without the seam, the planted files decide the install command and the
+    // fixture's fake run dies on it. This is what makes the planting non-vacuous — the default existsSync really sees them.
+    await expect(proveTest({ run: fixture1(), cwd: "/repo", harness, base: "abc", addedTests: ["test/new.test.js"], tmp: host }))
+      .rejects.toThrow("unexpected command: bash -lc npm ci");
+    rmSync(join(host, "test"), { recursive: true, force: true });  // the control's real mkdirSync left host residue; the seam must not
+
+    FAKE_WT_257.roots.add(host);
+    // The existing fake-worktree fixtures, unchanged except that their tmp is the host directory holding the planted files.
+    const r1 = fixture1();
+    expect(await proveTest({ run: r1, cwd: "/repo", harness, base: "abc", addedTests: ["test/new.test.js"], tmp: host })).toMatchObject({ ok: true });
+    const r2 = makeFakeRun([...wt(ok), { match: (c) => c === "cp", result: ok }, { match: (c) => c === "bash", result: ok }]);
+    const passed = await proveTest({ run: r2, cwd: "/repo", harness, base: "abc", addedTests: ["test/new.test.js"], tmp: host });
+    expect(passed.ok).toBe(false); expect(passed.detail).toMatch(/passed on base/);
+    const importErr = { code: 1, stdout: "", stderr: "Error: Cannot find module '../src/version.js' imported from test/version.test.js" };
+    const r3 = makeFakeRun([...wt(ok), { match: (c) => c === "cp", result: ok }, { match: (c, a) => c === "bash" && a[1].includes("vitest run"), result: importErr }]);
+    const proven = await proveTest({ run: r3, cwd: "/repo", harness, base: "abc", addedTests: ["test/version.test.js"], addedFiles: ["src/version.js", "test/version.test.js"], tmp: host });
+    expect(proven.ok).toBe(true); expect(proven.detail).toContain("src/version.js");
+    const r4 = makeFakeRun([...wt(ok), { match: (c) => c === "cp", result: ok }, { match: (c, a) => c === "bash" && a[1].includes("vitest run"), result: importErr }]);
+    const unclear = await proveTest({ run: r4, cwd: "/repo", harness, base: "abc", addedTests: ["test/version.test.js"], addedFiles: ["test/version.test.js"], tmp: host });
+    expect(unclear).toMatchObject({ ok: false, misconfigured: true });
+    expect(unclear.detail).toContain("no dependency install command was found");
+    const { CHARACTERIZATION } = await import("../lib/prove-test.js");
+    const r5 = makeFakeRun([...wt(ok), { match: (c) => c === "cp", result: ok }, { match: (c, a) => c === "bash" && a[1].includes("vitest run"), result: ok }]);
+    expect(await proveTest({ run: r5, cwd: "/repo", harness, base: "abc", addedTests: ["test/rrule.test.js"], mode: CHARACTERIZATION, tmp: host })).toMatchObject({ ok: true, mode: CHARACTERIZATION });
+    for (const run of [r1, r2, r3, r4, r5]) {
+      expect(npm(run)).toEqual([]);                                       // no install command was ever chosen from the host files
+      expect(run.calls.filter((c) => c.cmd === "bash").every((c) => c.opts.cwd === host)).toBe(true);
+    }
+    // The fixtures' real mkdirSync landed in the private fake worktree, not on the host.
+    expect(readdirSync(host).sort()).toEqual(["package-lock.json", "package.json"]);
+    expect(readdirSync(FAKE_WT_257.dir)).toEqual(["test"]);
+    // A test that asks for installation still gets it — the seam empties the fake worktree, it does not disable the probe.
+    const r6 = makeFakeRun([...wt(ok), { match: (c) => c === "cp", result: ok }, { match: (c, a) => c === "bash" && a[1] === "npm ci", result: ok }, { match: (c, a) => c === "bash" && a[1].includes("vitest run"), result: fail }]);
+    writeFileSync(join(FAKE_WT_257.dir, "package-lock.json"), "{}");
+    expect(await proveTest({ run: r6, cwd: "/repo", harness, base: "abc", addedTests: ["test/new.test.js"], tmp: host })).toMatchObject({ ok: true });
+    expect(npm(r6).map((c) => c.args[1])).toEqual(["npm ci"]);
+  } finally {
+    FAKE_WT_257.roots.delete(host);
+    rmSync(host, { recursive: true, force: true });
+  }
+});
+
+test("test_257_base_install_command_never_probes_with_an_empty_worktree_path", async () => {
+  const spy = () => { const f = vi.fn(() => true); return f; };
+  // Empty or missing tmp: join("", "package-lock.json") resolves against the process cwd — the repository root, which has a
+  // lockfile. No install command, and `exists` is never asked.
+  for (const tmp of ["", undefined, null]) {
+    const exists = spy();
+    expect(baseInstallCommand({}, tmp, exists), String(tmp)).toBe(null);
+    expect(exists, String(tmp)).toHaveBeenCalledTimes(0);
+    // A harness [runtime].setup still wins when tmp is empty (it never needed a probe).
+    const e2 = spy();
+    expect(baseInstallCommand({ runtime: { setup: "pnpm i --frozen-lockfile" } }, tmp, e2)).toBe("pnpm i --frozen-lockfile");
+    expect(e2).toHaveBeenCalledTimes(0);
+  }
+  // Non-empty tmp: the order is unchanged — setup, then lockfile, then package.json, then none — and the probe stays inside tmp.
+  const seen = [];
+  const has = (...names) => (p) => { seen.push(p); return names.some((n) => p.endsWith(`/${n}`)); };
+  expect(baseInstallCommand({ runtime: { setup: "make deps" } }, "/wt", has("package-lock.json"))).toBe("make deps");
+  expect(seen).toEqual([]);
+  expect(baseInstallCommand({}, "/wt", has("package-lock.json", "package.json"))).toBe("npm ci");
+  expect(baseInstallCommand({}, "/wt", has("package.json"))).toBe("npm install --no-audit");
+  expect(baseInstallCommand({}, "/wt", has())).toBe(null);
+  expect(seen).toEqual(["/wt/package-lock.json", "/wt/package-lock.json", "/wt/package.json", "/wt/package-lock.json", "/wt/package.json"]);
+  // `git worktree add` fails: both provers return their existing detail before any probe or install.
+  const { proveFixedTests } = await import("../lib/prove-test.js");
+  const addFails = () => makeFakeRun([{ match: (c, a) => c === "git" && a[0] === "worktree" && a[1] === "add", result: { code: 128, stdout: "", stderr: "fatal: '/tmp/wt' already exists" } }]);
+  const e3 = spy(), run3 = addFails();
+  expect(await proveTest({ run: run3, cwd: "/repo", harness, base: "abc", addedTests: ["test/new.test.js"], tmp: "/tmp/wt", exists: e3 })).toEqual({ ok: false, detail: "worktree add failed: fatal: '/tmp/wt' already exists" });
+  expect(e3).toHaveBeenCalledTimes(0);
+  expect(run3.calls.map((c) => c.cmd)).toEqual(["git"]);
+  const e4 = spy(), run4 = addFails();
+  expect(await proveFixedTests({ run: run4, cwd: "/repo", harness, base: "abc", tests: ["test/a.test.js"], tmp: "/tmp/wt", exists: e4 })).toEqual({ ok: false, detail: "worktree add failed: fatal: '/tmp/wt' already exists" });
+  expect(e4).toHaveBeenCalledTimes(0);
+  expect(run4.calls.map((c) => c.cmd)).toEqual(["git"]);
 });
