@@ -1188,6 +1188,20 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runAt
         absRound = r.abs;
       }
     }
+    /**
+     * #212 dw6 (skeptic, round 3) — a review that does NOT approve decides on today's round: the conflict rework it is deciding on is exempt
+     * from K only once a review passed it. The round above is the approving one (merge's `round > K` check reads it); here, once the decision
+     * is known and is not approved, the round is recounted with that undecided conflict rework counted — so `nextState`'s K check, the
+     * handoff's `round` and the evidence line all use today's number. Windows without a conflict round count the same both ways.
+     */
+    const decideRoundAsToday = async () => {
+      if (stage !== "review" || !v.data || v.data.decision === "approved" || typeof v.data.round !== "number") return;
+      const prior = await d.reviewRounds?.({ rejecting: true });
+      if (typeof prior !== "number") return;
+      const r = reviewRoundOf(prior, kState);
+      v.data.round = r.round;
+      absRound = r.abs;
+    };
     // review handoff(review.v1)는 verdicts만 싣는다 — 집계 결정은 여기서 만들어 handoff·전이에 함께 실는다.
     // A-SF1 — `v.qaShortfall`이 있으면 산출물이 스스로 적은 decision이 있더라도 집계를 다시 돈다:
     // 그러지 않으면 이 부족이 **조용히 사라진다**(= 누락으로 정해지는 등급, 이 수정이 없애려는 것).
@@ -1244,6 +1258,7 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runAt
       }
       v.data.decision = agg.decision;
       v.data.must_fix = agg.must_fix;
+      await decideRoundAsToday();
       /**
        * ── 리뷰 효율 Task 5 (Structure D) — 회귀 핀 ──────────────────────────────────────────────
        * `→ rework`일 때만, 이 라운드의 must_fix를 carried **pin**으로 접는다(`deriveReworkPins`).
@@ -1286,6 +1301,7 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runAt
       record([reviewEvidenceLine({ runId, runnerId, headSha: checkoutSha ?? v.data.head_sha, round: v.data.round, decision: agg.decision, verdicts: v.data.verdicts, qaManifest: qaDigest, qaClaims })]);
       await postReviewStatus({ state: agg.decision === "approved" ? "success" : "failure", decision: agg.decision });
     }
+    await decideRoundAsToday();                                       // the same recount when the handoff carried its own decision
     /**
      * ADR-020 KTB-29 / 관측 O21 — **같은 역할이 라운드 사이에 판정을 뒤집는 빈도**는 §12.4의 지표다
      * (데모 #18에서 approve → reject 두 건이 관측됐다: 코드가 그대로인데 판정이 흔들리면 K 예산이
@@ -2481,14 +2497,15 @@ export async function conflictScopeInput({ run, cwd, approvedHead, mergedBase = 
   const outside = new Set();
   const head = await git(["rev-parse", "HEAD"]);
   if (head.code !== 0) return fail(`git rev-parse HEAD failed — ${why(head)}`);
-  let cur = head.stdout.trim(), merge = null;
+  let cur = head.stdout.trim(), merge = null, sawMirror = false;
   for (let n = 0; n < CONFLICT_WALK_MAX && !merge; n++) {
     const r = await git(["rev-list", "--parents", "-n", "1", cur]);
     if (r.code !== 0) return fail(`git rev-list failed — ${why(r)}`);
     const [sha, ...parents] = r.stdout.trim().split(/\s+/);
     if (parents.length >= 2) { merge = { sha, parents }; break; }
     if (sha === approvedHead || !parents.length) return fail(`no base merge between the approved head ${approvedHead.slice(0, 7)} and HEAD`);
-    if (sha !== mirrorSha) {
+    if (sha === mirrorSha) sawMirror = true;
+    else {
       const ch = await git(["diff-tree", "--no-commit-id", "--name-only", "--no-renames", "-r", "-z", sha]);
       if (ch.code !== 0) return fail(`git diff-tree failed — ${why(ch)}`);
       names(ch).forEach((p) => outside.add(p));
@@ -2528,7 +2545,22 @@ export async function conflictScopeInput({ run, cwd, approvedHead, mergedBase = 
     return { text: String(s.stdout ?? ""), oid };
   };
   for (const p of names(diff)) {
-    if (!allowed.includes(p)) { outside.add(p); continue; }
+    if (!allowed.includes(p)) {
+      // cf1/qa1 — the implement overlay (`makeFactoryOverlay`: `git checkout <stage sha> -- .factory …`) runs while the base merge is
+      // pending, so M carries base's copy of every mirror-family path the BRANCH changed, not only the conflicted ones. Those paths are
+      // generated: the runner's mirror commit (`mirrorSha`, which the walk above must have passed) regenerates them from factory/**. A
+      // mirror-family path is inside the merge exactly when that commit holds git's own merge result for it, by object id — the round's
+      // net change on it is nil. Without this run's mirror commit, or with any other copy there, it stays outside.
+      if (sawMirror && inMirrorFamily(p)) {
+        const a = await side(auto, p);
+        if (a.error) return fail(a.error);
+        const r = await side(mirrorSha, p);
+        if (r.error) return fail(r.error);
+        if (a.absent ? r.absent : !r.absent && r.oid === a.oid) continue;
+      }
+      outside.add(p);
+      continue;
+    }
     const a = await side(auto, p);
     if (a.error) return fail(a.error);
     const m = await side(merge.sha, p);
@@ -2902,7 +2934,8 @@ export async function syncRunRecords({ run, root, message, guard, vouch = null, 
 export function makeKRestartDeps({ gh, issue }) {
   const window = async () => commentsSinceRequeue(await gh.comments(issue));
   return {
-    reviewRounds: async () => countTransitionsTo(await window(), "factory:rework"),
+    // dw6 — `{ rejecting: true }`: the round as a REJECTING review decides it — the conflict round it is deciding on counts, as today.
+    reviewRounds: async ({ rejecting = false } = {}) => countTransitionsTo(await window(), "factory:rework", { rejecting }),
     kRestartState: async () => kRestartState(await window()),
     postKRestartBrief: async ({ pr, head, findings }) => {
       const s = kRestartState(await window());
