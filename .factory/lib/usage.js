@@ -56,6 +56,14 @@ export const CONFLICT_ROUND_PREFIX = "conflict-round:";
 const CONFLICT_ROUND_RE = /^conflict-round: stage=(\S+) runner=(\S+) run_id=(\S+) approved=([0-9a-f]{40}) head=([0-9a-f]{40}) —/;
 export const conflictRoundLine = ({ stage, runnerId, runId = null, approvedHead, head }) =>
   `${CONFLICT_ROUND_PREFIX} stage=${stage} runner=${runnerId} run_id=${runId ?? "n/a"} approved=${approvedHead} head=${head} — a resolution-only base-merge round: its cost is kept out of the lifetime cap (ADR-040)`;
+/**
+ * #212 skeptic (ADR-040 4, "둘 다 아니면 하나도 아니다") — **태그 취소 줄.** 러너는 태그가 든 섹션을 먼저 쓰고(실패하면 마커도 안 나간다),
+ * 그다음 K 마커를 게시한다. 마커 게시가 실패하면 러너가 다음 섹션 첫 줄에 이 줄을 써서 같은 러너의 태그를 거둔다 — 그 런의 비용은 다시 센다.
+ * 위조는 세는 쪽으로만 간다: 이 줄은 면제를 **없앨** 뿐 만들지 못한다(그래서 쓰는 쪽에서 인용하지 않는다).
+ */
+const CONFLICT_REVOKED_RE = /^conflict-round-revoked: stage=(\S+) runner=(\S+) run_id=(\S+) —/;
+export const conflictRoundRevokedLine = ({ stage, runnerId, runId = null, error }) =>
+  `conflict-round-revoked: stage=${stage} runner=${runnerId} run_id=${runId ?? "n/a"} — the conflict-round marker was not posted (${String(error?.message ?? error ?? "").replace(/\s+/g, " ").trim().slice(0, 200)}); the tag above is withdrawn and this run's cost counts toward the cap`;
 /** 진짜 태그가 아닌 텍스트에서, 어느 줄이든 줄머리의 `conflict-round:`를 인용 표시한다(①). 줄머리 규칙은 `quoteEngineCrashLines`와 같다. */
 export const quoteConflictRoundLines = (text) => String(text).replace(/(^|[\n\r\u2028\u2029])(\s*)conflict-round:/g, "$1$2(quoted) conflict-round:");
 
@@ -177,6 +185,13 @@ export function parseRunRecord(text, { reviewReworks = false } = {}) {
       // runStage writes). A forged line can only ADD a rejection (that counts a conflict round again) — it never hides one.
       ...(reviewReworks && m[1] === "review" && bodyLines.some((l) => /^transition: factory:rework(?:\s|$)/.test(l)) ? { review_rework: true } : {}),
     });
+    // #212 skeptic — a runner revocation (first body line, naming this section's implement stage and runner) withdraws that runner's
+    // earlier conflict-round tag: tag without marker is not a conflict round. Records without the line are untouched.
+    const first = body.split("\n").filter((l) => l.trim() !== "")[0] ?? "";
+    const rv = CONFLICT_REVOKED_RE.exec(first);
+    if (rv && m[1] === "implement" && rv[1] === m[1] && rv[2] === m[3].trim()) {
+      for (const e of out) if (e.conflict_round && String(e.runner).trim() === rv[2]) delete e.conflict_round;
+    }
   }
   return out;
 }

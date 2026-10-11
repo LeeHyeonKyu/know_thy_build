@@ -371,15 +371,20 @@ export function conflictRoundsUsed(comments, issue) {
 const HANDED_OFF = /^<!-- factory-transition:v1 from=\S+ to=factory:awaiting-review by=\S+/;
 export const conflictRoundComment = ({ issue, approvedHead, head }) =>
   `<!-- factory-conflict-round:v1 issue=${issue} approved=${approvedHead} head=${head} -->\n**conflict-only round** — 승인된 head \`${String(approvedHead).slice(0, 7)}\` 위의 base 병합이 충돌 해소만 담았습니다(\`${String(head).slice(0, 7)}\`). 이 base 충돌 rework는 리뷰 라운드(K)로 세지 않고, 이 런의 비용은 평생 상한에서 빠집니다 — 이슈당 ${CONFLICT_ROUND_EXCLUDED_RUNS}회까지(ADR-040).`;
-/** 창의 마지막 rework가 approved에서 왔는데 머지 스테이지의 충돌 문구와 맞지 않으면, 그 사실을 말하는 기록 한 줄(아니면 null). */
+/**
+ * 창의 마지막 rework가 **머지 스테이지가 낼 수 있는 자리**(from=approved 또는 blocked의 머지 재시도, `by=` 러너 — `MERGE_CONFLICT_REWORK`와 같은
+ * 집합)에서 왔는데 충돌 문구와 맞지 않으면, 그 사실을 말하는 기록 한 줄(아니면 null). 사람의 rework(`by=human`)는 머지 스테이지가 아니다 —
+ * 여기서 말하면 "문구가 바뀌었다"는 신호가 거짓 경보로 묽어진다(skeptic f3).
+ */
+const MERGE_STAGE_REWORK = /^<!-- factory-transition:v1 from=(factory:approved|factory:blocked) to=factory:rework by=(?:script|factory:run-[^\s>]+) -->/;
 export function conflictExemptionNote(comments) {
   const list = Array.isArray(comments) ? comments : [];
   const idx = countedTransitionIndices(list, "factory:rework", { exemptConflictRounds: false });
   if (!idx.length) return null;
   const body = String(list[idx[idx.length - 1]]?.body ?? "");
-  const m = TRANSITION_TO.exec(body);
-  if (!m || m[1] !== "factory:approved" || mergeConflictRework(body)) return null;
-  return "conflict-only: not applied — the last rework came from factory:approved but its reason does not match the merge stage's conflict reason (\"merge conflict — rebase onto <base>\", merge-stage.js); this round is not a conflict-only round and that rework counts as a review round (K)";
+  const m = MERGE_STAGE_REWORK.exec(body);
+  if (!m || mergeConflictRework(body)) return null;
+  return `conflict-only: not applied — the last rework came from ${m[1]} but its reason does not match the merge stage's conflict reason ("merge conflict — rebase onto <base>", merge-stage.js); this round is not a conflict-only round and that rework counts as a review round (K)`;
 }
 
 /**

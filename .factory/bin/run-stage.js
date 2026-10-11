@@ -39,7 +39,7 @@ import { validate } from "../lib/schemas.js";
 import { blockedOrigin, commentsSinceRequeue, commentsSinceCycleStart, countTransitionsTo, TRANSITION_TO, countSelfGateRetries, countAllSelfGateRetries, SELF_GATE_RETRY_BACKSTOP, selfGateRetryComment, kRestartState, kRestartComment, kRestartBriefOf, sameKRestartBrief, wherePaths, conflictRoundComment } from "../lib/retro/issue-comments.js";
 import { transition } from "../lib/transition.js";
 import { appendRunRecord, appendRunRecordLine, runRecordPath, reviewEvidenceLine, parseReviewEvidence, runIdOfRunner } from "../lib/run-record.js";
-import { engineCrashLine, quoteEngineCrashLines, conflictRoundLine, quoteConflictRoundLines } from "../lib/usage.js";
+import { engineCrashLine, quoteEngineCrashLines, conflictRoundLine, conflictRoundRevokedLine, quoteConflictRoundLines } from "../lib/usage.js";
 import { parseHeartbeatComment } from "../lib/board.js";
 import { syncRecords, hydrateRecord, readRecordsDetailed } from "../lib/records-branch.js";
 import { budgetCheck, budgetLine } from "../lib/budget.js";
@@ -288,12 +288,17 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runAt
   let crashLine = null;
   /** #212 — 이 런의 진짜 conflict-round 줄(GREEN conflict-scope 뒤 마지막 섹션의 첫 줄, 아래에서만 정한다). 그 밖의 줄머리 `conflict-round:`는 인용된다. */
   let conflictTag = null;
+  const safeLines = (lines) => lines.map((l) => (crashLine !== null && l === crashLine ? l
+    : conflictTag !== null && l === conflictTag ? l
+    : quoteConflictRoundLines(quoteEngineCrashLines(l))));
   const record = (lines) => {
     if (usage && lines.includes(usage)) usageRecorded = true;
-    const safe = lines.map((l) => (crashLine !== null && l === crashLine ? l
-      : conflictTag !== null && l === conflictTag ? l
-      : quoteConflictRoundLines(quoteEngineCrashLines(l))));
-    try { d.runRecord(safe); } catch (e) { console.error(`factory: run record write failed — ${e.message}`); }
+    try { d.runRecord(safeLines(lines)); } catch (e) { console.error(`factory: run record write failed — ${e.message}`); }
+  };
+  /** #212 skeptic — the one write whose failure must be KNOWN (the conflict-round tag's section): throws instead of swallowing. */
+  const recordOrThrow = (lines) => {
+    d.runRecord(safeLines(lines));
+    if (usage && lines.includes(usage)) usageRecorded = true;
   };
   /**
    * 체크 상태 게시는 부수 효과다 — 실패해도 런을 죽이지 않는다. sha가 없으면 애초에 게시할 대상이
@@ -383,7 +388,8 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runAt
   let hb = null;                                                      // 락을 잡은 뒤의 모든 실패는 finally를 거쳐야 한다
   let overlaidPaths = [];                                             // KTB-37 — 이 런의 overlay가 덮은 정확한 경로들(쓰기 금지 스테이지의 클린 체크 허용 목록)
   let stageBranchName = null;                                         // Task 8b — implement가 스테이지 스스로 체크아웃한 브랜치(세션 뒤 같은 자리인지 다시 묻는다)
-  let runnerResolved = [];                                            // #212 — base merge paths the runner resolved before the session (`partial`)
+  let runnerResolved = [];                                            // #212 — base merge paths the runner union-merged before the session (`partial.union`)
+  let runnerMirror = [];                                              // #212 — conflicted mirror paths the runner gave base's copy (`partial.mirror`)
   let pendingMerge = null;                                            // #143 — 빌더에게 넘긴 base 병합 `{ sha, paths }`(세션 뒤 끝났는지 다시 묻는다)
   let driftRefusal = null;                                            // KTB-43 — 핸드오프 뒤의 커밋이 드리프트 경로 밖이었다(핸드오프를 쓴 뒤에 거부한다)
   let checkoutSha = null;                                             // review/merge가 실제로 게이트를 돌린 PR head — review는 아래에서 런 레코드 마지막 줄에, merge는 runMergeStage로 그대로 넘겨 기록한다
@@ -620,8 +626,9 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runAt
       stageBranchName = cb.branch;
       // #143 (S3b) — 소스 충돌이 남은 병합은 abort되지 않고 빌더에게 넘어왔다: 커밋도 push도 없었으므로 base_merged 줄을 쓰지 않는다.
       if (cb.conflicts?.length) pendingMerge = { sha: cb.merged, paths: [...cb.conflicts] };
-      // #212 — the conflicted paths the runner resolved itself in the same merge (mirror → base's copy, union), for the conflict-scope check.
-      if (cb.conflicts?.length) runnerResolved = [...(cb.partial?.mirror || []), ...(cb.partial?.union || [])];
+      // #212 — the conflicted paths the runner resolved itself in the same merge, for the conflict-scope check: union-merged paths are
+      // held to the conflict-region rule; mirror paths must hold base's copy (that is what the runner wrote — skeptic: not the region rule).
+      if (cb.conflicts?.length) { runnerResolved = [...(cb.partial?.union || [])]; runnerMirror = [...(cb.partial?.mirror || [])]; }
       record([branchLine(cb), ...(pendingMerge ? [baseMergeConflictLine(cb)] : cb.merged ? [baseMergedLine(cb)] : [])]);
     }
     // KTB-37 — 체크아웃이 끝난 트리 위에 **팩토리 소유 설정만** 스테이지 자신의 커밋에서 덮는다
@@ -1369,7 +1376,7 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runAt
     let sg = null;
     if (stage === "implement" && !harnessIssue && d.selfGate) {
       // #212 — a conflict-only round's scope is measured on the real merge: this run's mirror commit and the base the runner merged.
-      try { sg = await d.selfGate(conflictOnly ? { gates, mirrorSha, mergedBase: pendingMerge?.sha ?? null, runnerResolved } : { gates }); }
+      try { sg = await d.selfGate(conflictOnly ? { gates, mirrorSha, mergedBase: pendingMerge?.sha ?? null, runnerResolved, runnerMirror } : { gates }); }
       catch (e) {
         // diff/merge-base를 못 읽으면 "무엇을 검사할지"가 없다 — GREEN도 RED도 아닌 판정 불가이므로
         // gates BLOCKED과 같은 등급이다. 못 돌린 self-gate 위에서 리뷰로 조용히 넘기지 않는다.
@@ -1533,23 +1540,42 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runAt
      * does the run's last section open with the runner's `conflict-round:` line (`lib/budget.js` reads it). A refused transition, or a
      * round sent to a person, is not a finished conflict round (skeptic f3): no marker, no tag — counted as today. No marker → no tag.
      */
+    /**
+     * Both or neither (ADR-040 4; skeptic): the TAG goes first, through a write whose failure is known (`recordOrThrow`) — if the record
+     * cannot take it, no marker is posted and the section is written again without the tag. Only then the K marker; if that post fails,
+     * the runner's revocation line (`conflictRoundRevokedLine`) withdraws the tag in the next section, so the cost counts again. What is
+     * left is a process death (or a second failed write) between the tag and the marker: tag without marker — K counts as today, and the
+     * cost exemption stays inside CONFLICT_ROUND_EXCLUDED_RUNS.
+     */
     const conflictNote = [];
+    let marker = null;
     if (conflictOnly && conflictGreen) {
       const head = typeof v.data?.head_sha === "string" && SHA40.test(v.data.head_sha) ? v.data.head_sha : null;
       if (!t.ok || t.to !== "factory:awaiting-review") {
         conflictNote.push(`conflict-scope: GREEN, but the round did not hand off to factory:awaiting-review (${t.ok ? `went to ${t.to}` : `transition refused: ${t.reason ?? "unknown"}`}) — no conflict-round marker or tag; this round counts as a normal round (cost and K)`);
+      } else if (!head || !d.comment) {
+        const why = !head ? `the handoff head ${v.data?.head_sha ?? "none"} is not a 40-hex sha` : "no issue comment dep is wired";
+        conflictNote.push(`conflict-scope: GREEN, but the conflict-round marker was not written — ${why}; this round counts as a normal round (cost and K)`);
       } else {
-        try {
-          if (!head) throw new Error(`the handoff head ${v.data?.head_sha ?? "none"} is not a 40-hex sha`);
-          if (!d.comment) throw new Error("no issue comment dep is wired");
-          await d.comment(issue, conflictRoundComment({ issue, approvedHead: conflictOnly.approved_head, head }));
-          conflictTag = conflictRoundLine({ stage, runnerId, runId, approvedHead: conflictOnly.approved_head, head });
-        } catch (e) {
-          conflictNote.push(`conflict-scope: GREEN, but the conflict-round marker was not written — ${e?.message || e}; this round counts as a normal round (cost and K)`);
-        }
+        conflictTag = conflictRoundLine({ stage, runnerId, runId, approvedHead: conflictOnly.approved_head, head });
+        marker = conflictRoundComment({ issue, approvedHead: conflictOnly.approved_head, head });
       }
     }
-    record([...(conflictTag ? [conflictTag] : []), "verify: ok", ...(t.ok ? [`transition: ${t.to}`] : refusal(t)), ...(checkoutSha ? [`checkout: ${checkoutSha.slice(0, 7)}`] : []), ...conflictNote, ...gatesNote, usage]);
+    const finalLines = (note) => ["verify: ok", ...(t.ok ? [`transition: ${t.to}`] : refusal(t)), ...(checkoutSha ? [`checkout: ${checkoutSha.slice(0, 7)}`] : []), ...note, ...gatesNote, usage];
+    if (!conflictTag) {
+      record(finalLines(conflictNote));
+      return t.ok ? 0 : 2;
+    }
+    try { recordOrThrow([conflictTag, ...finalLines(conflictNote)]); }
+    catch (e) {
+      conflictTag = null;
+      record(finalLines([...conflictNote, `conflict-scope: GREEN, but the conflict-round tag could not be written to the run record — ${e?.message || e}; no marker either — this round counts as a normal round (cost and K)`]));
+      return t.ok ? 0 : 2;
+    }
+    try { await d.comment(issue, marker); }
+    catch (e) {
+      record([conflictRoundRevokedLine({ stage, runnerId, runId, error: e }), `conflict-scope: GREEN, but the conflict-round marker was not written — ${e?.message || e}; this round counts as a normal round (cost and K)`]);
+    }
     return t.ok ? 0 : 2;
   } catch (e) {
     console.error(`factory: stage ${stage} aborted — ${e?.message || e}`);
@@ -2426,15 +2452,20 @@ export async function scopeInput({ run, cwd, base, issue, plan, maxBytes = SCOPE
  *   · in M itself: every path where M differs from git's own merge of M^1 and M^2 (`git merge-tree --write-tree`, the same ort merge the
  *     runner ran) that is not a conflicted path; and a conflicted path whose resolution changed lines outside its conflict regions (the
  *     lines git placed around the `<<<<<<<`…`>>>>>>>` blocks must survive in order; a conflicted path one side's TREE does not list —
- *     modify/delete, established by `ls-tree`, never inferred from a failed read — may be resolved whole).
+ *     modify/delete, established by `ls-tree`, never inferred from a failed read — may be resolved whole); a conflicted mirror path the
+ *     runner resolved (`runnerMirror`) is inside the merge when M holds base's copy of it, which is what the runner wrote.
  * A failed or unexpected git read — any of them — is returned as `error` (the gate fails closed: not GREEN).
  */
 const CONFLICT_WALK_MAX = 50;                                          // SHA40 is the module's one 40-hex rule (declared below, hoisted for calls)
-export async function conflictScopeInput({ run, cwd, approvedHead, mergedBase = null, paths = [], runnerResolved = [], mirrorSha = null }) {
+export async function conflictScopeInput({ run, cwd, approvedHead, mergedBase = null, paths = [], runnerResolved = [], runnerMirror = [], mirrorSha = null }) {
   const conflicted = (Array.isArray(paths) ? paths : []).filter((p) => typeof p === "string" && p);
-  // the merge's other conflicted paths, resolved by the RUNNER before the session (#143 `partial`: union-merged append-only files, mirror
-  // paths given base's copy) — part of the merge, held to the same conflict-region rule as the builder's paths
-  const allowed = [...conflicted, ...(Array.isArray(runnerResolved) ? runnerResolved : []).filter((p) => typeof p === "string" && p)];
+  const strings = (xs) => (Array.isArray(xs) ? xs : []).filter((p) => typeof p === "string" && p);
+  // the merge's other conflicted paths, resolved by the RUNNER before the session (#143 `partial`): union-merged append-only files are
+  // held to the same conflict-region rule as the builder's paths; mirror paths (`runnerMirror`) were given base's WHOLE copy
+  // (`resolveMirrorConflicts`: `git checkout <base> -- <paths>`), which drops the branch's other hunks in that file by design (the mirror
+  // commit after the merge regenerates it) — so a mirror path is inside the merge exactly when M holds base's copy, byte for byte.
+  const mirrorTaken = strings(runnerMirror);
+  const allowed = [...conflicted, ...strings(runnerResolved), ...mirrorTaken];
   const fail = (error) => ({ paths: conflicted, outside: [], error });
   const git = async (args) => {
     try { return await run("git", args, { cwd }); }
@@ -2497,6 +2528,11 @@ export async function conflictScopeInput({ run, cwd, approvedHead, mergedBase = 
     if (a.error) return fail(a.error);
     const m = await side(merge.sha, p);
     if (m.error) return fail(m.error);
+    if (mirrorTaken.includes(p)) {
+      const t = await side(theirs, p);
+      if (t.error) return fail(t.error);
+      if (Boolean(t.absent) === Boolean(m.absent) && (t.absent || t.text === m.text)) continue;   // the runner's resolution: base's copy
+    }
     if (a.absent || m.absent) continue;                               // a side deleted it (modify/delete): the whole file is the conflict
     if (!resolvedInsideConflicts(a.text, m.text)) outside.add(p);
   }
@@ -2537,7 +2573,7 @@ export function resolvedInsideConflicts(auto, resolved) {
  * the context built for this run (`ctxCache`). `run-stage` computes every list here (git), `runSelfGate` only judges them.
  */
 export function makeSelfGateDep({ root, harness, run, mergeBase, getCtx, scopeMaxBytes = SCOPE_DIFF_MAX_BYTES }) {
-  return async ({ gates, mirrorSha = null, mergedBase = null, runnerResolved = [] }) => {
+  return async ({ gates, mirrorSha = null, mergedBase = null, runnerResolved = [], runnerMirror = [] }) => {
     // 2026-10-03 실측(#157·#170·#178 implement 세 런이 게이트 GREEN 직후 "Cannot read properties of undefined (reading 'test')"로 죽음):
     // #174가 이 dep을 팩토리 함수로 빼면서 `harness`를 **값으로** 받았는데, main()의 `harness`는 deps 객체가 만들어진 뒤 `charterReady`에서야
     // 로드된다 — 그래서 여기 들어온 값은 undefined였다. 예전 인라인 dep은 호출 시점에 변수를 읽었다. 게터를 받아 호출 시점에 푼다
@@ -2562,7 +2598,7 @@ export function makeSelfGateDep({ root, harness, run, mergeBase, getCtx, scopeMa
     // #212 — a conflict-only round (context.js `conflictOnlyOf`): measured HERE on the real merge commit; self-gate only judges it.
     const loaded = ctx?.loaded ?? null;
     const conflictScope = loaded?.conflict_only === true
-      ? await conflictScopeInput({ run, cwd: root, approvedHead: loaded.approved_head, mergedBase, paths: loaded.merge_conflicts, runnerResolved, mirrorSha })
+      ? await conflictScopeInput({ run, cwd: root, approvedHead: loaded.approved_head, mergedBase, paths: loaded.merge_conflicts, runnerResolved, runnerMirror, mirrorSha })
       : null;
     return runSelfGate({
       root, harness: h, gates, run,
