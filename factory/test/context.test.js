@@ -753,11 +753,19 @@ test("test_174_builder_context_takes_the_brief_bound_to_the_restart_transition",
  * proof that the PR is gone or wrong. The gh fixtures are the REAL `gh` texts (captured with gh 2.x against this repository) fed through
  * the real `makeGh().prView`, so the classifier is pinned to what gh actually prints, not to a guessed string.
  */
-import { makeGh as makeGh227 } from "../lib/gh.js";
+import { makeGh as makeGh227, bounded as bounded227 } from "../lib/gh.js";
 import { classifyHandoffPr as classifyHandoffPr227 } from "../lib/context.js";
 const GH_NOT_FOUND_227 = "GraphQL: Could not resolve to a PullRequest with the number of 220. (repository.pullRequest)";
 const GH_401_227 = "HTTP 401: Bad credentials (https://api.github.com/graphql)\nTry authenticating with:  gh auth login -h github.com";
 const GH_502_227 = "HTTP 502: Bad Gateway (https://api.github.com/graphql)";
+/**
+ * Rate limits — the closest neighbour to a false "gone": gh prints a GraphQL error as `GraphQL: <message>`, the very prefix the not-found
+ * text has. REST-level refusals print as `HTTP 403: <message> (<url>)`. The messages are GitHub's documented primary and secondary
+ * rate-limit texts.
+ */
+const GH_RATE_GRAPHQL_227 = "GraphQL: API rate limit exceeded for user ID 1.";
+const GH_RATE_403_227 = "HTTP 403: API rate limit exceeded for user ID 1. (https://api.github.com/graphql)";
+const GH_RATE_SECONDARY_227 = "HTTP 403: You have exceeded a secondary rate limit. Please wait a few minutes before you try again. (https://api.github.com/graphql)";
 /** The production `prView` (lib/gh.js) over a fake `gh` process: `{ stderr }` exits 1 with that text, otherwise prints the PR view JSON. */
 const prView227 = (o) => makeGh227({
   repo: "LeeHyeonKyu/know_thy_build",
@@ -861,7 +869,7 @@ test("test_227_implement_drops_a_pr_on_another_branch_or_closed", async () => {
 
 test("test_227_a_transient_gh_failure_or_merged_pr_never_triggers_a_rebuild — implement context", async () => {
   // A gh failure that is not a not-found (auth, 5xx) proves nothing about the PR: the number stays, no 'not visible' line.
-  for (const stderr of [GH_401_227, GH_502_227]) {
+  for (const stderr of [GH_401_227, GH_502_227, GH_RATE_GRAPHQL_227, GH_RATE_403_227, GH_RATE_SECONDARY_227]) {
     const t = await round227({ stderr });
     expect(t.seen.loaded.pr, stderr).toBe(220);
     expect(t.seen.loaded.head_sha, stderr).toBe(H227);
@@ -871,7 +879,10 @@ test("test_227_a_transient_gh_failure_or_merged_pr_never_triggers_a_rebuild — 
   }
   // A thrown timeout (no gh stderr at all) is the same: unknown, keep the number.
   const { r, gh } = implement227({ state: "OPEN", headRefName: "claude/fq-227" });
-  gh.prView = async () => { throw new Error("gh pr view timed out after 30000ms"); };
+  // The error is produced by the production `bounded()` (lib/gh.js) — the only place a gh timeout text comes from — not typed by hand.
+  const timeout = await bounded227(() => new Promise(() => {}), { ms: 1, what: "gh pr view" }).then(() => null, (e) => e);
+  expect(timeout.message).toBe("gh pr view timed out after 1 ms");
+  gh.prView = async () => { throw timeout; };
   const ctx = await buildContext({ root: r, gh, issue: 227, stage: "implement", prBranch: "claude/fq-227" });
   expect(ctx.loaded.pr).toBe(220);
   // A view the rule does not recognise (no head branch reported) proves nothing either.

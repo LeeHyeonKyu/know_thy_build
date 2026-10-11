@@ -36,7 +36,7 @@ import { matchesAny } from "../lib/glob.js";
 import { aggregateReview } from "../lib/aggregate.js";
 import { renderHandoff, latestHandoff, parseHandoffs } from "../lib/handoff.js";
 import { validate } from "../lib/schemas.js";
-import { blockedOrigin, commentsSinceRequeue, commentsSinceCycleStart, countTransitionsTo, TRANSITION_TO, countSelfGateRetries, countAllSelfGateRetries, SELF_GATE_RETRY_BACKSTOP, selfGateRetryComment, kRestartState, kRestartComment, kRestartBriefOf, sameKRestartBrief, wherePaths } from "../lib/retro/issue-comments.js";
+import { blockedOrigin, commentsSinceRequeue, commentsSinceCycleStart, countTransitionsTo, countedTransitionIndices, TRANSITION_TO, countSelfGateRetries, countAllSelfGateRetries, SELF_GATE_RETRY_BACKSTOP, selfGateRetryComment, kRestartState, kRestartComment, kRestartBriefOf, sameKRestartBrief, wherePaths } from "../lib/retro/issue-comments.js";
 import { transition } from "../lib/transition.js";
 import { appendRunRecord, appendRunRecordLine, runRecordPath, reviewEvidenceLine, parseReviewEvidence, runIdOfRunner } from "../lib/run-record.js";
 import { engineCrashLine, quoteEngineCrashLines } from "../lib/usage.js";
@@ -2824,13 +2824,15 @@ export function makeTransitionDep({ gh, issue, stage, rehearsal, admission, buil
 export const PR_NOT_VISIBLE_TAG = "pr-not-visible:";
 export const prNotVisibleReason = ({ pr, why }) => `${PR_NOT_VISIBLE_TAG} PR #${pr} ${why} — back to factory:planned so implement opens a new PR (once per requeue window, #227)`;
 export const prNotVisibleAgainReason = ({ pr, why }) => `PR #${pr} ${why} — not visible again after this requeue window's one return to factory:planned; a human must decide (#227)`;
-/** How many not-visible returns to planned happened since the last requeue (only a completed `→ factory:planned` transition counts). */
+/**
+ * How many not-visible returns to planned happened since the last requeue. Only a completed `→ factory:planned` transition counts: the
+ * transition comment is written before the label swap, and a swap that failed is cancelled by the `factory-transition-failed:v1` marker
+ * that follows it — the same cancellation rule K uses (`countedTransitionIndices`, one rule, not a second parser), then filtered to the
+ * transitions whose reason carries the tag.
+ */
 export function prNotVisibleReturns(comments) {
-  return commentsSinceRequeue(comments).filter((c) => {
-    const body = String(c?.body ?? "");
-    const m = TRANSITION_TO.exec(body);
-    return m && m[2] === "factory:planned" && body.includes(PR_NOT_VISIBLE_TAG);
-  }).length;
+  const win = commentsSinceRequeue(comments);
+  return countedTransitionIndices(win, "factory:planned").filter((i) => String(win[i]?.body ?? "").includes(PR_NOT_VISIBLE_TAG)).length;
 }
 
 export function makeCheckoutHead({ gh, run, root, issue }) {

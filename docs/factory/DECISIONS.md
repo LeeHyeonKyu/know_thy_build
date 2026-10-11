@@ -4531,7 +4531,8 @@ doctor-ci의 토큰 검사는 `continue-on-error`라 잡을 죽이지 않지만 
    `awaiting-review → planned`, `approved → planned`. merged와 그 밖의 체크아웃 실패(head가 움직였다, unknown)는 예전처럼 needs-human이다.
    — `test_227_review_with_an_invisible_pr_returns_to_planned`(labels.test.js의 같은 이름이 두 엣지를 고정한다)
 4. 되돌리기는 재큐 창(`commentsSinceRequeue`)마다 한 번이다. 전이 사유가 `pr-not-visible:`로 시작하고(`prNotVisibleReason`), 다음 런은
-   창 안의 그 전이를 센다(`prNotVisibleReturns`). 두 번째는 PR 번호와 "not visible"을 담아 needs-human으로 간다.
+   창 안의 그 전이를 센다(`prNotVisibleReturns`). 라벨 스왑이 실패해 `factory-transition-failed:v1`로 취소된 전이는 세지 않는다(K와 같은
+   `countedTransitionIndices` 규칙). 두 번째는 PR 번호와 "not visible"을 담아 needs-human으로 간다.
    — `test_227_a_second_invisible_pr_in_one_cycle_goes_to_needs_human`
 5. unknown과 MERGED는 번호를 버리지도, 다시 빌드하지도 않는다. — `test_227_a_transient_gh_failure_or_merged_pr_never_triggers_a_rebuild`
 
