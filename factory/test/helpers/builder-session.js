@@ -15,12 +15,13 @@ import { inMirrorFamily } from "../../lib/mirror.js";
  * (`CLAUDE_PROJECT_DIR`)까지 포함해 바이트 대조를 사람 앞에서도 꺼 버린다.
  *
  * 이 파일은 `factory/test/helpers/`에 있다(미러되는 엔진 `factory/lib`가 아니다) — 테스트만의 개념이 설치본에 실리지 않게.
- * env는 언제나 인자로 받는다: 이 판단을 고정하는 테스트 자신이 빌더 세션 안에서 돌기 때문이다.
+ * env 인자를 생략하면 ambient `process.env`를 읽는다(실제 self-mirror 테스트의 경로). 이 판단을 고정하는 테스트는
+ * env를 명시 주입한다: 그 테스트 자신이 빌더 세션 안에서 돌기 때문이다.
  */
 export const BUILDER_SESSION_NOTE = "self-mirror: skipped inside a builder session — the runner regenerates .factory/** after the handoff (mirrorStep)";
 
 /** 빌더 세션(implement 스테이지의 `claude -p`)인가. review·merge·러너·CI·사람 세션은 전부 false. */
-export const isBuilderSession = (env = {}) => env?.FACTORY_STAGE === "implement";
+export const isBuilderSession = (env = process.env) => env?.FACTORY_STAGE === "implement";
 
 /**
  * 드리프트한 경로 목록(`bad`)에 대한 판정.
@@ -31,7 +32,7 @@ export const isBuilderSession = (env = {}) => env?.FACTORY_STAGE === "implement"
  *  - 그 밖의 모든 세션 → 오늘과 같은 RED(`<paths> — <hint>`).
  * @returns {{ok:boolean, note?:string, message?:string}}
  */
-export function selfMirrorVerdict({ bad, env = {}, hint }) {
+export function selfMirrorVerdict({ bad, env = process.env, hint }) {
   if (!bad.length) return { ok: true };
   if (!isBuilderSession(env)) return { ok: false, message: `${bad.join(", ")} — ${hint}` };
   const outside = bad.filter((dest) => !inMirrorFamily(dest));

@@ -128,6 +128,34 @@ function redOf(fn) {
 }
 
 const FAMILY_SAMPLES = [".factory/lib/x.js", ".factory/bin/run-stage.js", ".factory/actions/gate/action.yml", ".claude/hooks/block-dangerous.sh"];
+const COMMAND_SAMPLES = ["implement", "plan", "review", "merge", "triage"].map((n) => `.claude/commands/factory-${n}.md`);
+
+/** 여러 dest가 전부 진짜로 드리프트한 tmp 트리(각 dest마다 자기 소스). */
+function driftedTree(dests) {
+  const root = mkdtempSync(join(tmpdir(), "ktb-253-"));
+  const pairs = dests.map((dest, i) => {
+    const src = join(root, "src", `source-${i}.txt`);
+    const destAbs = join(root, ...dest.split("/"));
+    mkdirSync(dirname(src), { recursive: true });
+    mkdirSync(dirname(destAbs), { recursive: true });
+    writeFileSync(src, `export const v${i} = 2;\n`);
+    writeFileSync(destAbs, `export const v${i} = 1;\n`);
+    return { src, dest, destAbs, owner: "factory" };
+  });
+  return { pairs, opts: { root, vars: {} }, done: () => rmSync(root, { recursive: true, force: true }) };
+}
+
+/**
+ * 이 파일에 있는 실제 `self-mirror: …` 테스트 본문들을 소스 그대로 꺼내 함수로 만든다(`hasDotFactory`·`manifest`·
+ * `assertMirrored`·`expect`를 주입). 본문을 손으로 옮겨 적지 않는다 — 그러면 본문이 바뀌어도 이 가드는 모른다.
+ */
+function realSelfMirrorBodies() {
+  const src = readFileSync(new URL(import.meta.url), "utf8");
+  return [...src.matchAll(/^test\("(self-mirror: [^"]*)", \(\) => \{\n([\s\S]*?)\n\}\);$/gm)].map(([, title, text]) => ({
+    title,
+    body: new Function("hasDotFactory", "manifest", "assertMirrored", "expect", text),
+  }));
+}
 
 test("test_253_self_mirror_passes_with_a_note_inside_a_builder_session", () => {
   expect(BUILDER_SESSION_NOTE).toBe("self-mirror: skipped inside a builder session — the runner regenerates .factory/** after the handoff (mirrorStep)");
@@ -173,6 +201,56 @@ test("test_253_self_mirror_passes_with_a_note_inside_a_builder_session", () => {
       vi.stubEnv("FACTORY_STAGE", "review");
       expect(redOf(() => assertMirrored(fx.pairs, fx.opts))).toContain(UPGRADE_HINT);
     } finally { vi.unstubAllEnvs(); fx.done(); }
+
+    // 내보낸 테스트 쪽 진입점도 env 인자 없이 부르면 ambient process.env를 따른다(그리고 되돌린 뒤에는 원래 값이다).
+    const before = process.env.FACTORY_STAGE;
+    try {
+      vi.stubEnv("FACTORY_STAGE", "implement");
+      expect(isBuilderSession()).toBe(true);
+      log.mockClear();
+      expect(selfMirrorVerdict({ bad: [".factory/lib/x.js"], hint: UPGRADE_HINT })).toEqual({ ok: true, note: BUILDER_SESSION_NOTE });
+      expect(log).toHaveBeenCalledTimes(1);
+      vi.stubEnv("FACTORY_STAGE", undefined);
+      expect(isBuilderSession()).toBe(false);
+      expect(selfMirrorVerdict({ bad: [".factory/lib/x.js"], hint: UPGRADE_HINT })).toEqual({ ok: false, message: `.factory/lib/x.js — ${UPGRADE_HINT}` });
+    } finally { vi.unstubAllEnvs(); }
+    expect(process.env.FACTORY_STAGE).toBe(before);
+
+    // 실제 self-mirror 테스트 다섯 개의 **본문 그대로**를 진짜 드리프트한 픽스처 위에서 돌린다. 본문 하나라도 env를 무시하는
+    // 대조(`{ env: {} }`, `drifted()`를 직접 expect 등)를 부르면 빌더 세션 쪽 기대가 깨진다.
+    const realBodies = realSelfMirrorBodies();
+    expect(realBodies.map((b) => b.title)).toEqual([
+      "self-mirror: .factory/lib/** is byte-identical to factory/lib/**",
+      "self-mirror: .factory/bin/** is byte-identical to factory/bin/**",
+      "self-mirror: .factory/actions/** is byte-identical to templates/factory/factory/actions/**",
+      "self-mirror: .claude/hooks/*.sh is byte-identical to factory/hooks/*.sh",
+      "self-mirror: the five .claude/commands/factory-*.md match templates/factory/claude/commands/",
+    ]);
+    const tree = driftedTree([...FAMILY_SAMPLES, ...COMMAND_SAMPLES]);
+    try {
+      expect(drifted(tree.pairs, tree.opts)).toEqual([...FAMILY_SAMPLES, ...COMMAND_SAMPLES]);
+      const runBody = ({ body }) => body(true, () => tree.pairs, (pairs, o) => assertMirrored(pairs, { ...tree.opts, ...o }), expect);
+      for (const real of realBodies) {
+        const isCommands = real.title.includes(".claude/commands/");
+        vi.stubEnv("FACTORY_STAGE", "implement");
+        log.mockClear();
+        const inside = redOf(() => runBody(real));
+        if (isCommands) {
+          expect(inside, real.title).not.toBeNull();
+          expect(inside).not.toContain(UPGRADE_HINT);
+          expect(inside).toMatch(/runner or the operator/);
+          expect(log).not.toHaveBeenCalled();
+        } else {
+          expect(inside, real.title).toBeNull();
+          expect(log).toHaveBeenCalledTimes(1);
+          expect(log).toHaveBeenCalledWith(BUILDER_SESSION_NOTE);
+        }
+        vi.stubEnv("FACTORY_STAGE", undefined);
+        const outside = redOf(() => runBody(real));
+        expect(outside, real.title).not.toBeNull();
+        expect(outside).toContain(UPGRADE_HINT);
+      }
+    } finally { vi.unstubAllEnvs(); tree.done(); }
   } finally {
     log.mockRestore();
   }
@@ -189,8 +267,12 @@ test("test_253_runner_gate_env_still_byte_compares_the_mirror", () => {
     ];
     for (const dest of FAMILY_SAMPLES) {
       const fx = driftedFixture(dest, { withContext: true });
+      const cwd = process.cwd();
       try {
-        expect(existsSync(join(fx.root, ".factory", "out", "context.json"))).toBe(true);
+        // 판정은 root를 받지 않으므로, cwd 기준으로 context.json을 찾는 대체 판정도 이 픽스처를 보게 cwd를 픽스처 루트로 옮긴다
+        // (ambient 저장소의 .gitignore된 .factory/out/context.json 유무에 기대지 않는다).
+        process.chdir(fx.root);
+        expect(existsSync(join(".factory", "out", "context.json"))).toBe(true);
         for (const env of envs) {
           expect(isBuilderSession(env)).toBe(false);
           // 각 env 아래에서 바이트 대조부터 다시 한다(assertMirrored → drifted → freshContent).
@@ -200,7 +282,7 @@ test("test_253_runner_gate_env_still_byte_compares_the_mirror", () => {
           expect(red).toContain(UPGRADE_HINT);
           expect(red).not.toContain(BUILDER_SESSION_NOTE);
         }
-      } finally { fx.done(); }
+      } finally { process.chdir(cwd); fx.done(); }
     }
     expect(log).not.toHaveBeenCalled();
   } finally {
