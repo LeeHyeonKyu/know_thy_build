@@ -2419,9 +2419,9 @@ export async function scopeInput({ run, cwd, base, issue, plan, maxBytes = SCOPE
  *   · commits between A and M^1 (the builder committed before merging) — every path they changed;
  *   · in M itself: every path where M differs from git's own merge of M^1 and M^2 (`git merge-tree --write-tree`, the same ort merge the
  *     runner ran) that is not a conflicted path; and a conflicted path whose resolution changed lines outside its conflict regions (the
- *     lines git placed around the `<<<<<<<`…`>>>>>>>` blocks must survive in order; a conflicted path without markers — modify/delete —
- *     may be resolved whole).
- * A failed or unexpected git read is returned as `error` (the gate fails closed: not GREEN).
+ *     lines git placed around the `<<<<<<<`…`>>>>>>>` blocks must survive in order; a conflicted path one side's TREE does not list —
+ *     modify/delete, established by `ls-tree`, never inferred from a failed read — may be resolved whole).
+ * A failed or unexpected git read — any of them — is returned as `error` (the gate fails closed: not GREEN).
  */
 const CONFLICT_WALK_MAX = 50;                                          // SHA40 is the module's one 40-hex rule (declared below, hoisted for calls)
 export async function conflictScopeInput({ run, cwd, approvedHead, mergedBase = null, paths = [], runnerResolved = [], mirrorSha = null }) {
@@ -2461,6 +2461,7 @@ export async function conflictScopeInput({ run, cwd, approvedHead, mergedBase = 
   if (mergedBase && theirs !== mergedBase) return fail(`the merge's second parent ${theirs.slice(0, 7)} is not the base the runner merged (${String(mergedBase).slice(0, 7)})`);
   if (ours !== approvedHead) {
     const anc = await git(["merge-base", "--is-ancestor", approvedHead, ours]);
+    if (anc.code !== 0 && anc.code !== 1) return fail(`git merge-base --is-ancestor failed — ${why(anc)}`);   // 1 = "not an ancestor"; else a failed read
     if (anc.code !== 0) return fail(`the merge's first parent ${ours.slice(0, 7)} does not descend from the approved head ${approvedHead.slice(0, 7)}`);
     const before = await git(["diff", "--name-only", "--no-renames", "-z", approvedHead, ours]);
     if (before.code !== 0) return fail(`git diff failed — ${why(before)}`);
@@ -2471,12 +2472,27 @@ export async function conflictScopeInput({ run, cwd, approvedHead, mergedBase = 
   if (!/^[0-9a-f]{40,64}$/.test(auto)) return fail(`git merge-tree failed — ${why(mt)}`);
   const diff = await git(["diff", "--name-only", "--no-renames", "-z", auto, merge.sha]);
   if (diff.code !== 0) return fail(`git diff failed — ${why(diff)}`);
+  /**
+   * One side of a conflicted path: `{ absent }` only when the tree itself says the path is not there (`ls-tree` exits 0 and lists nothing —
+   * a modify/delete conflict); any failed read is `{ error }`. A failed `git show` is NEVER read as "deleted" — that was a fail-open
+   * (skeptic f1): a transient error turned a RED resolution GREEN.
+   */
+  const side = async (tree, p) => {
+    const ls = await git(["ls-tree", "-z", tree, "--", p]);
+    if (ls.code !== 0) return { error: `git ls-tree ${tree.slice(0, 7)} ${p} failed — ${why(ls)}` };
+    if (!names(ls).length) return { absent: true };
+    const s = await git(["show", `${tree}:${p}`]);
+    if (s.code !== 0) return { error: `git show ${tree.slice(0, 7)}:${p} failed — ${why(s)}` };
+    return { text: String(s.stdout ?? "") };
+  };
   for (const p of names(diff)) {
     if (!allowed.includes(p)) { outside.add(p); continue; }
-    const a = await git(["show", `${auto}:${p}`]);
-    const m = await git(["show", `${merge.sha}:${p}`]);
-    if (a.code !== 0 || m.code !== 0) continue;                       // a side deleted it (modify/delete): the whole file is the conflict
-    if (!resolvedInsideConflicts(String(a.stdout), String(m.stdout))) outside.add(p);
+    const a = await side(auto, p);
+    if (a.error) return fail(a.error);
+    const m = await side(merge.sha, p);
+    if (m.error) return fail(m.error);
+    if (a.absent || m.absent) continue;                               // a side deleted it (modify/delete): the whole file is the conflict
+    if (!resolvedInsideConflicts(a.text, m.text)) outside.add(p);
   }
   return { paths: conflicted, outside: [...outside].sort() };
 }

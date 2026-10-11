@@ -800,3 +800,68 @@ test("test_212_conflict_scope_against_a_real_merge", async () => {
     expect(JSON.stringify(now)).not.toContain("conflict-scope");
   }
 });
+
+test("test_212_conflict_scope_fails_closed_on_every_git_read", async () => {
+  // Every git read conflictScopeInput makes is a measurement: when ANY of them fails, the verdict is "could not be measured" (RED),
+  // never GREEN. Each fixture is chosen so the failing read is actually reached (a failure on a read that never runs proves nothing).
+  const failOn = (pred) => (cmd, args, opts) => (cmd === "git" && pred(args) ? Promise.resolve({ code: 128, stdout: "", stderr: `fatal: injected ${args[0]} failure` }) : realRun212(cmd, args, opts));
+  const commitMerge = async (r) => { await r.ok("add", "-A"); await r.ok("commit", "-q", "--no-edit"); };
+  const measured = async (r, run, opts, why) => {
+    const sg = await dep212(r, conflictCtx212(r.approved), run)({ gates: GREEN212, mergedBase: r.base, ...opts });
+    expect(conflictScopeGreen212(sg), why).toBe(false);
+    expect(conflictFindings212(sg).map((f) => f.detail), why).toEqual([expect.stringMatching(/^conflict scope could not be measured — .*injected .* failure/)]);
+    expect(sg.ok, why).toBe(true);
+  };
+  // (a) the resolution-only merge (GREEN when nothing fails) + a mirror commit: rev-list, the per-path reads of C, the auto-vs-merge diff
+  const g = await conflictRepo212();
+  g.put(C212, g.resolveC().join("\n") + "\n"); await commitMerge(g);
+  const mergeSha = await g.ok("rev-parse", "HEAD");
+  const mirrorSha = await g.mirrorCommit();
+  expect(conflictScopeGreen212(await dep212(g, conflictCtx212(g.approved))({ gates: GREEN212, mirrorSha, mergedBase: g.base }))).toBe(true);
+  await measured(g, failOn((a) => a[0] === "rev-list" && a.includes("--parents")), { mirrorSha }, "rev-list");
+  await measured(g, failOn((a) => a[0] === "show" && String(a[1]).endsWith(`:${C212}`)), { mirrorSha }, "show of the conflicted path");
+  await measured(g, failOn((a) => a[0] === "ls-tree"), { mirrorSha }, "tree lookup of the conflicted path");
+  await measured(g, failOn((a) => a[0] === "diff" && a.includes("-z") && a.at(-1) === mergeSha), { mirrorSha }, "auto-merge vs merge diff");
+  // (b) a commit after the merge that is not the mirror: its diff-tree read
+  await measured(g, failOn((a) => a[0] === "diff-tree"), { mirrorSha: null }, "diff-tree of a commit after the merge");
+  // (c) a RED resolution (a new line in C outside the conflict) whose per-path read fails is still RED, not GREEN
+  const c = await conflictRepo212();
+  c.put(C212, ["// a header line outside the conflict", ...c.resolveC()].join("\n") + "\n"); await commitMerge(c);
+  await measured(c, failOn((a) => a[0] === "show" && String(a[1]).endsWith(`:${C212}`)), {}, "show on a RED path");
+  // (d) the builder committed before merging: the ancestry check and the approved-head..M^1 diff
+  const b = await conflictRepo212();
+  await b.ok("merge", "--abort");
+  b.put("factory/lib/other.js", b.read("factory/lib/other.js") + "export const before = 1;\n");
+  await b.ok("add", "-A"); await b.ok("commit", "-q", "-m", "builder: before the merge");
+  expect((await b.git("merge", "--no-edit", b.base)).code).not.toBe(0);
+  b.put(C212, b.resolveC().join("\n") + "\n"); await commitMerge(b);
+  await measured(b, failOn((a) => a[0] === "merge-base" && a.includes("--is-ancestor")), {}, "merge-base --is-ancestor");
+  await measured(b, failOn((a) => a[0] === "diff" && a.includes("-z") && a.at(-2) === b.approved), {}, "approved head..M^1 diff");
+
+  // A modify/delete conflict (one side deleted the file) is still resolvable whole: the absent side is a fact of the trees, not a failure.
+  const root = mkdtempSync212(join212(tmpdir212(), "fq212md-"));
+  const git = (...args) => realRun212("git", ["-c", "user.email=t@example.invalid", "-c", "user.name=t", "-c", "commit.gpgsign=false", ...args], { cwd: root });
+  const ok = async (...args) => { const r = await git(...args); expect(r.code, `git ${args.join(" ")}: ${r.stderr}`).toBe(0); return r.stdout.trim(); };
+  const D = "factory/lib/doomed.js";
+  mkdirSync212(join212(root, "factory/lib"), { recursive: true });
+  writeFileSync212(join212(root, D), lines212("d").join("\n") + "\n");
+  await ok("init", "-q", "-b", "main"); await ok("add", "-A"); await ok("commit", "-q", "-m", "base");
+  await ok("checkout", "-q", "-b", "claude/fq-212");
+  writeFileSync212(join212(root, D), lines212("d").join("\n") + "\nexport const branch = 1;\n");
+  await ok("add", "-A"); await ok("commit", "-q", "-m", "approved");
+  const approved = await ok("rev-parse", "HEAD");
+  await ok("checkout", "-q", "main"); await ok("rm", "-q", D); await ok("commit", "-q", "-m", "main deletes D");
+  const base = await ok("rev-parse", "HEAD");
+  await ok("checkout", "-q", "claude/fq-212");
+  expect((await git("merge", "--no-edit", base)).code).not.toBe(0);
+  await ok("rm", "-q", D); await ok("commit", "-q", "--no-edit");
+  const md = { root, ok };
+  const ctxMd = { issue: { number: 212 }, loaded: { conflict_only: true, approved_head: approved, merge_conflicts: [D] } };
+  const mdGreen = await dep212(md, ctxMd)({ gates: GREEN212, mergedBase: base });
+  expect(conflictFindings212(mdGreen)).toEqual([]);
+  expect(conflictScopeGreen212(mdGreen)).toBe(true);
+  // …but if the tree lookup itself fails there, that is a measurement failure, not "a side deleted it"
+  const mdBroken = await dep212(md, ctxMd, failOn((a) => a[0] === "ls-tree" || a[0] === "show"))({ gates: GREEN212, mergedBase: base });
+  expect(conflictScopeGreen212(mdBroken)).toBe(false);
+  expect(conflictFindings212(mdBroken).map((f) => f.detail)).toEqual([expect.stringMatching(/^conflict scope could not be measured — /)]);
+});
