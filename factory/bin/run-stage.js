@@ -38,7 +38,7 @@ import { renderHandoff, latestHandoff, parseHandoffs } from "../lib/handoff.js";
 import { validate } from "../lib/schemas.js";
 import { blockedOrigin, commentsSinceRequeue, commentsSinceCycleStart, countTransitionsTo, TRANSITION_TO, countSelfGateRetries, countAllSelfGateRetries, SELF_GATE_RETRY_BACKSTOP, selfGateRetryComment, kRestartState, kRestartComment, kRestartBriefOf, sameKRestartBrief, wherePaths } from "../lib/retro/issue-comments.js";
 import { transition } from "../lib/transition.js";
-import { appendRunRecord, appendRunRecordLine, runRecordPath, reviewEvidenceLine, parseReviewEvidence, runIdOfRunner } from "../lib/run-record.js";
+import { appendRunRecord, appendRunRecordLine, runRecordPath, reviewEvidenceLine, parseReviewEvidence, runIdOfRunner, normalizeVerdicts } from "../lib/run-record.js";
 import { engineCrashLine, quoteEngineCrashLines } from "../lib/usage.js";
 import { parseHeartbeatComment } from "../lib/board.js";
 import { syncRecords, hydrateRecord, readRecordsDetailed } from "../lib/records-branch.js";
@@ -1083,6 +1083,13 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runAt
       record(["verify: FAIL", ...v.reasons.map((r) => `- ${r}`), ...refusal(t), ...gatesNote, usage]);
       return 2;
     }
+    /**
+     * #239 — lines this stage adds to its closing record entry (no extra `record()` call: the stage's record sequence is
+     * part of its observable skeleton). (M-7/M-9) the plan verifier's notes — an unresolved sign-off objection, skeptic
+     * items dropped at the cap — are record lines, never reasons; the normalized handoff reaches writeHandoff as `v.data`.
+     * (M-2) the review stage's `review-r1:` line is added below.
+     */
+    const stageNotes = stage === "plan" && Array.isArray(v.planNotes) ? [...v.planNotes] : [];
     // 감사 M1 — 스크립트가 에이전트의 판정을 덮었다면 그 사실이 run 기록의 1차 증거다(다음 조사가
     // 이 줄로 grep한다). handoff에도 `never_automate_hit`으로 같은 내용이 실린다.
     if (stage === "triage" && v.data?.never_automate_hit?.length) {
@@ -1236,6 +1243,13 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runAt
         if (flips.length) record([`review flips: ${flips.join(", ")}`]);
       } catch (e) { record([`review flips: unreadable — ${e?.message || e}`]); }
     }
+    /**
+     * #239 (M-2, gap P-9) — R1 verdicts and the R1→R2 flip count of **this** round, on their own line. Deliberately not on
+     * the `review-evidence:` line: that line is merge provenance read by an end-anchored parser (run-record.js), and a new
+     * token there would send every approved PR to a person (plan non_goal). Named `r2_flipped` so it is never confused with
+     * the cross-round `review flips:` above. Until the review workflow carries `r1_verdicts`, the line says so explicitly.
+     */
+    if (stage === "review" && v.data) stageNotes.push(reviewR1Line(v.data.r1_verdicts, v.data.verdicts));
     /**
      * ADR-020 KTB-23 — builder가 "보호 경로를 고쳐야 끝낼 수 있다"고 말했다. 그 말은 이제 PR 본문의
      * 산문이 아니라 handoff의 필드(`harness_needed[]`)이고, 여기가 그것을 읽는 유일한 자리다.
@@ -1455,13 +1469,13 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runAt
           return 2;
         }
         const t = await d.transition({ to: "factory:rework", data: v.data, reason: dec.reason, by: `factory:run-${runId}` });
-        record(["verify: ok", `k-restart: ${posted?.reused ? "reused the brief already posted for" : "posted the brief for"} ${String(head ?? "unknown").slice(0, 7)} (${dec.findings.length} finding(s)) — self-restart 1/1`, ...(t.ok ? [`transition: ${t.to}`] : refusal(t)), ...(checkoutSha ? [`checkout: ${checkoutSha.slice(0, 7)}`] : []), ...gatesNote, usage]);
+        record(["verify: ok", ...stageNotes, `k-restart: ${posted?.reused ? "reused the brief already posted for" : "posted the brief for"} ${String(head ?? "unknown").slice(0, 7)} (${dec.findings.length} finding(s)) — self-restart 1/1`, ...(t.ok ? [`transition: ${t.to}`] : refusal(t)), ...(checkoutSha ? [`checkout: ${checkoutSha.slice(0, 7)}`] : []), ...gatesNote, usage]);
         return t.ok ? 0 : 2;
       }
       exhaustedReason = dec.reason;
     }
     const t = await d.transition({ to: toFinal, data: v.data, ...(exhausted ? { reason: exhaustedReason } : {}) });
-    record(["verify: ok", ...(t.ok ? [`transition: ${t.to}`] : refusal(t)), ...(checkoutSha ? [`checkout: ${checkoutSha.slice(0, 7)}`] : []), ...gatesNote, usage]);
+    record(["verify: ok", ...stageNotes, ...(t.ok ? [`transition: ${t.to}`] : refusal(t)), ...(checkoutSha ? [`checkout: ${checkoutSha.slice(0, 7)}`] : []), ...gatesNote, usage]);
     return t.ok ? 0 : 2;
   } catch (e) {
     console.error(`factory: stage ${stage} aborted — ${e?.message || e}`);
@@ -2119,6 +2133,20 @@ export function reviewFlips(prev, now) {
   return (now || [])
     .filter((v) => v?.role && before.has(v.role) && before.get(v.role) !== v.verdict)
     .map((v) => `${v.role} ${before.get(v.role)}→${v.verdict}`);
+}
+
+/**
+ * #239 (M-2) — `review-r1: <role>=<verdict>,… r2_flipped=<n>` from the handoff's `r1_verdicts: [{role, verdict}]` (the
+ * cross-PR contract name the review workflow must emit), in `review-evidence:`'s canonical form (`normalizeVerdicts`). `n` counts R1 roles whose
+ * final (R2) verdict differs. No R1 array (or an empty one) → the explicit placeholder, never a silent skip.
+ */
+export const REVIEW_R1_NOT_CARRIED = "review-r1: (not carried by this workflow)";
+export function reviewR1Line(r1, final) {
+  const before = (Array.isArray(r1) ? r1 : []).filter((x) => typeof x?.role === "string" && x.role);
+  if (!before.length) return REVIEW_R1_NOT_CARRIED;
+  const after = new Map((Array.isArray(final) ? final : []).filter((x) => x?.role).map((x) => [x.role, x.verdict]));
+  const flipped = before.filter((x) => after.has(x.role) && after.get(x.role) !== x.verdict).length;
+  return `review-r1: ${normalizeVerdicts(before)} r2_flipped=${flipped}`;
 }
 
 export const K_TWICE = "K exhausted twice (one self-restart used)";

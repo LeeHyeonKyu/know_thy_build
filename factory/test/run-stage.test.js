@@ -6572,3 +6572,96 @@ test("test_200_scope_check_fails_open_visibly_on_git_read_error", async () => {
     expect(r.ok, name).toBe(false);
   }
 });
+
+/**
+ * #239 (M-7/M-9 through the real caller) — the validator's notes are not a validator return value only: the real
+ * `verifyStage` normalizes the plan, and the run-stage plan success path writes both `plan:` lines into the run record and
+ * hands the truncated handoff (6 items + signoff_objections) to writeHandoff. The notes are never reasons.
+ */
+test("test_239_plan_notes_land_in_the_run_record_and_handoff", async () => {
+  const objection = "an unresolved objection from the signing skeptic";
+  const dw = (n, over = {}) => ({ id: `dw${n}`, text: `behaviour ${n}`, rubric: `r${n}`, check: { kind: "test", ref: `test_239_item_${n}` }, level: "unit", ...over });
+  const plan = {
+    schema: "factory.plan.v1", issue: 239, tier: "standard", roles: ["synthesizer", "skeptic"], rounds: 2,
+    done_when: [1, 2, 3, 4, 5, 6].map((n) => dw(n)).concat(dw(7, { source: "skeptic" })),
+    files_expected: [], non_goals: [], open_risks: [], orchestration: "workflow",
+    dissent_log: [{ id: "signoff-skeptic", role: "skeptic", severity: "medium", objection, resolution: "unresolved" }],
+  };
+  const out = { is_error: false, result: "```json\n" + JSON.stringify(plan) + "\n```" };
+  let verdict = null;
+  const realVerify = ({ out: o }) => (verdict = verifyStage({
+    stage: "plan", out: o, agentsLog: { starts: [], stops: [], completed: ["plan-synthesizer", "plan-skeptic"], orphans: [] },
+    roster: ["synthesizer", "skeptic"], rolePrefix: "plan-", expectedRounds: 2, orchestration: "workflow", planLimits: { max_done_when: 6 },
+  }));
+  const lines = [];
+  const writeHandoff = vi.fn(async () => {});
+  const transition = vi.fn(async ({ to }) => ({ ok: true, to }));
+  const deps = planRepairDeps({ claudeP: vi.fn(async () => out), verifyStage: realVerify, writeHandoff, transition, runRecord: (l) => lines.push(...l) });
+  expect(await runStage({ stage: "plan", issue: 239, deps, runnerId: "r1" })).toBe(0);
+
+  expect(verdict.ok).toBe(true);
+  expect(verdict.reasons).toEqual([]);
+  expect(verdict.reasons.some((r) => r.startsWith("plan:"))).toBe(false);
+  expect(deps.claudeP).toHaveBeenCalledTimes(1);                                  // no repair turn
+  expect(lines).toContain(`plan: unresolved sign-off objection from skeptic: ${objection}`);
+  expect(lines).toContain("plan: skeptic items beyond max_done_when dropped: dw7");
+  const handed = writeHandoff.mock.calls.at(-1)[0].data;
+  expect(handed.done_when.map((d) => d.id)).toEqual(["dw1", "dw2", "dw3", "dw4", "dw5", "dw6"]);
+  expect(handed.signoff_objections).toEqual([{ id: "signoff-skeptic", role: "skeptic", text: objection }]);
+  expect(transition.mock.calls.at(-1)[0].to).toBe("factory:planned");
+});
+
+/**
+ * #239 (M-2, gap P-9) — the review record carries the R1 verdicts and how many roles R2 flipped, on its own line
+ * (`review-r1:` / `r2_flipped=`), apart from the cross-round `review flips:` (KTB-29). Without R1 the line says so.
+ */
+const review239 = ({ r1, lines, runId = "9001" }) => {
+  const verdicts = [reviewVerdictK("architect", "approve"), reviewVerdictK("skeptic", "approve")];
+  const data = { head_sha: "b".repeat(40), verdicts, ...(r1 ? { r1_verdicts: r1 } : {}) };
+  const deps = kDeps({
+    round: 1, verdicts,
+    buildContext: async () => ({ roster: ["architect", "skeptic"], orchestration: "workflow", limits: { K: 3 } }),
+    verifyStage: () => ({ ok: true, reasons: [], data: structuredClone(data) }),
+    priorReviewVerdicts: async () => [{ role: "architect", verdict: "approve" }, { role: "skeptic", verdict: "reject" }],
+    runRecord: (l) => lines.push(...l),
+  });
+  return runStage({ stage: "review", issue: 239, deps, runnerId: "gha-9001", runId });
+};
+test("test_239_review_record_carries_r1_verdicts_and_flip_count", async () => {
+  const withR1 = [];
+  expect(await review239({ r1: [{ role: "architect", verdict: "approve" }, { role: "skeptic", verdict: "reject" }], lines: withR1 })).toBe(0);
+  expect(withR1.filter((l) => l.startsWith("review-r1:"))).toEqual(["review-r1: architect=approve,skeptic=reject r2_flipped=1"]);
+  expect(withR1).toContain("review flips: skeptic reject→approve");
+
+  // No flip when R1 already agreed — the count is computed, not constant.
+  const agreed = [];
+  expect(await review239({ r1: [{ role: "skeptic", verdict: "approve" }, { role: "architect", verdict: "approve" }], lines: agreed })).toBe(0);
+  expect(agreed.filter((l) => l.startsWith("review-r1:"))).toEqual(["review-r1: architect=approve,skeptic=approve r2_flipped=0"]);
+
+  const without = [];
+  expect(await review239({ r1: null, lines: without })).toBe(0);
+  expect(without.filter((l) => l.startsWith("review-r1:"))).toEqual(["review-r1: (not carried by this workflow)"]);
+  expect(without).toContain("review flips: skeptic reject→approve");                 // the cross-round line is unchanged
+});
+
+/**
+ * #239 (dw5) — the merge-provenance `review-evidence:` line is byte-for-byte what it was before: the real writer's output
+ * still goes through the real end-anchored parser (merge refuses on a miss), in both the R1-present and R1-absent paths.
+ */
+test("test_239_review_evidence_line_still_parses_after_flip_count", async () => {
+  const { parseReviewEvidence, reviewEvidenceLine } = await import("../lib/run-record.js");
+  const expected = reviewEvidenceLine({ runId: "9001", runnerId: "gha-9001", headSha: "b".repeat(40), round: 1, decision: "approved", verdicts: [{ role: "architect", verdict: "approve" }, { role: "skeptic", verdict: "approve" }] });
+  for (const r1 of [[{ role: "architect", verdict: "reject" }, { role: "skeptic", verdict: "approve" }], null]) {
+    const lines = [];
+    expect(await review239({ r1, lines })).toBe(0);
+    // the same run that writes the new review-r1 line (populated or placeholder) …
+    expect(lines.filter((l) => l.startsWith("review-r1:"))).toHaveLength(1);
+    // … still writes exactly the pre-#239 evidence line.
+    const evidence = lines.filter((l) => l.startsWith("review-evidence:"));
+    expect(evidence).toEqual([expected]);
+    expect(evidence[0]).not.toMatch(/flip/);
+    const parsed = parseReviewEvidence(lines.join("\n"), { runId: "9001" });
+    expect(parsed).not.toBe(null);
+    expect(parsed).toEqual(expect.objectContaining({ headSha: "b".repeat(40), decision: "approved", verdicts: "architect=approve,skeptic=approve", round: 1 }));
+  }
+});
