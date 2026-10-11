@@ -1,5 +1,6 @@
 import { STATES } from "./labels.js";
 import { UNFINISHED_RUN_STATUSES } from "./sweeper.js";
+import { MERGE_ENVIRONMENT } from "./bootstrap.js";
 
 /**
  * §13.3 `:status`의 계산 절반(읽기 전용 데이터 합성). GitHub 호출·파일 읽기는 전부 `cli/status.js`가
@@ -71,8 +72,14 @@ function labelFallbackStage(state) {
 export const ACTIONS_QUEUED_MIN = 24;
 export const QUEUE_LABEL_MIN = 10;
 export const ACTIONS_RUN_LIMIT = 20;
-// 러너를 기다리는 상태 = sweeper의 "끝나지 않은 런" 목록에서 이미 러너를 받은 in_progress만 뺀 것(목록을 두 벌 두지 않는다).
-const WAITING_RUN_STATUSES = new Set(UNFINISHED_RUN_STATUSES.filter((s) => s !== "in_progress"));
+// 러너를 기다리는 상태 = sweeper의 "끝나지 않은 런" 목록에서 이미 러너를 받은 in_progress와, `waiting`을 뺀 것(목록을 두 벌
+// 두지 않는다). `waiting`은 잡이 배포 보호 규칙(환경의 required reviewer)을 기다리는 상태다 — `merge.human_gate: true`(설치
+// 기본값)에서 모든 머지 런이 사람의 승인까지 거기 앉는다. 러너 큐도 billing도 아니다(#234 rework cf1).
+const WAITING_RUN_STATUSES = new Set(UNFINISHED_RUN_STATUSES.filter((s) => s !== "in_progress" && s !== "waiting"));
+// 환경 게이트 뒤의 워크플로(factory-merge.yml의 `name:`과 `environment:`가 둘 다 MERGE_ENVIRONMENT다). 그 잡이 스텝 0으로 끝나거나
+// 취소된 것은 리뷰어가 배포를 거부했거나 승인 대기 중에 취소된 모양과 같아 billing으로 세지 않는다 — Actions가 정말 막혔으면
+// 게이트 없는 워크플로(triage·sweeper)의 런이 같은 모양으로 함께 걸린다.
+const isEnvironmentGated = (r) => r?.workflowName === MERGE_ENVIRONMENT;
 export const BILLING_RE = /billing|spending limit/i;
 
 const minutesFloat = (fromIso, toIso) => {
@@ -104,7 +111,7 @@ function blockedReason(r, now) {
   if (r?.status !== "completed") return null;
   if (r.conclusion === "startup_failure") return "startup_failure";
   const jobsKnown = Array.isArray(r.jobs);
-  const noneStarted = jobsKnown && !r.jobs.some(jobStarted);
+  const noneStarted = jobsKnown && !r.jobs.some(jobStarted) && !isEnvironmentGated(r);
   if (r.conclusion === "failure") {
     if (noneStarted) return "never-started";
     if (jobsKnown && r.jobs.some((j) => (j.annotations || []).some((m) => BILLING_RE.test(String(m))))) return "billing";

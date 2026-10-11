@@ -541,7 +541,7 @@ test("test_234_status_flags_runs_stuck_in_queue_as_actions_blocked", async () =>
   // trigger 1 — a run still queued after more than 24 minutes
   const queued = withActions([ghRun({ id: 10, status: "queued", conclusion: "", createdAt: minutesAgo(25), updatedAt: minutesAgo(25) })]);
   expect(firstLine(queued)).toBe(BLOCKED_HEAD(1));
-  for (const status of ["pending", "waiting", "requested"]) {
+  for (const status of ["pending", "requested"]) {
     expect(firstLine(withActions([ghRun({ id: 11, status, conclusion: "", createdAt: minutesAgo(40) })])), status).toBe(BLOCKED_HEAD(1));
   }
   // …but not one that has waited only 24 minutes (the bar is "more than 24")
@@ -678,6 +678,26 @@ test("test_234_status_counts_never_started_failures_but_not_ordinary_failures", 
   });
   expect(queue.line.startsWith(BLOCKED_HEAD(0))).toBe(true);
   expect(queue.line).toContain("#5");
+});
+
+test("test_234_status_does_not_flag_runs_held_at_the_merge_environment_gate", () => {
+  // `human_gate: true` (the install default) puts a required reviewer on the factory-merge environment:
+  // the merge run sits in GitHub status `waiting` until the owner approves — that is not a runner queue.
+  const held = ghRun({ id: 70, workflowName: "factory-merge", status: "waiting", conclusion: "", createdAt: minutesAgo(40), updatedAt: minutesAgo(40) });
+  expect(withActions([held]).actionsBlocked).toBeNull();
+  expect(firstLine(withActions([held]))).toBe("## Needs You");
+  // `waiting` is a deployment-protection state for any workflow, not only merge
+  expect(withActions([ghRun({ id: 71, status: "waiting", conclusion: "", createdAt: minutesAgo(90) })]).actionsBlocked).toBeNull();
+  // the owner rejected the deployment: the run ends `failure` with a job that ran 0 steps → not the billing alarm
+  expect(withActions([ghRun({ id: 72, workflowName: "factory-merge", conclusion: "failure", createdAt: minutesAgo(60), updatedAt: minutesAgo(30), jobs: [neverStartedJob] })]).actionsBlocked).toBeNull();
+  // the run was cancelled while still held for approval → not the billing alarm either
+  expect(withActions([ghRun({ id: 73, workflowName: "factory-merge", conclusion: "cancelled", createdAt: minutesAgo(60), updatedAt: minutesAgo(30), jobs: [neverStartedJob] })]).actionsBlocked).toBeNull();
+  // …while the same 0-step failure / long cancel in an ungated workflow still flags, and a merge run that
+  // was approved but then sat `queued` for a runner, or hit startup_failure, still flags
+  expect(firstLine(withActions([ghRun({ id: 74, conclusion: "failure", createdAt: minutesAgo(60), updatedAt: minutesAgo(30), jobs: [neverStartedJob] })]))).toBe(BLOCKED_HEAD(1));
+  expect(firstLine(withActions([ghRun({ id: 75, conclusion: "cancelled", createdAt: minutesAgo(60), updatedAt: minutesAgo(30), jobs: [neverStartedJob] })]))).toBe(BLOCKED_HEAD(1));
+  expect(firstLine(withActions([ghRun({ id: 76, workflowName: "factory-merge", status: "queued", conclusion: "", createdAt: minutesAgo(40) })]))).toBe(BLOCKED_HEAD(1));
+  expect(firstLine(withActions([ghRun({ id: 77, workflowName: "factory-merge", conclusion: "startup_failure", createdAt: minutesAgo(40) })]))).toBe(BLOCKED_HEAD(1));
 });
 
 test("test_234_status_actions_blocked_clears_once_a_later_run_starts", () => {
