@@ -138,8 +138,8 @@ cat docs/QA.md 2>/dev/null | head -60
 3. {{step_3}}
 
 ## Impact paths
-- {{path_1}}
-- {{path_2}}
+- `{{path_1}}`
+- `{{path_2}}`
 
 ## done_when (draft)
 - [ ] `test_NNN_<slug>` — 버그 재현을 실패시키는 회귀 가드, 수정 후 통과 (level: fast)
