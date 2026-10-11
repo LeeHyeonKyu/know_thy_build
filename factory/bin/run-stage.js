@@ -1,5 +1,4 @@
 #!/usr/bin/env node
-// Scope change (#232): must_fix cf1 — record verifyStage's planNotes so the "issue has no items" line reaches the run record.
 import { mkdirSync, writeFileSync, readFileSync, existsSync, realpathSync, rmSync, mkdtempSync, symlinkSync } from "node:fs";
 import { homedir, hostname, tmpdir } from "node:os";
 import { dirname, isAbsolute, join, resolve, sep } from "node:path";
@@ -963,8 +962,6 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runAt
     // KTB-15b M1: 어느 후보가 산출물로 뽑혔는지(파일 재조립·task-notification·envelope 펜스 …)는
     // 사후 감사의 provenance다 — verifyStage가 계산해 둔 것을 그냥 흘려보내지 않고 한 줄 남긴다.
     if (v.source) record([`artifact: ${v.source}`]);
-    // #232 cf1 — the plan validator's non-failing record lines (e.g. "done_when: issue has no items") belong in the run record.
-    if (Array.isArray(v.planNotes) && v.planNotes.length) record(v.planNotes);
     /**
      * ── Task 9 (Structure H, KTB-51) — plan-stage validator one-shot in-run repair ────────────────
      *
@@ -1037,7 +1034,6 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runAt
         }
         v = d.verifyStage({ stage, out, ctx, gates });
         if (v.source) record([`artifact: ${v.source} (repair)`]);
-        if (Array.isArray(v.planNotes) && v.planNotes.length) record(v.planNotes);
         record([`plan repair (KTB-51): ${v.ok ? "resolved → factory:planned" : "still red → escalating unchanged"}`]);
       }
     }

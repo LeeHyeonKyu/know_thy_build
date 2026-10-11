@@ -1,4 +1,3 @@
-// Scope change (#232): must_fix cf1 — pins that verifyStage's planNotes line reaches the run record via run-stage.js.
 import { test, expect, vi } from "vitest";
 import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -2620,29 +2619,6 @@ test("KTB-15b M1: no source (or verifyStage that doesn't return one) means no ar
   });
   expect(await runStage({ stage: "plan", issue: 7, deps: d })).toBe(0);
   expect(lines.some((l) => l.startsWith("artifact:"))).toBe(false);
-});
-
-// ── #232 cf1: verifyStage's `planNotes` (non-failing plan validator lines) reach the run record ──
-const NO_ITEMS_LINE = "done_when: issue has no items — the plan's contract stands alone";
-test("test_232_plan_notes_reach_the_run_record: a passing plan's planNotes line is written to the run record", async () => {
-  const lines = [];
-  const d = baseDeps({
-    verifyStage: () => ({ ok: true, reasons: [], data: {}, planNotes: [NO_ITEMS_LINE] }),
-    runRecord: (l) => lines.push(...l),
-  });
-  expect(await runStage({ stage: "plan", issue: 232, deps: d })).toBe(0);
-  expect(lines).toContain(NO_ITEMS_LINE);
-});
-
-test("test_232_plan_notes_reach_the_run_record_after_repair: the repaired verdict's planNotes line is recorded too", async () => {
-  const lines = [];
-  const transition = vi.fn(async ({ to }) => ({ ok: true, to }));
-  const verifyStage = vi.fn()
-    .mockReturnValueOnce({ ok: false, reasons: [...R1_REASONS], planRepair: [...R1_REASONS], data: { rounds: 2 } })
-    .mockReturnValueOnce({ ok: true, reasons: [], planRepair: null, data: { rounds: 2 }, planNotes: [NO_ITEMS_LINE] });
-  const deps = planRepairDeps({ transition, verifyStage, runRecord: (l) => lines.push(...l) });
-  expect(await runStage({ stage: "plan", issue: 232, deps, runnerId: "r1" })).toBe(0);
-  expect(lines).toContain(NO_ITEMS_LINE);
 });
 
 test("KTB-15b: a refused hop-back transition stops the stage before claude -p runs", async () => {
