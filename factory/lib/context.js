@@ -5,7 +5,8 @@ import { latestHandoff } from "./handoff.js";
 import { tierFloor, maxTier, normalizeTier } from "./gates.js";
 import { changedFiles } from "./changed-files.js";
 import { buildHouseRules } from "./house-rules.js";
-import { commentsSinceRequeue, latestSelfGateFindings, kRestartState, TRANSITION_TO, countedTransitionIndices, mergeConflictRework, conflictExemptionNote } from "./retro/issue-comments.js";
+import { commentsSinceRequeue, latestSelfGateFindings, kRestartState, TRANSITION_TO, countedTransitionIndices, mergeConflictRework, conflictExemptionNote, conflictRoundsUsed } from "./retro/issue-comments.js";
+import { CONFLICT_ROUND_EXCLUDED_RUNS } from "./budget.js";
 
 const ROSTER_STAGE = { plan: "plan", review: "review" };
 
@@ -312,6 +313,11 @@ export async function buildContext({ root, gh, issue, stage, run = null, base = 
   ctx.loaded = await loadedFor({ ctx, roleBlock, gh, comments });
   // #212 dw5 — the merge stage's reason was reworded: not a conflict-only round, and run-stage writes this line so it is not silent.
   if (stage === "implement") { const note = conflictExemptionNote(commentsSinceRequeue(comments)); if (note) ctx.conflict_only_note = note; }
+  // #212 skeptic f5 — the bound is LIFETIME on both sides: once the issue has used it, a conflict round is a normal round, and it says so.
+  if (stage === "implement" && conflictBoundSpent(comments, ctx.issue?.number)
+    && conflictOnlyOf({ comments: commentsSinceRequeue(comments), mergeConflicts: ctx.merge_conflicts, review: ctx.handoffs?.review ?? null })) {
+    ctx.conflict_only_note = `conflict-only: not applied — this issue already used its CONFLICT_ROUND_EXCLUDED_RUNS=${CONFLICT_ROUND_EXCLUDED_RUNS} conflict round(s) (ADR-040); this round counts as a normal round (cost and K)`;
+  }
   mkdirSync(join(root, ".factory/out"), { recursive: true });
   writeFileSync(join(root, ".factory/out/context.json"), JSON.stringify(ctx, null, 2));
   // 역할별 파일(H4). 오케스트레이터만 `context.json`(전체)을 보고, 역할은 자기 이름이 붙은 파일만 본다.
@@ -426,6 +432,12 @@ export function loadedJsonLine(ctx) {
  * 하나라도 아니면 키 자체가 없다 — `loaded`는 오늘과 바이트까지 같다. 위조된 마커만으로는 켜지지 않는다: (ii)는 진짜 git 충돌이어야 하고,
  * 켜져도 비용·K 면제는 러너가 진짜 merge 커밋에서 잰 conflict-scope가 GREEN일 때만 쓴다(run-stage).
  */
+/**
+ * skeptic f5 — 이 이슈가 평생 쓴 conflict 라운드(러너 마커, 재큐와 무관)가 상한에 닿았나. K의 창은 재큐마다 열리지만 비용 상한은 평생이다 —
+ * 그래서 **쓰는 쪽**이 평생으로 묶는다: 닿았으면 conflict-only를 켜지 않고, 그러면 마커(K)도 태그(비용)도 나가지 않는다(둘 다 또는 둘 다 아님).
+ */
+const conflictBoundSpent = (comments, issue) => conflictRoundsUsed(comments, issue) >= CONFLICT_ROUND_EXCLUDED_RUNS;
+
 export function conflictOnlyOf({ comments, mergeConflicts, review }) {
   if (!(Array.isArray(mergeConflicts) && mergeConflicts.length)) return null;
   const list = Array.isArray(comments) ? comments : [];
@@ -460,7 +472,8 @@ async function loadedFor({ ctx, roleBlock, gh, comments = [] }) {
    */
   const kRestartBrief = ctx.stage === "implement" ? kRestartState(commentsSinceRequeue(comments)).brief : null;
   const review = ctx.handoffs?.review ?? null;
-  const conflictOnly = ctx.stage === "implement" ? conflictOnlyOf({ comments: commentsSinceRequeue(comments), mergeConflicts: ctx.merge_conflicts, review }) : null;
+  const conflictOnly = ctx.stage === "implement" && !conflictBoundSpent(comments, ctx.issue?.number)
+    ? conflictOnlyOf({ comments: commentsSinceRequeue(comments), mergeConflicts: ctx.merge_conflicts, review }) : null;
   const mustFix = review?.decision === "rework"
     ? (Array.isArray(review.verdicts) ? review.verdicts : []).flatMap((v) => (Array.isArray(v?.must_fix) ? v.must_fix.filter(Boolean) : []))
     : [];

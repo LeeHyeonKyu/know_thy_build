@@ -1,4 +1,5 @@
 import { CONFLICT_ROUND_EXCLUDED_RUNS } from "../budget.js";
+import { latestHandoff } from "../handoff.js";
 
 // 이슈 코멘트에서 전이 사실을 뽑는 결정적 파서 — harvest.js(경량 수확 통계)와 quarantine-ops.js
 // (flaky 격리 등록의 사유 문구)가 정확히 같은 규칙으로 같은 사실을 읽어야 한다. 같은 전이 문법을
@@ -352,6 +353,22 @@ export function mergeConflictRework(body) {
 }
 /** 러너가 conflict-only 라운드의 `conflict-scope`가 GREEN일 때만 남기는 마커 — K 면제의 근거다(`countedTransitionIndices`). */
 export const CONFLICT_ROUND_MARKER = /<!-- factory-conflict-round:v1 issue=(\d+) approved=([0-9a-f]{40}) head=([0-9a-f]{40}) -->/;
+/** 마커 코멘트의 **전체 모양**(본문 맨 앞의 마커 + 러너의 머리말) — 다른 글 안에 인용된 마커는 맞지 않는다(skeptic f6). */
+const CONFLICT_ROUND_COMMENT = /^<!-- factory-conflict-round:v1 issue=(\d+) approved=([0-9a-f]{40}) head=([0-9a-f]{40}) -->\n\*\*conflict-only round\*\* — /;
+/** 이 코멘트가 러너의 conflict-round 마커 코멘트인가 → `{ issue, approved, head }` | null. */
+export function conflictRoundOf(body) {
+  const m = CONFLICT_ROUND_COMMENT.exec(String(body ?? ""));
+  return m ? { issue: Number(m[1]), approved: m[2], head: m[3] } : null;
+}
+/**
+ * 이 이슈가 평생 쓴 conflict 라운드 수(재큐와 무관하게 코멘트 전체에서, `issue=`가 이 이슈인 마커 코멘트). 쓰는 쪽(context.js)이 이것이
+ * `CONFLICT_ROUND_EXCLUDED_RUNS`에 닿으면 conflict-only를 켜지 않는다 — 그래서 마커(K)와 태그(비용)는 **함께** 평생 상한에 묶인다
+ * (skeptic f5: K의 창은 재큐마다 열리지만 비용은 평생이다). 거부로 취소된 라운드도 칸을 쓴다 — 보수적으로, 면제가 상한을 넘지 않는다.
+ */
+export function conflictRoundsUsed(comments, issue) {
+  return (Array.isArray(comments) ? comments : []).filter((c) => conflictRoundOf(c?.body)?.issue === Number(issue)).length;
+}
+const HANDED_OFF = /^<!-- factory-transition:v1 from=\S+ to=factory:awaiting-review by=\S+/;
 export const conflictRoundComment = ({ issue, approvedHead, head }) =>
   `<!-- factory-conflict-round:v1 issue=${issue} approved=${approvedHead} head=${head} -->\n**conflict-only round** — 승인된 head \`${String(approvedHead).slice(0, 7)}\` 위의 base 병합이 충돌 해소만 담았습니다(\`${String(head).slice(0, 7)}\`). 이 base 충돌 rework는 리뷰 라운드(K)로 세지 않고, 이 런의 비용은 평생 상한에서 빠집니다 — 이슈당 ${CONFLICT_ROUND_EXCLUDED_RUNS}회까지(ADR-040).`;
 /** 창의 마지막 rework가 approved에서 왔는데 머지 스테이지의 충돌 문구와 맞지 않으면, 그 사실을 말하는 기록 한 줄(아니면 null). */
@@ -367,19 +384,32 @@ export function conflictExemptionNote(comments) {
 
 /**
  * K 면제(#212 dw5) — `ids`(살아남은 rework 전이의 인덱스, 오름차순) 중 빼 줄 것. 머지 스테이지의 CONFLICTING rework이고, 그 뒤(다음 rework 전이
- * 전)에 러너의 conflict-round 마커가 있는 것만 — 마커는 conflict-scope가 GREEN일 때만 나간다. 창에서 앞의 `CONFLICT_ROUND_EXCLUDED_RUNS`개까지다.
+ * 전)에 그 라운드에 묶인 러너의 conflict-round 마커가 있는 것만 — 마커는 conflict-scope가 GREEN이고 awaiting-review 전이가 성공한 뒤에만 나간다.
+ * 창에서 앞의 `CONFLICT_ROUND_EXCLUDED_RUNS`개까지이고(평생 상한은 쓰는 쪽 `lib/context.js`가 `conflictRoundsUsed`로 묶는다), 다음 rework이
+ * 머지 스테이지의 것이 아니면(뒤따른 리뷰가 거부했다) 면제는 취소된다.
  * 마커도 factory 계정의 코멘트라 에이전트가 쓸 수 있다: 그래서 면제는 진짜 모양의 충돌 전이에만 붙고, 상수로 묶이고, 2K 천장의 셈
  * (`honourFailed: false`, `kRestartState().attempts`)에는 걸리지 않는다 — 위조는 많아야 그 개수만큼 K를 늦출 뿐 천장을 넘기지 못한다.
  */
 function conflictExemptIndices(list, ids) {
-  const markers = [];
-  list.forEach((c, i) => { if (CONFLICT_ROUND_MARKER.test(String(c?.body ?? ""))) markers.push(i); });
-  if (!markers.length) return new Set();
+  if (!list.some((c) => conflictRoundOf(c?.body))) return new Set();
   const out = new Set();
   ids.forEach((i, n) => {
     if (out.size >= CONFLICT_ROUND_EXCLUDED_RUNS || !mergeConflictRework(list[i]?.body)) return;
-    const next = ids[n + 1] ?? Infinity;
-    if (markers.some((k) => k > i && k < next)) out.add(i);
+    const next = ids[n + 1];
+    // dw6 — the next rework is not the merge stage's (the review after the conflict round rejected it): not a finished conflict round,
+    // the exemption is revoked and this rework counts as today. The cost side reads the same event (`lib/budget.js` `reviewRejectedAfter`).
+    if (next !== undefined && !mergeConflictRework(list[next]?.body)) return;
+    // skeptic f6 — the marker must be bound to THIS round: the approved review handoff the merge stage acted on (its head and issue),
+    // and the runner's own position — after this round's hand-off transition to awaiting-review, before the next rework.
+    const approved = latestHandoff(list.slice(0, i), "review");
+    const head = approved?.data?.decision === "approved" ? approved.data.head_sha : null;   // the marker's 40-hex `approved=` must equal it
+    let handed = false;
+    for (let k = i + 1; k < (next ?? list.length); k++) {
+      const body = String(list[k]?.body ?? "");
+      if (HANDED_OFF.test(body)) { handed = true; continue; }
+      const mk = handed ? conflictRoundOf(body) : null;
+      if (mk && mk.approved === head && mk.issue === approved.issue) { out.add(i); return; }
+    }
   });
   return out;
 }

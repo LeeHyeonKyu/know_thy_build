@@ -1380,3 +1380,40 @@ test("test_212_conflict_only_is_derived_from_runner_facts", async () => {
   expect(rw.now).toBe(rw.then);
   expect(rw.ctx.conflict_only_note).toMatch(/^conflict-only: not applied — the last rework came from factory:approved/);
 });
+
+import { conflictRoundComment as conflictRoundComment212 } from "../lib/retro/issue-comments.js";
+import { CONFLICT_ROUND_EXCLUDED_RUNS as EXCLUDED212 } from "../lib/budget.js";
+
+test("test_212_conflict_round_bound_is_lifetime_across_a_requeue", async () => {
+  // skeptic f5 — the K window reopens on every requeue but the cost cap is lifetime: the bound must be the same on both, so the WRITER
+  // (this context) stops turning conflict_only on once the issue has used CONFLICT_ROUND_EXCLUDED_RUNS conflict rounds in its lifetime.
+  const C = ["factory/lib/conflicted.js"];
+  const marker = (issue = 212) => conflictRoundComment212({ issue, approvedHead: A212, head: "c".repeat(40) });
+  const seed = async (priorMarkers, { otherIssue = 0 } = {}) => {
+    const g = gh212();
+    for (let i = 0; i < priorMarkers; i++) await g.comment(212, marker());
+    for (let i = 0; i < otherIssue; i++) await g.comment(212, marker(999));
+    // a requeue opens a new K window (commentsSinceRequeue) — the prior markers are outside it
+    g.label = "factory:needs-human";
+    const q = await transition174({ gh: g, issue: 212, to: "factory:queue", reason: "requeue", skipRehearsal: true, env: {} });
+    expect(q.ok, q.reason).toBe(true);
+    await g.comment(212, review212());
+    await realMergeConflict212(g);
+    return g;
+  };
+  expect(EXCLUDED212).toBe(2);
+  // One prior conflict round: still within the bound → conflict_only.
+  const one = await loadedBoth212(await seed(EXCLUDED212 - 1), C);
+  expect(JSON.parse(one.now).conflict_only).toBe(true);
+  expect(one.ctx).not.toHaveProperty("conflict_only_note");
+  // The bound already spent before the requeue → no conflict_only (byte-identical loaded), and the record line says why.
+  const spent = await loadedBoth212(await seed(EXCLUDED212), C);
+  expect(JSON.parse(spent.now)).not.toHaveProperty("conflict_only");
+  expect(spent.now).toBe(spent.then);
+  expect(spent.ctx.conflict_only_note).toBe(`conflict-only: not applied — this issue already used its CONFLICT_ROUND_EXCLUDED_RUNS=${EXCLUDED212} conflict round(s) (ADR-040); this round counts as a normal round (cost and K)`);
+  // Markers naming another issue, or quoted inside another comment, spend nothing.
+  const other = await seed(EXCLUDED212 - 1, { otherIssue: 3 });
+  await other.comment(212, `quoted:\n${marker()}`);
+  const o = await loadedBoth212(other, C);
+  expect(JSON.parse(o.now).conflict_only).toBe(true);
+});

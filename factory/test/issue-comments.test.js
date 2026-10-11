@@ -279,7 +279,11 @@ const to212 = (gh, to, extra = {}) => transition212({ gh, issue: 212, to, reason
 /** one ordinary review rework round: awaiting-review → rework (by=script, the review stage), then implement claims it */
 async function reviewRework212(gh) { gh.label = "factory:awaiting-review"; await to212(gh, "factory:rework"); await to212(gh, "factory:in-progress", { stage: "implement" }); }
 /** the approved PR hits a base conflict: the REAL merge stage asks for the rework */
+const approvedReview212 = (gh, head = A212, issue = 212) => gh.comment(212, renderHandoff({ stage: "review", issue, summary: "s", data: {
+  schema: "factory.review.v1", issue, pr: 31, head_sha: head, round: 3, orchestration: "workflow", guarantee: "structural", decision: "approved",
+  verdicts: [{ role: "correctness", verdict: "approve", confidence: "high", must_fix: [], should_fix: [], verified: [] }] } }));
 async function mergeConflict212(gh) {
+  await approvedReview212(gh);                                      // the merge stage only sees an APPROVED PR
   gh.label = "factory:approved";
   const lines = [];
   const code = await runMergeStage212({
@@ -291,7 +295,18 @@ async function mergeConflict212(gh) {
   expect(gh.label).toBe("factory:rework");
   await to212(gh, "factory:in-progress", { stage: "implement" });
 }
-const greenConflictRound212 = (gh) => gh.comment(212, conflictRoundComment212({ issue: 212, approvedHead: A212, head: "c".repeat(40) }));
+/** the GREEN conflict round as runStage finishes it: the hand-off transition to awaiting-review, THEN the runner's marker (#212 skeptic f3) */
+const implementHandoff212 = (head) => renderHandoff({ stage: "implement", issue: 212, summary: "resolved the base conflict", data: {
+  schema: "factory.implement.v1", issue: 212, head_sha: head, pr: 31, gates: { status: "GREEN" }, verifier: { verdict: "accepted" }, orchestration: "workflow", guarantee: "verified" } });
+const handOff212 = async (gh, head = "c".repeat(40)) => {
+  await gh.comment(212, implementHandoff212(head));
+  const t = await to212(gh, "factory:awaiting-review", { stage: "implement", ctxExtra: { gatesChecked: true, gatesFile: { status: "GREEN", head_sha: head } } });
+  expect(t.ok, t.reason).toBe(true);
+};
+const greenConflictRound212 = async (gh, marker = { issue: 212, approvedHead: A212, head: "c".repeat(40) }) => {
+  await handOff212(gh, marker.head);
+  await gh.comment(212, conflictRoundComment212(marker));
+};
 const window212 = async (gh) => commentsSinceRequeue(await gh.comments());
 
 async function preChangeRule212() {
@@ -339,8 +354,10 @@ test("test_212_merge_conflict_rework_is_not_a_review_round", async () => {
   // Fail closed when the merge stage's reason no longer matches: the transition counts as a normal K round, and the record line says so.
   const reworded = gh212();
   await reviewRework212(reworded);
+  await approvedReview212(reworded);
   reworded.label = "factory:approved";
   await transition212({ gh: reworded, issue: 212, to: "factory:rework", reason: "merge conflict: please rebase on main", stage: "merge", env: {} });
+  await to212(reworded, "factory:in-progress", { stage: "implement" });
   await greenConflictRound212(reworded);                            // even a marker does not exempt an unrecognised transition
   const rw = await window212(reworded);
   expect(countTransitionsTo(rw, "factory:rework")).toBe(2);
@@ -370,4 +387,48 @@ test("test_212_windows_without_a_conflict_transition_count_as_before", async () 
     expect(reviewRoundOf212(countTransitionsTo(w, "factory:rework"), kRestartState212(w))).toEqual(reviewRoundOf212(pre.countTransitionsTo(w, "factory:rework"), pre.kRestartState(w)));
   }
   expect(kRestartState212(await window212(gh)).used).toBe(true);
+});
+
+test("test_212_conflict_marker_binds_to_its_round_and_a_rejecting_review_revokes_it", async () => {
+  // The genuine sequence: one review rework, an approved review, the real merge stage's CONFLICTING rework, then the GREEN round
+  // (hand-off transition, then the runner's marker naming the approved head). The conflict rework is not a review round.
+  const seed = async () => { const g = gh212(); await reviewRework212(g); await mergeConflict212(g); return g; };
+  const genuine = await seed();
+  await greenConflictRound212(genuine);
+  expect(countTransitionsTo(await window212(genuine), "factory:rework")).toBe(1);
+
+  // A marker that is not bound to this round exempts nothing — each of these counts the conflict rework (2):
+  const forged = {
+    "quoted inside another comment": async (g) => { await handOff212(g); await g.comment(212, `agent output:\n${conflictRoundComment212({ issue: 212, approvedHead: A212, head: "c".repeat(40) })}`); },
+    "posted before the round handed off (no awaiting-review transition)": async (g) => { await g.comment(212, conflictRoundComment212({ issue: 212, approvedHead: A212, head: "c".repeat(40) })); },
+    "naming another approved head": (g) => greenConflictRound212(g, { issue: 212, approvedHead: "b".repeat(40), head: "c".repeat(40) }),
+    "naming another issue": (g) => greenConflictRound212(g, { issue: 999, approvedHead: A212, head: "c".repeat(40) }),
+  };
+  for (const [name, post] of Object.entries(forged)) {
+    const g = await seed();
+    await post(g);
+    expect(countTransitionsTo(await window212(g), "factory:rework"), name).toBe(2);
+  }
+  // …and a conflict rework with no approved review handoff before it has nothing to bind the marker to.
+  const unbound = gh212();
+  await reviewRework212(unbound);
+  unbound.label = "factory:approved";
+  await runMergeStage212({ issue: 212, defaultBranch: "main", headSha: A212,
+    d: { prInfo: async () => ({ number: 31, state: "OPEN", mergeable: "CONFLICTING" }), transition: ({ to, reason, cause }) => transition212({ gh: unbound, issue: 212, to, reason, cause, stage: "merge", env: {} }) },
+    record: () => {}, refusal: () => [] });
+  await to212(unbound, "factory:in-progress", { stage: "implement" });
+  await greenConflictRound212(unbound);
+  expect(countTransitionsTo(await window212(unbound), "factory:rework")).toBe(2);
+
+  // dw6 — the review that follows the conflict round REJECTS: the exemption is revoked, K counts as today (1 + conflict + reject = 3).
+  const rejected = await seed();
+  await greenConflictRound212(rejected);
+  expect(countTransitionsTo(await window212(rejected), "factory:rework")).toBe(1);
+  await to212(rejected, "factory:rework");
+  expect(countTransitionsTo(await window212(rejected), "factory:rework")).toBe(3);
+  // …but when it approves and the base moves again, the first conflict round keeps its exemption (the next rework is the merge stage's).
+  const again = await seed();
+  await greenConflictRound212(again);
+  await mergeConflict212(again);
+  expect(countTransitionsTo(await window212(again), "factory:rework")).toBe(2);
 });
