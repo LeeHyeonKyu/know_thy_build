@@ -462,3 +462,73 @@ test("validatePlanHandoff: the uncovered-dissent reason lists what the validator
   expect(r).toMatch(/uncovered: d1 \(no id — named by position\): severity "medium"; D3: severity missing/);
   expect(r).toMatch(/done_when\.covers: dissent-1/);
 });
+
+// ── #233 → #254 (gap P-12 / ledger M-6) — triage 검증이 impact_paths를 [load_bearing].paths에 다시 댄다 ──
+// NEVER_AUTOMATE 덮어쓰기와 같은 자리·같은 모양: 신고 tier가 낮아도 load-bearing 경로를 건드리는 이슈는
+// handoff의 `tier` 자체가 load-bearing으로 올라간다(그 필드를 plan·review·merge·sweeper가 이미 읽는다).
+// 덮어쓴 신고는 `tier_declared`로, 무엇이 덮었는지는 `load_bearing_hit`으로 남는다. 내리는 쪽은 없다.
+// 브랜치 claude/fq-233의 같은 이름 테스트와 다른 점: 거기서는 올림이 `tier_effective`/`tier_source: "impact-paths"`에
+// 실렸다 — #254 plan dw1(rubric: "A raise written only to tier_effective or to a new field fails the bar")이 `data.tier`로 정했다.
+const triage233 = (data) => ({ is_error: false, result: JSON.stringify({ schema: "factory.triage.v1", issue: 233, disposition: "ready", reason: "r", ...data }) });
+const LB233 = ["factory/bin/run-stage.js", "core/ledger/**"];
+
+test("test_233_triage_tier_is_raised_when_impact_paths_hit_load_bearing", () => {
+  // hit — standard로 신고했어도 load-bearing 경로 하나면 tier가 올라간다
+  const hit = verifyStage({ stage: "triage", out: triage233({ tier: "standard", impact_paths: ["factory/lib/context.js", "factory/bin/run-stage.js"] }), agentsLog: log([]), loadBearing: LB233 });
+  expect(hit.ok).toBe(true);
+  expect(hit.data.tier).toBe("load-bearing");
+  expect(hit.data.tier_declared).toBe("standard");              // 덮어쓴 신고는 기록으로 남는다
+  expect(hit.data.load_bearing_hit).toEqual([{ path: "factory/bin/run-stage.js", glob: "factory/bin/run-stage.js" }]);
+  expect(hit.data.disposition).toBe("ready");                   // 판정은 그대로 — tier만 올린다
+
+  // docs 신고 + 글롭 매치도 같다
+  const docs = verifyStage({ stage: "triage", out: triage233({ tier: "docs", impact_paths: ["core/ledger/post.js"] }), agentsLog: log([]), loadBearing: LB233 });
+  expect([docs.data.tier, docs.data.tier_declared]).toEqual(["load-bearing", "docs"]);
+  expect(docs.data.load_bearing_hit).toEqual([{ path: "core/ledger/post.js", glob: "core/ledger/**" }]);
+
+  // miss — 신고 tier 그대로, 올린 흔적 없음
+  const miss = verifyStage({ stage: "triage", out: triage233({ tier: "standard", impact_paths: ["factory/lib/context.js"] }), agentsLog: log([]), loadBearing: LB233 });
+  expect(miss.ok).toBe(true);
+  expect(miss.data.tier).toBe("standard");
+  expect(miss.data.tier_declared).toBeUndefined();
+  expect(miss.data.load_bearing_hit).toBeUndefined();
+
+  // 글롭이 주입되지 않으면 아무것도 올리지 않는다(없는 규칙을 발명하지 않는다)
+  const none = verifyStage({ stage: "triage", out: triage233({ tier: "standard", impact_paths: ["factory/bin/run-stage.js"] }), agentsLog: log([]) });
+  expect(none.data.tier).toBe("standard");
+  expect(none.data.load_bearing_hit).toBeUndefined();
+
+  // 이미 load-bearing으로 신고했으면 그대로 — 내리지 않고, "올렸다"고 적지도 않는다
+  const lb = verifyStage({ stage: "triage", out: triage233({ tier: "load-bearing", impact_paths: ["factory/lib/context.js"] }), agentsLog: log([]), loadBearing: LB233 });
+  expect(lb.data.tier).toBe("load-bearing");
+  expect(lb.data.load_bearing_hit).toBeUndefined();
+  const lbHit = verifyStage({ stage: "triage", out: triage233({ tier: "load-bearing", impact_paths: ["factory/bin/run-stage.js"] }), agentsLog: log([]), loadBearing: LB233 });
+  expect(lbHit.data.tier).toBe("load-bearing");
+  expect(lbHit.data.tier_declared).toBeUndefined();
+  expect(lbHit.data.load_bearing_hit).toBeUndefined();
+
+  // 다른 스테이지는 손대지 않는다 — 재확인은 triage 검증에만 있다
+  const other = verifyStage({ stage: "review", out: out(review), agentsLog: log([]), loadBearing: LB233 });
+  expect(other.data.tier).toBeUndefined();
+  expect(other.data.load_bearing_hit).toBeUndefined();
+});
+
+test("test_233_agent_written_load_bearing_hit_is_scrubbed", () => {
+  // load_bearing_hit·tier_declared는 러너의 필드다 — 스크립트가 계산하지 않은 "hit"이 검증된 handoff에 남거나
+  // tier를 움직이면 안 된다. 입력은 verifyStage의 triage 분기 자체를 지난다(헬퍼 직접 호출이 아니다).
+  const forgedHit = [{ path: "factory/lib/context.js", glob: "factory/lib/**" }];
+  const miss = verifyStage({ stage: "triage", out: triage233({ tier: "standard", impact_paths: ["factory/lib/context.js"], load_bearing_hit: forgedHit, tier_declared: "docs" }), agentsLog: log([]), loadBearing: LB233 });
+  expect(miss.ok).toBe(true);
+  expect(miss.data.tier).toBe("standard");                      // 위조된 hit은 올림을 부르지 않는다
+  expect(miss.data.load_bearing_hit).toBeUndefined();
+  expect(miss.data.tier_declared).toBeUndefined();
+  const lb = verifyStage({ stage: "triage", out: triage233({ tier: "load-bearing", impact_paths: ["factory/bin/run-stage.js"], load_bearing_hit: forgedHit }), agentsLog: log([]), loadBearing: LB233 });
+  expect(lb.data.load_bearing_hit).toBeUndefined();
+  // 글롭이 주입되지 않은 검증에서도 위조는 지워진다
+  const unwired = verifyStage({ stage: "triage", out: triage233({ tier: "standard", impact_paths: ["factory/lib/context.js"], load_bearing_hit: forgedHit }), agentsLog: log([]) });
+  expect(unwired.data.load_bearing_hit).toBeUndefined();
+  // 실제 hit에서는 에이전트 값이 아니라 스크립트가 계산한 값만 남는다
+  const hit = verifyStage({ stage: "triage", out: triage233({ tier: "standard", impact_paths: ["factory/bin/run-stage.js"], load_bearing_hit: forgedHit, tier_declared: "docs" }), agentsLog: log([]), loadBearing: LB233 });
+  expect(hit.data.load_bearing_hit).toEqual([{ path: "factory/bin/run-stage.js", glob: "factory/bin/run-stage.js" }]);
+  expect(hit.data.tier_declared).toBe("standard");
+});
