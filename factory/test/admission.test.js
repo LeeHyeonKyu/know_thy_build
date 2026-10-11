@@ -249,6 +249,14 @@ import { runStageGates as runStageGates231 } from "../lib/gates.js";
 import { renderUpstreamIssue as renderUpstreamIssue231, UPSTREAM_LABELS as UPSTREAM_LABELS231 } from "../lib/feedback/upstream-issue.js";
 
 const ROOT231 = fileURLToPath231(new URL("../..", import.meta.url));
+/**
+ * 진짜 CHARTER가 지금 막는 경로 하나 — 이 파일의 "진짜 CHARTER에서 거부된다" 단언은 전부 이것으로 쓴다.
+ * ADR-039(#241)부터 NEVER_AUTOMATE는 판정 로직 템플릿만이라 `templates/factory/**` 전체 글롭은 없다; 합성 charter(`charter({ never_automate })`)를
+ * 쓰는 단언은 그대로 `templates/factory/harness.toml`을 써도 된다.
+ */
+const REAL_FORBIDDEN = "templates/factory/github/workflows/factory-merge.yml";
+const REAL_FORBIDDEN_GLOB = "templates/factory/github/workflows/**";
+const REAL_FORBIDDEN_REASON = `NEVER_AUTOMATE: ${REAL_FORBIDDEN} (glob ${REAL_FORBIDDEN_GLOB})`;
 
 test("test_231_impact_paths_reads_backticked_and_plain_list_items", () => {
   const want = ["factory/lib/admission.js", "templates/know-thy-build/issue.md"];
@@ -296,25 +304,27 @@ test("test_231_impact_paths_reads_backticked_and_plain_list_items", () => {
     const refused = queueAdmission({ issue: { ...person, body: `## Impact paths\n${body}\n\n## done_when\n- [ ] \`test_1_a\`` }, charter: charter({ never_automate: ["templates/factory/**"] }), ...base });
     expect(refused.reasons.join(" "), body).toContain("NEVER_AUTOMATE: templates/factory/harness.toml (glob templates/factory/**)");
   }
-  // self-critique (#231) — 괄호 안·링크 대상·조사가 붙은 경로·따옴표·굵게·코드 펜스 속 `#` 줄: 모두 경로를 내고, 진짜 CHARTER에서 거부된다
+  // self-critique (#231) — 괄호 안·링크 대상·조사가 붙은 경로·따옴표·굵게·코드 펜스 속 `#` 줄: 모두 경로를 내고, 진짜 CHARTER에서 거부된다.
+  // 진짜 CHARTER가 막는 경로여야 한다 — ADR-039(#241)부터 NEVER_AUTOMATE는 판정 로직 템플릿만이다(`templates/factory/**` 전체가 아니다)
   const leaky = {
-    link: "- [harness](templates/factory/harness.toml)",
-    parenthesised: "- harness config (templates/factory/harness.toml)",
-    koreanParticle: "- templates/factory/harness.toml에서",
-    quoted: "- \"templates/factory/harness.toml\"",
-    ideographicComma: "- templates/factory/harness.toml、x",
-    bold: "- **templates/factory/harness.toml**",
-    fencedHashLine: "```\n# note\n```\n- templates/factory/harness.toml",
+    link: `- [merge workflow](${REAL_FORBIDDEN})`,
+    parenthesised: `- merge workflow (${REAL_FORBIDDEN})`,
+    koreanParticle: `- ${REAL_FORBIDDEN}에서`,
+    quoted: `- "${REAL_FORBIDDEN}"`,
+    ideographicComma: `- ${REAL_FORBIDDEN}、x`,
+    bold: `- **${REAL_FORBIDDEN}**`,
+    fencedHashLine: `\`\`\`\n# note\n\`\`\`\n- ${REAL_FORBIDDEN}`,
   };
   const realCharter231 = loadCharter231(ROOT231);
+  expect(realCharter231.never_automate).toContain(REAL_FORBIDDEN_GLOB);
   for (const [name, item] of Object.entries(leaky)) {
     const sectionBody = `## Impact paths\n${item}\n\n## done_when\n- [ ] \`test_1_a\``;
-    expect(impactPathsOf(sectionBody), name).toContain("templates/factory/harness.toml");
+    expect(impactPathsOf(sectionBody), name).toContain(REAL_FORBIDDEN);
     // self-critique (#231) — 정확히 그 경로 하나다: `**…**`를 벗기기 전의 별표 토큰 같은 찌꺼기 항목이 섞이지 않는다
-    expect(impactPathsOf(sectionBody), name).toEqual(["templates/factory/harness.toml"]);
+    expect(impactPathsOf(sectionBody), name).toEqual([REAL_FORBIDDEN]);
     const refused = queueAdmission({ issue: { ...person, body: sectionBody }, charter: realCharter231, ...base });
     expect(refused.ok, name).toBe(false);
-    expect(refused.reasons.join(" "), name).toContain("NEVER_AUTOMATE: templates/factory/harness.toml (glob templates/factory/**)");
+    expect(refused.reasons.join(" "), name).toContain(REAL_FORBIDDEN_REASON);
   }
   // 펜스 밖의 제목은 여전히 절을 끝낸다
   expect(impactPathsOf("## Impact paths\n```\n# note\n```\n- a/b.ts\n## done_when\n- c/d.ts")).toEqual(["a/b.ts"]);
@@ -322,11 +332,11 @@ test("test_231_impact_paths_reads_backticked_and_plain_list_items", () => {
   for (const [name, section] of Object.entries(shapes)) {
     expect(impactPathsOf(`## What\nx\n\n${section}\n## done_when (draft)\n- [ ] \`test_1_a\` — a`.replace(/\n/g, "\r\n")), `crlf ${name}`).toEqual(want);
   }
-  const crlf = "## Impact paths\r\n- templates/factory/harness.toml\r\n- .github/workflows/publish.yml\r\n\r\n## done_when\r\n- [ ] `test_1_a`\r\n";
-  expect(impactPathsOf(crlf)).toEqual(["templates/factory/harness.toml", ".github/workflows/publish.yml"]);
+  const crlf = `## Impact paths\r\n- ${REAL_FORBIDDEN}\r\n- .github/workflows/publish.yml\r\n\r\n## done_when\r\n- [ ] \`test_1_a\`\r\n`;
+  expect(impactPathsOf(crlf)).toEqual([REAL_FORBIDDEN, ".github/workflows/publish.yml"]);
   const crlfRefused = queueAdmission({ issue: { ...person, body: crlf }, charter: realCharter231, ...base });
   expect(crlfRefused.ok).toBe(false);
-  expect(crlfRefused.reasons.join(" ")).toContain("NEVER_AUTOMATE: templates/factory/harness.toml (glob templates/factory/**)");
+  expect(crlfRefused.reasons.join(" ")).toContain(REAL_FORBIDDEN_REASON);
 });
 
 /** 진짜 `:issue` 템플릿의 첫 마크다운 블록(Impact paths가 든 것)을 그대로 꺼내고, 자리표시자를 실제 값으로 채운다. */
@@ -346,12 +356,12 @@ test("test_231_issue_template_impact_paths_are_backticked", async () => {
   expect(impactPathsOf(clean)).toEqual(["client/lib/screens/a.dart", "factory/lib/admission.js"]);
   // 진짜 CHARTER의 NEVER_AUTOMATE에 걸리는 경로를 템플릿대로 적으면 큐 문에서 거부되고, 이유가 경로와 글롭을 말한다
   const realCharter = loadCharter231(ROOT231);
-  expect(realCharter.never_automate).toContain("templates/factory/**");
-  const forbidden = filledIssueTemplate(["factory/lib/admission.js", "templates/factory/harness.toml"]).body;
+  expect(realCharter.never_automate).toContain(REAL_FORBIDDEN_GLOB);
+  const forbidden = filledIssueTemplate(["factory/lib/admission.js", REAL_FORBIDDEN]).body;
   const refused = queueAdmission({ issue: { number: 12, body: forbidden, labels: ["backlog"], author: "LeeHyeonKyu" }, charter: realCharter, ...base });
   expect(refused.ok).toBe(false);
   expect(refused.reasons).toHaveLength(1);
-  expect(refused.reasons[0]).toContain("NEVER_AUTOMATE: templates/factory/harness.toml (glob templates/factory/**)");
+  expect(refused.reasons[0]).toContain(REAL_FORBIDDEN_REASON);
   // 같은 본문에서 금지 경로만 빼면 들어간다(템플릿의 done_when 초안이 job 모양을 채운다)
   const admitted = queueAdmission({ issue: { number: 12, body: clean, labels: ["backlog"], author: "LeeHyeonKyu" }, charter: realCharter, ...base });
   expect(admitted).toEqual({ ok: true, reasons: [], self_generated: false });
