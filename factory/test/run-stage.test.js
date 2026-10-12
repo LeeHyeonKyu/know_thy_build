@@ -10292,3 +10292,109 @@ test("test_286_merge_records_mirror_exemption_count", async () => {
     await policyDep286({ atBase: MARKERS_286, body: "no contract here" }),
   ]) expect(quiet.recorded.filter((l) => /mirror path/.test(l))).toEqual([]);
 });
+
+// ── #287 — triage의 판정 경로 올림이 생산 배선(main → makeCharterReady → makeVerifyStageDep → makeWriteHandoffDep)에 닿는다 ──────
+// verifyStage는 자기 호출자가 넘긴 것만 본다: 러너가 merge와 같은 엔진 판정(`engineAtBase`)과 harness `[protected]`를 넘기지 않으면
+// 단위 테스트는 초록인데 생산 triage는 영원히 올리지 않는다(plan d4). 아래 테스트는 main()이 실제로 도는 사슬을 그대로 몬다.
+import { loadHarness as loadHarness287, loadCharter as loadCharter287 } from "../lib/config.js";
+import { ENGINE_MARKERS as ENGINE_MARKERS287 } from "../lib/non-judge-paths.js";
+
+const REPO_287 = new URL("../..", import.meta.url).pathname;
+const triageOut287 = (impact_paths, extra = {}) => ({ is_error: false, result: JSON.stringify({ schema: "factory.triage.v1", issue: 287, disposition: "ready", tier: "standard", impact_paths, reason: "r", orchestration: "workflow", ...extra }) });
+// main()의 순서 그대로: deps(지연 게터)를 먼저 만들고, charterReady가 base 체크아웃에서 charter·harness·engine을 채운다.
+const mainChain287 = async ({ projectName = "know-thy-build", markers = ENGINE_MARKERS287 } = {}) => {
+  const root = mkdtempSync(join(tmpdir(), "rs-287-root-"));
+  for (const m of markers) { mkdirSync(dirname(join(root, m)), { recursive: true }); writeFileSync(join(root, m), ""); }
+  const realHarness = loadHarness287(REPO_287);
+  let charter, harness, engineAtBase = false, ctxCache = null;                       // main()의 `let`들 — charterReady만 채운다
+  const verify = rs233.makeVerifyStageDep({ root, stage: "triage", getCtx: () => ctxCache, getCharter: () => charter, getHarness: () => harness, getEngine: () => engineAtBase });
+  const ready = rs233.makeCharterReady({
+    root, log: () => {},
+    loadCharter: () => loadCharter287(REPO_287),
+    loadHarness: () => ({ ...realHarness, project: { ...realHarness.project, name: projectName } }),
+    set: (s) => { if ("charter" in s) charter = s.charter; if ("harness" in s) harness = s.harness; if ("engine" in s) engineAtBase = s.engine; },
+  });                                                                                // engineAt은 기본값(mergeEngineAtBase) — merge와 같은 술어
+  await ready();
+  return { root, verify, setCtx: (c) => { ctxCache = c; }, engine: () => engineAtBase };
+};
+const postTriage287 = async ({ verify, setCtx, ctx, out }) => {
+  setCtx(ctx);
+  const posted = [], labels = [];
+  const gh = { comment: async (_issue, body) => posted.push(body) };
+  const deps = baseDeps({
+    buildContext: async () => ctx,
+    claudeP: async () => out,
+    verifyStage: verify,
+    writeHandoff: rs233.makeWriteHandoffDep({ gh, issue: 287, stage: "triage", getCtx: () => ctx }),
+    setTierLabel: async (t) => labels.push(t),
+    transition: async () => ({ ok: true, to: "factory:ready" }),
+    runRecord: () => {},
+  });
+  const code = await runStage({ stage: "triage", issue: 287, deps });
+  const handoffs = parseHandoffs(posted.map((body, i) => ({ id: i, body, createdAt: "2026-10-12T00:00:00Z" })));
+  return { code, labels, posted, handoff: handoffs.find((h) => h.stage === "triage")?.data };
+};
+
+test("test_287_main_wires_engine_and_protected_into_triage_verify", async () => {
+  const ctx = { roster: [], orchestration: "workflow", tier: "standard" };
+  // 엔진 체크아웃(엔진 이름 + 표지 파일 전부): PR #263의 경로(factory/lib/context.js)를 standard로 신고해도 load-bearing으로 게시된다
+  const eng = await mainChain287();
+  expect(eng.engine()).toBe(true);
+  const hit = await postTriage287({ ...eng, ctx, out: triageOut287(["factory/lib/context.js"]) });
+  expect(hit.code).toBe(0);
+  expect([hit.handoff.tier, hit.handoff.tier_declared]).toEqual(["load-bearing", "standard"]);
+  expect(hit.handoff.judge_path_hit).toEqual([{ path: "factory/lib/context.js", source: "judge-path" }]);
+  expect(hit.labels).toEqual(["load-bearing"]);
+  // 같은 체크아웃에서 비판정 경로는 그대로
+  const quiet = await postTriage287({ ...eng, ctx, out: triageOut287(["factory/lib/status.js"]) });
+  expect([quiet.handoff.tier, quiet.handoff.judge_path_hit, quiet.labels]).toEqual(["standard", undefined, ["standard"]]);
+
+  // 채택자 이름, 또는 표지 파일 하나가 없으면 — 같은 출력이 standard로 남는다
+  for (const [label, chain] of [["adopter name", await mainChain287({ projectName: "own-calendar" })], ["missing marker", await mainChain287({ markers: ENGINE_MARKERS287.slice(1) })]]) {
+    expect(chain.engine(), label).toBe(false);
+    const r = await postTriage287({ ...chain, ctx, out: triageOut287(["factory/lib/context.js"]) });
+    expect([r.handoff.tier, r.handoff.tier_declared, r.handoff.judge_path_hit, r.labels], label).toEqual(["standard", undefined, undefined, ["standard"]]);
+  }
+
+  // main()의 실제 배선: deps의 verifyStage는 makeVerifyStageDep이고, 엔진 게터는 charterReady가 채우는 `engineAtBase`다.
+  const src = readFileSync(new URL("../bin/run-stage.js", import.meta.url), "utf8");
+  const mainSrc = src.slice(src.indexOf("async function main()"));
+  const depsBlock = mainSrc.slice(mainSrc.indexOf("const deps = {"), mainSrc.indexOf("\n  };\n", mainSrc.indexOf("const deps = {")));
+  const wired = depsBlock.match(/\n {4}verifyStage:\s*makeVerifyStageDep\(\{([^}]*)\}\)/);
+  expect(wired, "main() must build verifyStage from makeVerifyStageDep").not.toBeNull();
+  expect(wired[1]).toMatch(/getEngine:\s*\(\)\s*=>\s*engineAtBase\s*[,}]?/);
+  expect(wired[1]).toMatch(/getHarness:\s*\(\)\s*=>\s*harness\s*[,}]?/);
+  expect(depsBlock).toMatch(/charterReady:\s*makeCharterReady\(\{\s*root,\s*set:\s*\(s\)\s*=>\s*\{[^}]*if \("engine" in s\) engineAtBase = s\.engine;/);
+});
+
+test("test_287_posted_triage_handoff_names_judge_path_raise", async () => {
+  const eng = await mainChain287();
+  // ctx가 tier_effective·tier_source를 실어도(writer가 그 둘을 덮는다) 올림의 기록은 게시된 코멘트에 남는다
+  const ctx = { roster: [], orchestration: "workflow", tier: "standard", tier_effective: "standard", tier_source: "triage" };
+  const judge = await postTriage287({ ...eng, ctx, out: triageOut287(["docs/TECHNICAL.md", "factory/lib/verify-stage.js", "factory/bin/gates.js"]) });
+  expect(judge.handoff.tier).toBe("load-bearing");
+  expect(judge.handoff.tier_declared).toBe("standard");
+  // 게시된 실효 tier는 러너가 올린 쪽이다 — ctx의 올리기 전 값(standard)을 그대로 실으면 같은 코멘트가 서로 다른 tier를 말한다
+  expect([judge.handoff.tier_effective, judge.handoff.tier_source]).toEqual(["load-bearing", "triage"]);
+  expect(judge.handoff.judge_path_hit).toEqual([{ path: "factory/lib/verify-stage.js", source: "judge-path" }, { path: "factory/bin/gates.js", source: "judge-path" }]);
+  expect(judge.handoff.load_bearing_hit).toBeUndefined();                       // [load_bearing].paths 올림과 구분된다
+  expect(judge.posted.join("\n")).toContain("judge-path");                      // 코멘트만 읽는 운영자도 이유를 본다
+
+  // [load_bearing].paths 올림은 load_bearing_hit으로 — 판정 경로 기록과 나란히, 서로 다른 이름으로
+  const lb = await postTriage287({ ...eng, ctx, out: triageOut287(["factory/bin/run-stage.js"]) });
+  expect(lb.handoff.load_bearing_hit).toEqual([{ path: "factory/bin/run-stage.js", glob: "factory/bin/run-stage.js" }]);
+  expect(lb.handoff.judge_path_hit).toEqual([{ path: "factory/bin/run-stage.js", source: "judge-path" }]);
+  expect([lb.handoff.tier, lb.handoff.tier_declared, lb.handoff.tier_effective, lb.handoff.tier_source]).toEqual(["load-bearing", "standard", "load-bearing", "triage"]);
+
+  // 에이전트가 스스로 judge_path_hit·tier_declared를 적어도, 비판정 경로만 신고했으면 둘 다 게시되지 않고 tier는 신고 그대로
+  const forged = await postTriage287({ ...eng, ctx, out: triageOut287(["factory/lib/status.js", "docs/TECHNICAL.md"], { judge_path_hit: [{ path: "factory/lib/status.js", source: "judge-path" }], tier_declared: "docs" }) });
+  expect(forged.handoff.tier).toBe("standard");
+  expect(forged.handoff.judge_path_hit).toBeUndefined();
+  expect(forged.handoff.tier_declared).toBeUndefined();
+  expect(forged.labels).toEqual(["standard"]);
+  expect([forged.handoff.tier_effective, forged.handoff.tier_source]).toEqual(["standard", "triage"]);   // 올림이 없으면 ctx의 값 그대로
+  // 실제 올림에서는 에이전트 값이 아니라 러너가 계산한 값만 남는다
+  const mixed = await postTriage287({ ...eng, ctx, out: triageOut287(["factory/lib/context.js"], { judge_path_hit: [{ path: "factory/lib/status.js", source: "judge-path" }], tier_declared: "docs" }) });
+  expect(mixed.handoff.judge_path_hit).toEqual([{ path: "factory/lib/context.js", source: "judge-path" }]);
+  expect(mixed.handoff.tier_declared).toBe("standard");
+});

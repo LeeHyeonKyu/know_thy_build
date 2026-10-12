@@ -508,6 +508,12 @@ const isProtectedPath = (f, prot) => matchesAny(prot.factory || [], f) && !match
  * 추가한 것이 아니기 때문이다(fix round 2, N1).
  */
 const isProtectedEntry = ({ path, deleted }, prot) => (!deleted && additiveGlobFor(path, prot) ? false : isProtectedPath(path, prot));
+/**
+ * #287 — 살아 있는(삭제되지 않은) 경로 하나에 대한 `isProtectedEntry` 그대로. triage의 tier 올림이 merge의 보호 경로 판정
+ * (`protectedPaths`)과 **같은 술어**를 쓰도록 내보낸다 — 글롭 규칙을 verify-stage.js에 다시 적지 않는다(규칙이 둘로 갈라지지 않게).
+ * triage는 diff가 아니라 신고된 impact_paths를 보므로 삭제를 모른다: 삭제된 additive_only 파일의 보호는 merge만 본다(#287 non_goal).
+ */
+export const isProtectedLivePath = (path, prot) => isProtectedEntry({ path, deleted: false }, prot || {});
 
 /** 판정 불가 — ok:false에 이유를 한 줄로 싣는다(file은 "-": 특정 파일의 위반이 아니다). */
 const cannotCompute = (reason) => ({ ok: false, violations: [{ file: "-", rule: `integrity could not be computed: ${reason}` }], protected: [], policy: [], tests_allowed: [], checked: { files: [] } });
