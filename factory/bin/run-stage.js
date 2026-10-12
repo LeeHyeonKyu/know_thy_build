@@ -2684,13 +2684,15 @@ export async function scopeInput({ run, cwd, base, issue, plan, maxBytes = SCOPE
  * 그래야 "러너가 verifyStage에 무엇을 넘기는가"(NEVER_AUTOMATE, `[load_bearing].paths`)를 테스트가 실제 배선으로 핀한다.
  * 게터인 이유 — charter·harness는 `charterReady` 뒤에, ctx는 `buildContext` 뒤에 생긴다.
  */
-export function makeVerifyStageDep({ root, stage, getCtx, getCharter, getHarness, qaEvidenceSummary = () => null }) {
+export function makeVerifyStageDep({ root, stage, getCtx, getCharter, getHarness, getEngine = () => false, qaEvidenceSummary = () => null }) {
   return ({ out, gates }) => {
     const ctx = getCtx();
     // 감사 M1 — NEVER_AUTOMATE의 글롭 항목은 CHARTER에서 그대로 온다(컨텍스트를 거치지 않는다:
     // 이 재확인의 요점은 에이전트가 본 것과 **독립적인** 출처라는 데 있다). #254 — `[load_bearing].paths`도
     // 같은 이유로 harness에서 그대로 온다(`tierFloor`가 읽는 바로 그 목록): triage의 tier 재확인 재료다.
-    const v = verifyStage({ stage, out, transcriptText: transcriptTextFor(root, out), agentsLog: readAgentsLog(join(root, ".factory/out/agents.jsonl")), roster: ctx.roster, rolePrefix: ROLE_PREFIX[stage] || "", expectedRounds: ctx.rounds, orchestration: ctx.orchestration, gates, planLimits: ctx.plan, issueBody: ctx.issue?.body, neverAutomate: getCharter()?.never_automate, loadBearing: getHarness()?.load_bearing?.paths ?? [], qaManifest: stage === "review" ? qaEvidenceSummary() : null });
+    // #287 — 엔진 판정(`engineAtBase`, merge와 같은 `isEngineCheckout`을 base에서 굳힌 값)과 harness `[protected]`도 넘긴다:
+    // triage가 merge의 판정 경로 분류(보호-살아있음 → classifyProtected.judge)로 tier를 다시 대는 재료다. 게터가 없으면 false(닫힌 쪽).
+    const v = verifyStage({ stage, out, transcriptText: transcriptTextFor(root, out), agentsLog: readAgentsLog(join(root, ".factory/out/agents.jsonl")), roster: ctx.roster, rolePrefix: ROLE_PREFIX[stage] || "", expectedRounds: ctx.rounds, orchestration: ctx.orchestration, gates, planLimits: ctx.plan, issueBody: ctx.issue?.body, neverAutomate: getCharter()?.never_automate, loadBearing: getHarness()?.load_bearing?.paths ?? [], engine: getEngine() === true, protected: getHarness()?.protected ?? null, qaManifest: stage === "review" ? qaEvidenceSummary() : null });
     // 추출에 성공했으면 `<stage>.json`을 **산출물**로 덮는다 — 사람과 다음 도구가 여는 파일이
     // 디스패처의 산문 섞인 envelope이 아니라 스테이지가 실제로 쓴 객체이도록(envelope은 옆에 남아 있다).
     if (v.ok && v.data) { try { writeFileSync(join(root, ".factory/out", `${stage}.json`), JSON.stringify(v.data, null, 2)); } catch { /* 기록 실패가 스테이지를 죽이지 않는다 */ } }
@@ -4608,7 +4610,7 @@ async function main() {
      */
     syncStageArtifact: (data) => { try { writeFileSync(join(root, ".factory/out", `${stage}.json`), JSON.stringify(data, null, 2)); } catch { /* 기록 실패는 스테이지를 죽이지 않는다 */ } },
     // #254 — 두 dep의 본문은 `makeVerifyStageDep`·`makeWriteHandoffDep`(위)에 있다: 테스트가 같은 배선을 몬다.
-    verifyStage: makeVerifyStageDep({ root, stage, getCtx: () => ctxCache, getCharter: () => charter, getHarness: () => harness, qaEvidenceSummary }),
+    verifyStage: makeVerifyStageDep({ root, stage, getCtx: () => ctxCache, getCharter: () => charter, getHarness: () => harness, getEngine: () => engineAtBase, qaEvidenceSummary }),
     writeHandoff: makeWriteHandoffDep({ gh, issue, stage, getCtx: () => ctxCache }),
     /** triage 전용(KTB-9): 판정된 tier를 라벨로 내보낸다 — 다른 `factory:tier-*`는 같은 호출에서 떨어진다. */
     setTierLabel: (tier) => gh.setTierLabel(issue, tierLabel(tier)),
