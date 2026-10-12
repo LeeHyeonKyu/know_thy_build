@@ -4906,15 +4906,23 @@ dep을 싣는지는 소스 문자열 핀으로 고정하지 않는다(계획 non
 1. `factory integrity <pr>`(`factory/cli/integrity.js`): CI 잡과 **같은 함수**(`integrityCheck`)로 PR **head sha**를 판정하고(diff는
    `<merge-base>...<sha>`, 내용은 `git show <sha>:<path>` — 운영자의 작업 트리가 아니다) `factory/integrity` commit status를 success 또는
    failure로 올린다. 설명은 `local:<login>`(`gh api user`). 러너(`GITHUB_ACTIONS`)에서, 로그인을 모를 때, head 커밋이 클론에 없을 때,
-   merge-base를 못 구할 때는 아무것도 올리지 않는다. — `test_236_local_integrity_posts_the_same_verdict_as_ci_and_refuses_on_a_runner`,
+   merge-base를 못 구할 때는 아무것도 올리지 않는다. 보호 경로만 바꾼 PR은 CI처럼 **success**다 — 보호 경로는 실패가 아니라 알림이고
+   (KTB-5, `bin/integrity.js`), 그 PR의 사람 머지는 merge 스테이지의 `protectedPaths`가 맡는다. plan dw1 문장의 "protected-path fixture는
+   failure"는 같은 항목의 "CI bin과 같은 판정"과 충돌하며, 이 결정은 CI와 같은 판정을 따른다. — `test_236_local_integrity_posts_the_same_verdict_as_ci_and_refuses_on_a_runner`,
    `test_236_local_integrity_judges_the_pr_head_sha_not_the_worktree`
 2. `factory run merge <issue>`: 운영 세션(러너가 아님)만 merge 스테이지를 로컬에서 돌린다("merge는 로컬 금지" → "운영 세션에서만 로컬
-   허용"). `cli/run.js`가 `FACTORY_OPERATOR_MERGE=1`을 싣고, run-stage는 `GITHUB_ACTIONS`가 env에 있으면(빈 값도) 그 표식을 무시한다
-   (`isOperatorMerge`) — 위조한 표식으로도 러너는 창을 연다. env는 러너 위의 프로세스가 지울 수 있으므로 그것은 첫 거름망일 뿐이고, 문은
-   행위자 검사다: 머지하는 계정(`gh api user`)이 팩토리 계정이거나 사람(`User`)이 아니면 거부한다. `--remote`는 그대로다.
+   허용"). `cli/run.js`가 `FACTORY_OPERATOR_MERGE=1`을 싣고, run-stage는 러너 표식 — `GITHUB_ACTIONS`·`GITHUB_RUN_ID`·`RUNNER_TEMP`
+   (GitHub이 모든 러너 스텝에 싣고 `$GITHUB_ENV`로 덮을 수 없다), merge 잡 스텝 env의 `FACTORY_TWO_ACTOR`·`FACTORY_RUNNER_ID=gha-…` — 중
+   하나라도 env에 있으면(빈 값도) 그 표식을 무시한다(`isOperatorMerge`) — 위조한 표식으로도 러너는 창을 연다. 두 배우 모드의 머지 PAT은
+   팩토리 로그인 목록에 없는 사람 계정이라 행위자 검사로는 러너를 가르지 못한다; 그래서 표식이 여럿이다. 그것을 전부 지울 수 있는 것은
+   merge 스텝 안에서 도는 엔진 코드 자신뿐이고, 그 너머는 이 거름망의 한계다. 행위자 검사는 그대로다: 머지하는 계정(`gh api user`)이
+   팩토리 계정이거나 사람(`User`)이 아니면 거부한다. 운영 모드의 팩토리 계정은 운영자 env의 `FACTORY_BOT_LOGIN`이 있으면 그것만이고,
+   없으면 러너 하트비트(`runner: gha-…`)의 작성자가 정확히 한 계정일 때만 그 계정이다 — 하트비트의 runner 필드는 코멘트 본문이라 위조될 수
+   있으므로 작성자가 둘 이상이면 거부한다. `--remote`는 그대로다.
    — `test_236_local_merge_runs_merge_stage_with_the_operator_token_and_no_veto_wait`
 3. **ADR-033 개정**: merge-stage의 새 dep `operatorPresent`(정확히 `true`일 때만)는 거부권 창의 **기다림 하나**만 지운다 — 창 상태·알림 코멘트·
-   라벨 폴링·sleep이 없다. 창 앞뒤의 차단기, 창 자리의 리뷰 재검증(H1b 포함), mergeGates, ready 뒤 재확인(head가 움직였는지 포함)은
+   라벨 폴링·sleep이 없다. 다만 이미 서 있는 `factory:veto`는 기다림이 아니므로 **한 번** 읽는다: 붙어 있으면 사람에게 넘기고, 읽지 못하면
+   막힌 것으로 본다(rework sec1). 창 앞뒤의 차단기, 창 자리의 리뷰 재검증(H1b 포함), mergeGates, ready 뒤 재확인(head가 움직였는지 포함)은
    그대로이고 각각 이름을 대고 거부한다. H1b는 풀리지 않는다: `factory/review`·`factory/gates`는 여전히 팩토리 계정이 올린 것이어야 하고,
    로컬 머지의 거부 사유가 그 말을 덧붙인다. dep이 없으면 같은 PR이 오늘처럼 창을 연다. 근거: 로컬 머지를 부른 운영 세션이 곧 거부권자다
    (소유자에게 남는 것은 revert·`factory:veto`·차단기 리셋 — ADR-039 §4). — `test_236_operator_present_skips_only_the_veto_window`

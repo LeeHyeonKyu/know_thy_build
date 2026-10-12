@@ -82,6 +82,10 @@ test("test_236_local_integrity_posts_the_same_verdict_as_ci_and_refuses_on_a_run
   const { root, shas } = await fixtureRepo();
 
   // Off a runner: one factory/integrity status on the PR head, with the state CI's integrityCheck gives that head.
+  // Contract note (#236 dw1): dw1's text says "failure on a … protected-path fixture", but its governing clause is "matches the verdict
+  // integrityCheck gives in the CI bin", and CI posts success there — protected paths are a notice, not a failure (KTB-5,
+  // factory/bin/integrity.js:22; factory/lib/integrity.js:11-19), and the human merge they require is the merge stage's
+  // protectedPaths hand-off (factory/lib/merge-stage.js:656), not this check. CI parity wins; ADR-044 §1 records it.
   const expected = { clean: "success", violating: "failure", lessons: "failure", protectedOnly: "success" };
   for (const [kind, sha] of Object.entries(shas)) {
     const ci = await ciVerdict(root, sha);
