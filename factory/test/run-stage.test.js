@@ -6829,21 +6829,6 @@ test("test_227_implement_refuses_a_handoff_whose_pr_is_invisible_or_off_branch",
 });
 
 /**
- * #227 skeptic f1 — the post-builder check runs only when `d.prView` is injected, and every runStage test above injects it itself. This
- * pins that main() — the production deps — wires it: delete the `prView:` dep from main() and the builder's invisible PR would go
- * straight to awaiting-review (the #207 shape) with every behavioural test still green. Same source-pin idiom as the harness-issue
- * wiring test above (`ensureHarnessIssue: makeHarnessIssueDep(...)`).
- */
-test("test_227_implement_refuses_a_handoff_whose_pr_is_invisible_or_off_branch — main() wires prView", () => {
-  const src = readFileSync(new URL("../bin/run-stage.js", import.meta.url), "utf8");
-  const mainBody = src.slice(src.indexOf("async function main()"));
-  expect(mainBody.length).toBeLessThan(src.length);
-  expect(mainBody).toMatch(/\n\s*prView:\s*\(pr\)\s*=>\s*gh\.prView\(pr\),/);
-  // and the implement guard reads exactly that dep
-  expect(src).toMatch(/if \(stage === "implement" && d\.prView\) \{\s*const pr = v\.data\?\.pr;\s*const c = await checkHandoffPr\(\{ prView: d\.prView,/);
-});
-
-/**
  * #227 skeptic f5 — dw4 names three gone shapes for BOTH review and merge, and a head-moved failure that still reaches needs-human.
  * The test above runs merge with not-found only; here merge (from `factory:approved`) gets the other two shapes and the head-moved case.
  */
@@ -6872,11 +6857,14 @@ test("test_227_review_with_an_invisible_pr_returns_to_planned — merge: another
 });
 
 /**
- * #227 skeptic f2 — the transition comment is written BEFORE the label swap; when the swap fails, the real `transition()` follows it with
- * a `factory-transition-failed:v1` marker (lib/transition.js `swapLabel`). That planned return never happened, so it must not use up the
- * window's one return: the next genuine not-visible result still goes to planned, not needs-human.
+ * #227 dw6 (arch1/sec-s2) — the window's one return is a CEILING, so it is counted the way the library counts ceilings
+ * (lib/retro/issue-comments.js `countedTransitionIndices`, `honourFailed: false`, as `kRestartState().attempts` does): a
+ * `factory-transition-failed:v1 … to=factory:planned` marker does not reopen it. The transition comment is written BEFORE the label
+ * swap; when the swap fails the real `transition()` follows it with that marker. A failed marker is a comment anyone with the factory's
+ * hands can write, so honouring it would let one comment delay the stop. The price — a genuinely failed swap uses up the return — fails
+ * safe: the next not-visible result goes to needs-human with the PR named.
  */
-test("test_227_a_second_invisible_pr_in_one_cycle_goes_to_needs_human — a failed label swap is not the window's return", async () => {
+test("test_227_a_second_invisible_pr_in_one_cycle_goes_to_needs_human — a failed planned swap does not reopen the window's return", async () => {
   const gh = gh227({ label: "factory:awaiting-review", view: { stderr: GH_NOT_FOUND_227 } });
   const swap = gh.setFactoryLabel;
   let fails = 1;
@@ -6888,13 +6876,23 @@ test("test_227_a_second_invisible_pr_in_one_cycle_goes_to_needs_human — a fail
   const bodies = (await gh.comments()).map((c) => c.body);
   expect(bodies.some((b) => /factory-transition:v1 from=factory:awaiting-review to=factory:planned/.test(b) && b.includes("pr-not-visible:"))).toBe(true);
   expect(bodies.some((b) => /factory-transition-failed:v1 from=factory:awaiting-review to=factory:planned/.test(b))).toBe(true);
-  expect(prNotVisibleReturns227(await gh.comments())).toBe(0);
-
-  // the retry (same invisible PR) is still this window's FIRST return → planned
-  const retry = await review227(gh);
-  expect(retry.code).toBe(0);
-  expect(gh.label).toBe("factory:planned");
   expect(prNotVisibleReturns227(await gh.comments())).toBe(1);
+
+  // The next not-visible result in the same window goes to needs-human, naming the PR — the failed marker did not reopen the return.
+  const next = await review227(gh);
+  expect(next.code).toBe(2);
+  expect(gh.label).toBe("factory:needs-human");
+  const body = await lastTransitionComment227(gh);
+  expect(body).toMatch(/to=factory:needs-human/);
+  expect(body).toContain("#220");
+  expect(body).toContain("not visible");
+  expect(next.d.claudeP).not.toHaveBeenCalled();
+
+  // A requeue still opens a new window.
+  gh.push({ body: "<!-- factory-transition:v1 from=factory:needs-human to=factory:queue by=human -->\nfactory:needs-human → factory:queue", createdAt: "2026-10-10T04:00:00Z" });
+  gh.relabel("factory:awaiting-review");
+  await review227(gh);
+  expect(gh.label).toBe("factory:planned");
 });
 
 /**

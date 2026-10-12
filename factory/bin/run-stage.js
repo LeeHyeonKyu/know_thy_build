@@ -714,7 +714,7 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runAt
     if ((stage === "review" || stage === "merge") && d.checkoutHead) {
       const co = await d.checkoutHead();
       /**
-       * #227 (ADR-039) — a handoff PR that is definitely gone (not found, another head branch, CLOSED) is not a review/merge failure a
+       * #227 (ADR-043) — a handoff PR that is definitely gone (not found, another head branch, CLOSED) is not a review/merge failure a
        * person can act on: the code is on the branch and only the PR is missing, so the issue goes back to `factory:planned` and
        * implement opens a new PR (no session here). Once per requeue window — the second goes to needs-human (`co.again`, read from
        * the marker `prNotVisibleReason` wrote). Every other checkout failure (head moved, a transient gh error, MERGED) is below, unchanged.
@@ -3377,7 +3377,7 @@ export function makeTransitionDep({ gh, issue, stage, rehearsal, admission, buil
 }
 
 /**
- * #227 (ADR-039) — **the not-visible return's marker, written and read here.** review/merge send a definitely gone handoff PR back to
+ * #227 (ADR-043) — **the not-visible return's marker, written and read here.** review/merge send a definitely gone handoff PR back to
  * `factory:planned` with a reason that starts with this tag; the transition comment carries the reason verbatim, so the next
  * not-visible result finds the first one in the issue's comments. One return per requeue window (`commentsSinceRequeue`, the same
  * window K uses); the second goes to needs-human, so review → planned → implement → review cannot loop.
@@ -3386,14 +3386,16 @@ export const PR_NOT_VISIBLE_TAG = "pr-not-visible:";
 export const prNotVisibleReason = ({ pr, why }) => `${PR_NOT_VISIBLE_TAG} PR #${pr} ${why} — back to factory:planned so implement opens a new PR (once per requeue window, #227)`;
 export const prNotVisibleAgainReason = ({ pr, why }) => `PR #${pr} ${why} — not visible again after this requeue window's one return to factory:planned; a human must decide (#227)`;
 /**
- * How many not-visible returns to planned happened since the last requeue. Only a completed `→ factory:planned` transition counts: the
- * transition comment is written before the label swap, and a swap that failed is cancelled by the `factory-transition-failed:v1` marker
- * that follows it — the same cancellation rule K uses (`countedTransitionIndices`, one rule, not a second parser), then filtered to the
- * transitions whose reason carries the tag.
+ * How many not-visible returns to planned happened since the last requeue (`countedTransitionIndices`, one rule, not a second parser,
+ * then filtered to the transitions whose reason carries the tag). This count is a CEILING — it is what stops review → planned →
+ * implement → review — so it is counted with `honourFailed: false`, the library's ceiling rule (lib/retro/issue-comments.js, the count
+ * `kRestartState().attempts` uses): a `factory-transition-failed:v1` marker is a comment, and a ceiling must sit on a count that only
+ * grows as comments are added, so a marker can bring the stop forward but never delay it. The price: a genuinely failed label swap
+ * uses up the window's one return, and the next not-visible result goes to needs-human (fail-safe).
  */
 export function prNotVisibleReturns(comments) {
   const win = commentsSinceRequeue(comments);
-  return countedTransitionIndices(win, "factory:planned").filter((i) => String(win[i]?.body ?? "").includes(PR_NOT_VISIBLE_TAG)).length;
+  return countedTransitionIndices(win, "factory:planned", { honourFailed: false }).filter((i) => String(win[i]?.body ?? "").includes(PR_NOT_VISIBLE_TAG)).length;
 }
 
 export function makeCheckoutHead({ gh, run, root, issue }) {
