@@ -569,9 +569,12 @@ if (plan) {
           ...superseded,
           // 1.4.43: a surviving sign-off objection is injected by the WORKFLOW, after synthesis — like the
           // maturity note (L39) it needs an id and a severity or the validator names it by position and
-          // nothing can ever cover it. #243 (P-13, M-7): it is `low` — a medium `signoff-<role>` was always
-          // rejected and forced a repair turn that could not change the vote. The objection is not hidden:
-          // it travels as the top-level `signoff_objections` entry above, which is where it is surfaced.
+          // nothing can ever cover it. #243 (P-13, M-7): it is `low` — the issue (#299) lands this downgrade as
+          // contracted and test_243_* pin it. Since #239 the validator exempts an exact `signoff-<role>` at any
+          // severity, so medium would not force a repair turn either; the trade-off of `low` is that the engine's
+          // sweep (normalizePlanHandoff) skips it, so no `plan: unresolved sign-off objection` run-record line is
+          // written for it. The objection is surfaced as the top-level `signoff_objections` entry above, which
+          // verifyStage posts unchanged in the handoff.
           ...objections.map((o) => ({
             id: `signoff-${o.role}`,
             severity: 'low',
