@@ -2737,7 +2737,9 @@ export async function reworkScopeInput({ run, cwd, base, ctx, reviewRounds, test
   const exportsIn = (lines) => new Set(lines.map((l) => REWORK_EXPORT_RE.exec(l)?.[1]).filter(Boolean));
   const newExports = [], newTestIds = [];
   for (const [path, lines] of addedLinesByPath(diff.out)) {
-    const exp = newFiles.has(path) || where.includes(path) ? new Set() : exportsIn(lines);   // a new file is judged as a file
+    // The `where` exemption lives in ONE place, the judge (`judgeReworkScope`) — not here too. A new file is judged as a file:
+    // its exports are never compared (the `newFiles` branch below carries only its ids).
+    const exp = exportsIn(lines);
     const ids = tests.has(path) ? [...idsIn(lines.join("\n"))].filter((id) => !planIds.has(id)) : [];
     if (!exp.size && !ids.length) continue;
     if (newFiles.has(path)) { for (const id of ids) newTestIds.push({ path, id }); continue; }

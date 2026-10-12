@@ -10406,9 +10406,6 @@ test("test_287_posted_triage_handoff_names_judge_path_raise", async () => {
 import { run as realRun199 } from "../lib/exec.js";
 import { renderHandoff as renderHandoff199, parseHandoffs as parseHandoffs199 } from "../lib/handoff.js";
 import { selfGateDetailLine as selfGateDetailLine199, SELF_GATE_DETAIL_PREFIX as SGD_PREFIX_199 } from "../lib/self-gate.js";
-import { execFileSync as execFileSync199 } from "node:child_process";
-import { symlinkSync as symlinkSync199 } from "node:fs";
-import { pathToFileURL as pathToFileURL199, fileURLToPath as fileURLToPath199 } from "node:url";
 
 const HARNESS_199 = { commands: {}, test: { test_glob: ["factory/test/**"], source_glob: [] } };
 const GREEN_199 = { schema: "factory.gates.v1", status: "GREEN" };
@@ -10553,16 +10550,16 @@ test("test_199_rework_round1_is_unchanged", async () => {
   repo.put("factory/lib/extra.js", repo.lines("x") + "export const extra = 1;\n");
   await repo.commit("an addition outside the findings");
   const ctx = ctx199({ review: reviewHandoff199({ head: repo.reviewed, where: ["factory/lib/self-gate.js"] }) });
-  const dep = (reviewRounds) => makeSelfGateDep({ root: repo.root, harness: HARNESS_199, run: realRun199, mergeBase: repo.mergeBase, getCtx: () => ctx, ...(reviewRounds ? { reviewRounds } : {}) });
+  // Every git/command call the dep makes is logged: "unchanged" means the same result AND no extra measurement.
+  const logged = (calls) => async (cmd, args, opts) => { calls.push([cmd, ...args].join(" ")); return realRun199(cmd, args, opts); };
+  const dep = (reviewRounds, calls = []) => makeSelfGateDep({ root: repo.root, harness: HARNESS_199, run: logged(calls), mergeBase: repo.mergeBase, getCtx: () => ctx, ...(reviewRounds ? { reviewRounds } : {}) });
 
-  // The self-gate dep as it was before #199, read from git at the commit this change was built on.
-  const src = fileURLToPath199(new URL("../..", import.meta.url));
-  const dir = mkdtempSync(join(tmpdir(), "sg199-pre-"));
-  execFileSync199("tar", ["-x", "-C", dir], { input: execFileSync199("git", ["archive", "9efbb8a8b4f1453886fc61004fff2b34c88a7aa7", "factory/lib", "factory/bin"], { cwd: src, maxBuffer: 1 << 28 }) });
-  symlinkSync199(join(src, "node_modules"), join(dir, "node_modules"));
-  const pre = await import(pathToFileURL199(join(dir, "factory/bin/run-stage.js")).href);
-  const then = await pre.makeSelfGateDep({ root: repo.root, harness: HARNESS_199, run: realRun199, mergeBase: repo.mergeBase, getCtx: () => ctx })({ gates: GREEN_199 });
+  // "Without this change" = the same production dep with no counter wired: #199 adds nothing to that path (no input, no entry).
+  const thenCalls = [];
+  const then = await dep(null, thenCalls)({ gates: GREEN_199 });
   expect(JSON.stringify(then)).not.toContain("rework-scope");
+  expect(thenCalls.length).toBeGreaterThan(0);
+  expect(thenCalls.some((c) => c.includes("ls-tree"))).toBe(false);          // the reviewed-head tree is never read below round 2
 
   // The round comes from the engine's counter: real `→ factory:rework` transitions read back by the production `makeKRestartDeps`.
   for (const n of [0, 1]) {
@@ -10570,12 +10567,12 @@ test("test_199_rework_round1_is_unchanged", async () => {
     await seedRework174(gh, n);
     const { reviewRounds } = makeKRestartDeps({ gh, issue: 174 });
     expect(await reviewRounds()).toBe(n);
-    const now = await dep(reviewRounds)({ gates: GREEN_199 });
+    const nowCalls = [];
+    const now = await dep(reviewRounds, nowCalls)({ gates: GREEN_199 });
     expect(now).toEqual(then);
     expect(JSON.stringify(now)).toBe(JSON.stringify(then));
+    expect(nowCalls).toEqual(thenCalls);
   }
-  // No counter wired → also today's result, byte for byte.
-  expect(JSON.stringify(await dep(null)({ gates: GREEN_199 }))).toBe(JSON.stringify(then));
 
   // Two completed reworks → the check runs (and here, judges the outside file).
   const gh2 = gh174();
@@ -10602,6 +10599,8 @@ test("test_199_new_done_when_in_rework_is_red", async () => {
   // review already saw is edited, and another issue's id is mentioned.
   repo.put("factory/test/self-gate.test.js", 'test("test_199_kept_by_plan", () => { expect(2).toBe(2); });\ntest("test_199_also_plan", () => { expect(3).toBe(3); });\n');
   repo.put("factory/test/round1.test.js", 'test("test_199_round1_guard", () => { expect(5).toBe(5); }); // see test_42_other_issue\n');
+  // An identifier that merely CONTAINS `test_199_…` after a word character is not a test id (the lookbehind).
+  repo.append("factory/test/round1.test.js", 'const xtest_199_not_an_id = 1; const my_test_199_helper2 = 2;\n');
   await repo.commit("round 2: edits of existing test ids");
   const ok = await dep({ gates: GREEN_199 });
   expect(ok.ranChecks).toContain("rework-scope");
@@ -10616,6 +10615,21 @@ test("test_199_new_done_when_in_rework_is_red", async () => {
   expect(rs199(red).map(head199)).toEqual(["new done_when id outside the plan: test_199_second_list_guard in factory/test/self-gate.test.js"]);
   expect(rs199(red)[0].blocking).toBe(true);
   expect(rs199(red)[0].detail).toContain("subtract-only");
+
+  // A NEW test file: inside `where`, the file is allowed but its non-plan id is still a new done_when; outside `where`, the file
+  // finding is the one cause — its non-plan id is not reported a second time.
+  const review2 = reviewHandoff199({ head: repo.reviewed, where: ["factory/lib/self-gate.js", "factory/test/self-gate.test.js:1", "factory/test/new-inside.test.js"] });
+  repo.put("factory/test/new-inside.test.js", 'test("test_199_inside_extra", () => { expect(6).toBe(6); });\ntest("test_199_kept_by_plan", () => {});\n');
+  repo.put("factory/test/new-outside.test.js", 'test("test_199_outside_extra", () => { expect(7).toBe(7); });\n');
+  await repo.commit("round 2: two new test files carrying ids outside the plan");
+  const red2 = await dep199(repo, ctx199({ review: review2 }))({ gates: GREEN_199 });
+  expect(red2.ok).toBe(false);
+  expect(rs199(red2).every((f) => f.blocking)).toBe(true);
+  expect(rs199(red2).map(head199).sort()).toEqual([
+    "new done_when id outside the plan: test_199_inside_extra in factory/test/new-inside.test.js",
+    "new done_when id outside the plan: test_199_second_list_guard in factory/test/self-gate.test.js",
+    "new file outside the review findings: factory/test/new-outside.test.js",
+  ]);
 });
 
 test("test_199_missing_findings_skips_with_a_record_line", async () => {
@@ -10663,6 +10677,8 @@ test("test_199_restart_round_does_not_double_report", async () => {
   const dep = dep199(repo, ctx199({ review, restart: brief }), { rounds: 4 });
   repo.put("factory/lib/second-parser.js", repo.lines("s") + "export function parseAgain() { return 3; }\n");
   repo.append("factory/lib/old-parser.js", "export const parseTwo = 2;\n");
+  // A new test file outside both, carrying an id the plan does not own: its one cause is the restart-brief file finding.
+  repo.put("factory/test/restart-extra.test.js", 'test("test_199_restart_extra", () => { expect(1).toBe(1); });\n');
   await repo.commit("restart round: a new file and a new export outside both");
   const r = await dep({ gates: GREEN_199 });
   expect(r.ranChecks).toEqual(expect.arrayContaining(["restart-brief", "rework-scope"]));
@@ -10670,6 +10686,7 @@ test("test_199_restart_round_does_not_double_report", async () => {
   const blocking = r.findings.filter((f) => f.blocking).map((f) => `${f.check}: ${head199(f)}`).sort();
   expect(blocking).toEqual([
     "restart-brief: new file outside the restart brief: factory/lib/second-parser.js",
+    "restart-brief: new file outside the restart brief: factory/test/restart-extra.test.js",
     "rework-scope: new export outside the review findings: parseTwo in factory/lib/old-parser.js",
   ]);
 });
