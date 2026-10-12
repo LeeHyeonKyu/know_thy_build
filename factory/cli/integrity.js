@@ -31,8 +31,9 @@ export async function integrityCommand({ root, argv = [], io, run = realRun, env
     io.err("factory integrity refused — no env was injected, so this cannot tell an operator session from a CI runner (it never reads process.env on its own). Nothing was posted.");
     return 2;
   }
-  if (env.GITHUB_ACTIONS) {
-    io.err("factory integrity refused — GITHUB_ACTIONS is set, so this is a CI runner: a stage never posts its own factory/integrity (H1b); the CI job posts the check there. Nothing was posted.");
+  // 러너는 GITHUB_ACTIONS가 env에 **있는** 것이다 — 빈 값도 러너다(sec1; cli/run.js·run-stage isOperatorMerge와 같은 규칙).
+  if (env.GITHUB_ACTIONS !== undefined) {
+    io.err("factory integrity refused — GITHUB_ACTIONS is set (even blank), so this is a CI runner: a stage never posts its own factory/integrity (H1b); the CI job posts the check there. Nothing was posted.");
     return 2;
   }
   const arg = argv.find((a) => !String(a).startsWith("-"));

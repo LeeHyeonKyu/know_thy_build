@@ -291,3 +291,21 @@ test("test_236_local_integrity_env_is_injected_not_read_from_process_env", async
     if (saved === undefined) delete process.env.GITHUB_ACTIONS; else process.env.GITHUB_ACTIONS = saved;
   }
 });
+
+test("test_236_local_integrity_refuses_a_runner_whose_github_actions_is_blank", async () => {
+  // dw1, the runner half: a runner is GITHUB_ACTIONS *present* in env, even blank — the same rule as `factory run merge`
+  // and run-stage's isOperatorMerge (sec1). `GITHUB_ACTIONS= factory integrity <pr>` on a runner must post nothing.
+  const { root, shas } = await fixtureRepo();
+  for (const env of [{ GITHUB_ACTIONS: "" }, { GITHUB_ACTIONS: "", FACTORY_OPERATOR_MERGE: "1" }, { GITHUB_ACTIONS: "false" }]) {
+    const gh = fakeGh({ sha: shas.clean });
+    const { code, o } = await integrity({ root, gh, env });
+    expect(code, JSON.stringify(env)).not.toBe(0);
+    expect(o.err.join("\n"), JSON.stringify(env)).toMatch(/GITHUB_ACTIONS/);
+    expect(gh.setStatus, JSON.stringify(env)).not.toHaveBeenCalled();
+    expect(gh.viewerLogin, JSON.stringify(env)).not.toHaveBeenCalled();
+  }
+  // The other env path: GITHUB_ACTIONS absent — the operator session posts the verdict.
+  const gh = fakeGh({ sha: shas.clean });
+  expect((await integrity({ root, gh, env: {} })).code).toBe(0);
+  expect(gh.setStatus).toHaveBeenCalledTimes(1);
+});
