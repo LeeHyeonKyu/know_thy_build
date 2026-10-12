@@ -662,7 +662,7 @@ const u0For286 = (familyPath) => [
   "--- a/src/app.js", "+++ b/src/app.js", "@@ -2,0 +3,1 @@", "+import 'smol-toml';",
 ].join("\n");
 
-test("test_must_not_touch_ignores_runner_owned_mirror_paths", async () => {
+test("test_must_not_touch_ignores_runner_owned_mirror_paths — #286", async () => {
   const { mirrorLine } = await import("../bin/run-stage.js");
   const { MUST_NOT_TOUCH_RULE, MUST_NOT_ADD_RULE } = await import("../lib/integrity.js");
   const family = await mirrorFamily286();

@@ -4219,7 +4219,7 @@ const policyRun286 = async (violations) => {
   return { code, to, reason, body: comment.mock.calls[0]?.[1] ?? "", lines, d };
 };
 
-test("test_merge_stage_names_must_not_violations_in_their_own_bucket", async () => {
+test("test_merge_stage_names_must_not_violations_in_their_own_bucket — #286", async () => {
   const { MUST_NOT_TOUCH_RULE, MUST_NOT_ADD_RULE } = await import("../lib/integrity.js");
   const violations = (await mustNot286())([".github/workflows/x.yml", "src/a.js"]);
   expect(violations.map((v) => [MUST_NOT_TOUCH_RULE.test(v.rule), MUST_NOT_ADD_RULE.test(v.rule)])).toEqual([[true, false], [false, true]]);
