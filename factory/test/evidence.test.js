@@ -517,8 +517,8 @@ test("test_195_evidence_section_is_idempotent", async () => {
   // (c) A timeout leaves the PR body unwritten. This goes through the real gh.js adapter, so the bound is the adapter's own:
   // the REST read hangs, it is killed through its spawn signal, it is never retried, the REST PATCH never runs, and the rejection
   // names the edit step. On the merge stage that rejection is the one FAIL line, and the merge still happens.
-  // #217 dw4 (plan: "the real-adapter hang case is moved to `gh api`") — the PR-body read/write left `gh pr view`/`gh pr edit`
-  // (GraphQL, `read:org`) for REST `repos/<repo>/pulls/<n>`, so the matchers and the call pins below follow that shape.
+  // #217 dw4 (plan: "the real-adapter hang case is moved to `gh api`") — the PR-body read/write moved from `gh pr view`/`gh pr edit`
+  // to REST `repos/<repo>/pulls/<n>` (only the `gh pr edit` write was observed failing), so the matchers and call pins follow that shape.
   {
     const childSignals = [];
     const run = makeFakeRun([
@@ -1285,9 +1285,10 @@ test("test_208_fixed_must_fix_renders_a_commit_link", async () => {
 });
 
 // ── #217 — the PR body is read and written over REST (`repos/<repo>/pulls/<n>`), which needs only `repo` scope ─────────────────
-// Run 37348881584 (#200's merge): `gh pr edit` resolves `viewer.login` over GraphQL and needs `read:org`, which the bot token
-// does not have, so no PR ever got its Factory evidence. The fake below behaves like that token: every GraphQL-backed PR-body
-// command fails with the read:org error, and only the REST resource reads and stores the body (from the parsed stdin JSON).
+// Run 37348881584 (#200's merge): the read step passed and the write failed at `edit:` with GraphQL's read:org error, so no PR
+// ever got its Factory evidence. The fake below refuses every `gh pr view`/`gh pr edit` and every `gh api graphql` call (not a
+// claim about which of them needs read:org — it is so that a regression back to any of them fails on behaviour), and only the
+// REST resource reads and stores the body (from the parsed stdin JSON).
 const READ_ORG_DENIED = { code: 1, stdout: "", stderr: "GraphQL: Your token has not been granted the required scopes to execute this query. The 'login' field requires one of the following scopes: ['read:org'], but your token has only been granted the: ['repo', 'workflow', 'write:discussion'] scopes." };
 const PULL_217 = /^repos\/acme\/app\/pulls\/(\d+)$/;
 function repoScopeOnlyGh217({ body, hangGet = false, patchFail = null } = {}) {
@@ -1353,6 +1354,7 @@ test("test_217_pr_evidence_is_written_with_rest_patch_not_gh_pr_edit", async () 
 
 test("test_217_pr_body_round_trip_is_byte_exact_and_idempotent", async () => {
   const starts = [null, "", "Closes #184", "Closes #184\n", "@/etc/passwd", "true", "123", "> quoted\n> second $(rm -rf /)\nCloses #184\n", "변경 요약: PR 본문 쓰기를 REST로 옮긴다.\nCloses #184\n", "Line one\r\nLine two\r\nCloses #184\r\n"];
+  const sections = [];
   for (const start of starts) {
     const name = JSON.stringify(start);
     const { state, gh } = repoScopeOnlyGh217({ body: start });
@@ -1368,11 +1370,16 @@ test("test_217_pr_body_round_trip_is_byte_exact_and_idempotent", async () => {
     expect(first.slice(src.length, at), name).toMatch(/^\n{0,2}$/);
     expect(first.endsWith(EVIDENCE_END), name).toBe(true);
     expect(first.slice(0, at).includes("null"), name).toBe(false);
+    // dw2: the stored body never contains the literal text "null" anywhere — not before the section, not inside it, not after it.
+    expect(first.includes("null"), name).toBe(false);
+    // The section itself is the same bytes whatever the author's text was (a null start must not leak into it).
+    sections.push(first.slice(at));
     // A second publish of the same evidence leaves the stored body exactly as it was.
     await deps.publishPrEvidence({ pr: 31, route: "merge", gates: LIVE_GATES, gatesRerun: false });
     expect(state.body, name).toBe(first);
     expect(state.patches, name).toBe(2);
   }
+  expect(new Set(sections).size).toBe(1);
 });
 
 test("test_217_hung_rest_read_is_killed_and_no_write_lands", async () => {

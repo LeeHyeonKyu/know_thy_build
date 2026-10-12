@@ -5706,8 +5706,8 @@ test("test_196_crash_after_handoff_never_tells_owner_to_requeue", async () => {
 // ── #195 — run-stage wires the PR-body evidence through the gh.js adapter ──────────────────────────────────────────────────
 // PR-body I/O is the runner's: `gh.prBody` (REST GET `repos/<repo>/pulls/<n>`) read immediately before `gh.editPrBody`
 // (REST PATCH, `{body}` JSON on stdin — never a shell string), each with a timeout and no retry.
-// #217 dw3 (plan: "the test_195 argv assertions are moved to the new shape, with no `pr edit` fallback kept") — `gh pr view` /
-// `gh pr edit` need `read:org` over GraphQL, which the bot token lacks; the argv pins below follow the REST shape.
+// #217 dw3 (plan: "the test_195 argv assertions are moved to the new shape, with no `pr edit` fallback kept") — the PR-body
+// read and write both moved to the REST `pulls/<n>` resource; the argv pins below follow the REST shape.
 import { makePrEvidenceDeps } from "../bin/run-stage.js";
 import { makeGh as makeGh195 } from "../lib/gh.js";
 import { EVIDENCE_START as EVIDENCE_START_195 } from "../lib/evidence.js";
