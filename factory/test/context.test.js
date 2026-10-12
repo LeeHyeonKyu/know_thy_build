@@ -744,6 +744,106 @@ test("test_174_builder_context_takes_the_brief_bound_to_the_restart_transition",
   expect(loaded.k_restart_brief.paths).toEqual(["factory/lib/self-gate.js"]);
 });
 
+/**
+ * #238 (P-14, M-8) dw1 — the plan repair turn carries the **whole rejected plan** next to the reasons. The chain is the real one:
+ * runStage → makeBuildContextDep (main()'s dep) → buildContext → `loaded.json` + every `context.<role>.json`, and the verdict comes
+ * from the real `verifyStage` (its `v.data` is the object the repair turn must see). `plan_repair` stays today's string[] — the
+ * shipped workflow tests `Array.isArray(loaded.plan_repair)` — and the plan rides in the sibling key `plan_repair_previous`.
+ */
+import { verifyStage as verifyStage238 } from "../lib/verify-stage.js";
+const out238 = (plan) => ({ is_error: false, result: "The workflow returned:\n```json\n" + JSON.stringify(plan) + "\n```" });
+const plan238 = (over = {}) => ({
+  schema: "factory.plan.v1", issue: 238, tier: "standard", roles: ["synthesizer", "skeptic"], rounds: 2,
+  // long fields on purpose: a carried plan that was cut short would not deep-equal the verdict's object.
+  done_when: Array.from({ length: 6 }, (_, i) => ({ id: `dw${i + 1}`, text: `behaviour ${i + 1} ` + "x".repeat(4000), verify: `test_238_case_${i + 1}`, level: "unit" })),
+  files_expected: ["factory/bin/run-stage.js"], non_goals: ["n".repeat(3000)], open_risks: ["r".repeat(3000)], orchestration: "workflow",
+  dissent_log: [{ id: "d2", role: "skeptic", severity: "high", objection: "o".repeat(2000), resolution: "unresolved — proceeding" }],
+  ...over,
+});
+function repairRun238({ firstData = undefined } = {}) {
+  const r = root();
+  const gh = { issue: vi.fn(async () => ({ number: 238, title: "T", body: "", labels: ["factory:ready"] })), comments: vi.fn(async () => []) };
+  const bad = plan238();                                                    // d2 uncovered → the validator rejects it
+  const good = plan238({ done_when: [...plan238().done_when.slice(0, 5), { id: "dw6", text: "covers d2", verify: "test_238_d2", level: "unit", covers: ["d2"] }] });
+  const verdicts = [], seen = [], lines = [];
+  let turn = 0;
+  const deps = {
+    charterReady: async () => true, trustWorkspace: async () => {}, claim: async () => ({ ok: true }),
+    heartbeat: async () => ({ stop() {} }), assertHandoff: async () => ({ ok: true }),
+    buildContext: makeBuildContextDep({ root: r, gh, issue: 238, stage: "plan", run: null, mergeBase: async () => null, recordLine: () => {} }),
+    resetAgentsLog: async () => {},
+    claudeP: async (_ctx, opts) => {
+      const outDir = join(r, ".factory/out");
+      const roles = JSON.parse(readFileSync(join(outDir, "loaded.json"), "utf8")).contexts;
+      seen.push({
+        opts,
+        loaded: JSON.parse(readFileSync(join(outDir, "loaded.json"), "utf8")),
+        context: JSON.parse(readFileSync(join(outDir, "context.json"), "utf8")),
+        roles: Object.fromEntries(Object.keys(roles).map((n) => [n, JSON.parse(readFileSync(join(outDir, `context.${n}.json`), "utf8"))])),
+      });
+      return out238(turn++ === 0 ? bad : good);
+    },
+    gates: async () => null,
+    verifyStage: ({ out }) => {
+      let v = verifyStage238({ stage: "plan", out, agentsLog: { starts: [], stops: [], completed: ["plan-synthesizer", "plan-skeptic"], orphans: [] }, roster: ["synthesizer", "skeptic"], rolePrefix: "plan-", expectedRounds: 2, orchestration: "workflow" });
+      if (verdicts.length === 0 && firstData !== undefined) v = { ...v, data: firstData };
+      verdicts.push(v);
+      return v;
+    },
+    writeHandoff: async () => {}, transition: async ({ to }) => ({ ok: true, to }), runRecord: (l) => lines.push(...l), release: async () => true,
+  };
+  return { deps, verdicts, seen, lines, bad };
+}
+
+test("test_238_plan_repair_turn_carries_the_rejected_plan_and_reasons", async () => {
+  const { deps, verdicts, seen, lines, bad } = repairRun238();
+  expect(await runStage({ stage: "plan", issue: 238, deps })).toBe(0);
+  expect(seen).toHaveLength(2);
+  const rejected = verdicts[0];
+  expect(rejected.ok).toBe(false);
+  expect(rejected.data).toEqual(bad);                                         // the verdict's object IS the plan the planner emitted
+  const [first, repair] = seen;
+  // the first turn carries neither key — there is nothing to repair yet.
+  expect(Object.keys(first.loaded)).not.toContain("plan_repair_previous");
+  expect(Object.keys(first.loaded)).not.toContain("plan_repair");
+  expect(Object.keys(first.context)).not.toContain("plan_repair_previous");
+  // the repair turn: plan_repair is still the exact string[] of validator reasons; the whole rejected plan rides in context.json
+  // (the file the planners read as args.context) and NOT in the dispatcher-copied loaded.json (dw1).
+  expect(repair.loaded.plan_repair).toEqual(rejected.planRepair);
+  expect(Object.keys(repair.loaded)).not.toContain("plan_repair_previous");
+  expect(repair.context.plan_repair).toEqual(rejected.planRepair);
+  expect(repair.context.plan_repair_previous).toEqual(rejected.data);
+  expect(JSON.stringify(repair.context.plan_repair_previous)).toBe(JSON.stringify(bad));   // never truncated, byte for byte
+  const roleNames = Object.keys(repair.roles);
+  expect(roleNames.length).toBeGreaterThan(0);
+  for (const n of roleNames) {
+    expect(repair.roles[n].plan_repair_previous, `context.${n}.json`).toEqual(rejected.data);
+    expect(repair.roles[n].plan_repair, `context.${n}.json`).toEqual(rejected.planRepair);
+  }
+  // the second claudeP dispatch is handed both, too.
+  expect(repair.opts.planRepair).toEqual(rejected.planRepair);
+  expect(repair.opts.planRepairPrevious).toEqual(rejected.data);
+  // the repair turn's manifest lists the key for every role (and the first turn's does not).
+  const manifests = lines.filter((l) => l.startsWith(CONTEXT_MANIFEST_PREFIX)).map((l) => JSON.parse(l.slice(CONTEXT_MANIFEST_PREFIX.length)));
+  expect(manifests).toHaveLength(roleNames.length * 2);
+  for (const m of manifests.slice(0, roleNames.length)) expect(m.fields).not.toContain("plan_repair_previous");
+  for (const m of manifests.slice(roleNames.length)) expect(m.fields).toContain("plan_repair_previous");
+
+  // the rejected plan is unavailable (v.data missing / not a plain object): the key is left out and the repair STILL runs on the reasons.
+  // a plan object JSON cannot hold (here: a cycle) is left out the same way — it never turns into a "could not run" escalation.
+  const cyclic = { schema: "factory.plan.v1", issue: 238 }; cyclic.self = cyclic;
+  for (const firstData of [null, ["not", "a", "plan"], "a string", cyclic]) {
+    const run = repairRun238({ firstData });
+    expect(await runStage({ stage: "plan", issue: 238, deps: run.deps })).toBe(0);
+    expect(run.seen).toHaveLength(2);
+    expect(Object.keys(run.seen[1].loaded)).not.toContain("plan_repair_previous");
+    expect(Object.keys(run.seen[1].context)).not.toContain("plan_repair_previous");
+    for (const n of Object.keys(run.seen[1].roles)) expect(Object.keys(run.seen[1].roles[n]), `context.${n}.json`).not.toContain("plan_repair_previous");
+    expect(run.seen[1].loaded.plan_repair).toEqual(run.verdicts[0].planRepair);
+    expect(Object.keys(run.seen[1].opts)).not.toContain("planRepairPrevious");
+    expect(run.lines.some((l) => /could not run/.test(l))).toBe(false);
+  }
+});
 
 // ── #232 (gap P-6, E-7) — the issue's done_when checklist is the contract's origin ──────────────────
 // Real issue text, verbatim (CLAUDE.md SDD brief: "real issues with real text"): #200's body as GitHub
@@ -1667,4 +1767,63 @@ test("test_212_conflict_round_bound_is_lifetime_across_a_requeue", async () => {
   await other.comment(212, `quoted:\n${marker()}`);
   const o = await loadedBoth212(other, C);
   expect(JSON.parse(o.now).conflict_only).toBe(true);
+});
+
+/**
+ * #238 dw1 — the rejected plan must NOT ride in `loaded.json`. That file is copied by hand by the LLM dispatcher into the
+ * Workflow's `args.loaded`, has a 4096-byte soft limit (LOADED_JSON_LIMIT) and is only truncated on implement — a real
+ * rejected plan (8 KB+, this fixture has the real factory.plan.v1 handoff shape: summary, done_when with rubric/check,
+ * dissent_log, non_goals, open_risks, debate) copied into it would send the repair turn to factory:blocked. The plan reaches
+ * the planners through context.json / context.<role>.json instead (dw2). The reasons come from the real validator.
+ */
+const sentence238 = (topic, i) =>
+  `${topic} ${i}: the run record must say what the repair turn cost, decided only by the agents log the hook wrote for that turn; `
+  + `a claim in the handoff never flips the line, and a missing or garbled log reads as a full rerun of the debate.`;
+const realisticPlan238 = () => ({
+  schema: "factory.plan.v1", issue: 238, tier: "load-bearing", roles: ["product-advocate", "architect", "skeptic", "operator"], rounds: 3,
+  orchestration: "workflow", tier_effective: "load-bearing", tier_source: "triage",
+  summary: Array.from({ length: 4 }, (_, i) => sentence238("summary", i)).join(" "),
+  done_when: Array.from({ length: 6 }, (_, i) => ({
+    id: `dw${i + 1}`, text: [0, 1, 2].map((k) => sentence238(`behaviour ${i + 1}`, k)).join(" "),
+    rubric: sentence238(`rubric ${i + 1}`, 0), check: { kind: "test", ref: `test_238_case_${i + 1}` }, level: "unit",
+  })),
+  files_expected: ["factory/bin/run-stage.js", "factory/lib/context.js", "factory/test/run-stage.test.js", "factory/test/context.test.js"],
+  dissent_log: [
+    { id: "d1", role: "architect", severity: "medium", objection: sentence238("objection", 1), resolution: sentence238("resolution", 1) },
+    { id: "d2", role: "skeptic", severity: "high", objection: sentence238("objection", 2), resolution: "unresolved — proceeding" },
+  ],
+  non_goals: Array.from({ length: 6 }, (_, i) => sentence238("non-goal", i)),
+  open_risks: Array.from({ length: 4 }, (_, i) => sentence238("risk", i)),
+  debate: {
+    mode: "debate",
+    r1: ["product-advocate", "architect", "skeptic", "operator"].map((role, i) => ({ role, position: [0, 1].map((k) => sentence238(`${role} position`, i * 2 + k)).join(" ") })),
+    r2: ["product-advocate", "architect", "skeptic", "operator"].map((role, i) => ({ role, rebuttal: sentence238(`${role} rebuttal`, i) })),
+  },
+});
+
+test("test_238_repair_turn_loaded_json_stays_within_the_dispatcher_limit", async () => {
+  const rejected = realisticPlan238();
+  expect(Buffer.byteLength(JSON.stringify(rejected), "utf8")).toBeGreaterThanOrEqual(8 * 1024);   // a realistic plan, not a toy one
+  // the reasons are the real validator's (d2 is high, unresolved and covered by no done_when).
+  const v = verifyStage238({ stage: "plan", out: out238(rejected), agentsLog: { starts: [], stops: [], completed: ["plan-product-advocate", "plan-architect", "plan-skeptic", "plan-operator", "plan-synthesizer"], orphans: [] }, roster: ["product-advocate", "architect", "skeptic", "operator"], rolePrefix: "plan-", expectedRounds: 3, orchestration: "workflow" });
+  expect(v.ok).toBe(false);
+  expect(v.planRepair.length).toBeGreaterThan(0);
+  const gh = { issue: async () => ({ number: 238, title: "T", body: "", labels: ["factory:ready"] }), comments: async () => [] };
+  const build = async (withPrevious) => {
+    const r = root();
+    const ctx = await buildContext({ root: r, gh, issue: 238, stage: "plan", planRepair: v.planRepair, ...(withPrevious ? { planRepairPrevious: v.data } : {}) });
+    const file = readFileSync(join(r, ".factory/out/loaded.json"), "utf8");
+    return { r, ctx, bytes: Buffer.byteLength(file, "utf8"), loaded: JSON.parse(file) };
+  };
+  const without = await build(false);
+  const withPlan = await build(true);
+  expect(withPlan.bytes - without.bytes).toBeLessThanOrEqual(128);
+  expect(withPlan.ctx.loaded_json.over).toBe(without.ctx.loaded_json.over);   // the plan never pushes the dispatcher payload over its limit
+  // plan_repair is still today's identical string[] of validator reasons, and the plan text is nowhere in the file.
+  expect(withPlan.loaded.plan_repair).toEqual(v.planRepair);
+  expect(withPlan.loaded.plan_repair).toEqual(without.loaded.plan_repair);
+  expect(Object.keys(withPlan.loaded)).not.toContain("plan_repair_previous");
+  expect(JSON.stringify(withPlan.loaded)).not.toContain(rejected.summary);
+  // ...while the file the planners read (args.context) still carries it whole.
+  expect(JSON.parse(readFileSync(join(withPlan.r, ".factory/out/context.json"), "utf8")).plan_repair_previous).toEqual(rejected);
 });
