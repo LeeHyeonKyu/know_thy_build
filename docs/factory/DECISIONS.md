@@ -4917,6 +4917,13 @@ JSON이었다(#207의 절단과 다르다). 같은 입력에 같은 모델은 �
    파일을 다시 재어 길이가 다르거나·없거나·숫자가 아니면 게이트·verify 전에 `dispatcher payload: self-loaded payload …` 사유로 blocked/undecidable에
    세운다. — `test_workflow_self_loaded_payload_must_match_the_issue`, `test_288_self_loaded_payload_is_equivalent_to_dispatcher_payload`,
    `test_run_stage_records_the_payload_source`, `test_288_self_loaded_payload_length_mismatch_blocks_loudly`
+   이 대조는 성공 봉투만이 아니라 게이트·verify로 가는 모든 길에서 돈다 — 턴 한도·API 오류 복구(`is_error` 봉투)와 plan 리페어 턴(KTB-51)의
+   두 번째 반환까지 — 그리고 main()은 테스트가 도는 같은 팩토리(`makePayloadSourceDeps`: 트랜스크립트 채널 + 러너의 실제 파일)를 싣는다.
+   — `test_288_self_loaded_check_runs_on_the_max_turns_recovery_path`, `test_288_plan_repair_turn_self_loaded_payload_is_checked`,
+   `test_288_payload_source_deps_read_the_transcript_and_the_real_file`. 기존의 "args.loaded 없음 → 호출 0" 핀 다섯 개(`factory/test/workflows.test.js`)는
+   지우지 않고 계획 dw3대로 "리더 실패" 경우로 고쳐 썼다: 역할 에이전트 0회는 그대로 단언하고, 리더 호출 횟수(null이면 `once()`로 2회, 문자열
+   필드 없는 답이면 1회)와 오늘과 같은 반환 객체·phases를 단언한다. 이슈 본문에 `tests_changed_allowed:`가 없으므로 이 다섯 줄 변경은 정책상 사람의
+   머지를 부른다 — 계획이 명시한 변경이고, 고치지 않으면 dw1과 양립할 수 없다(리더 호출이 곧 그 핀의 `calls`에 잡힌다).
 3. **디스패처를 임계 경로에서 뺀다.** 페이로드의 원본은 러너가 쓴 파일이다. 디스패처에게 "읽어서 그대로 넘겨라"를 맡긴 것이 #170·#207·#239의
    공통 원인이었다 — 이제 디스패처가 그 단계를 건너뛰어도 스테이지는 같은 파일로 진행한다.
 4. **리더의 "읽기 전용"은 프롬프트의 지시일 뿐 강제된 도구 제한이 아니다.** 리더는 `general-purpose` 에이전트이고, 전용 읽기 전용 로더
