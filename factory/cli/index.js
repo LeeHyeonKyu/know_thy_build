@@ -15,6 +15,11 @@ export const HELP = `
     factory rehearse [--json]           Run the harness once ON THE RUNNER before the first issue (ADR-025);
                                         prints the step table and exits non-zero on RED
     factory run <stage> <issue>         Run a stage locally with the same scripts CI uses (triage|plan|implement|review)
+    factory run merge <issue> --operator
+                                        Merge an approved issue locally from an operator session (your token, no veto
+                                        wait; refused on a CI runner; door files and non-green checks refused — ADR-044)
+    factory integrity <pr>              Post the CI integrity verdict for the PR head as factory/integrity (local:<login>);
+                                        operator session only, refused on a CI runner (ADR-044)
     factory run retro [--force]         Run the retro job locally (--force ignores the merge count N)
     factory status [--json]             Needs You / queue / in progress / recent merges / usage (read-only)
     factory analyze <issue> [--json]    One issue's whole timeline from the records branch + comments —
@@ -61,6 +66,8 @@ export async function main(argv) {
     case "board": return (await import("./board.js")).boardCommand({ root, pkgRoot, argv: rest, io });
     // #189 — 사람 전용 리셋. `env`를 명시로 넘긴다: 그 함수는 process.env를 직접 읽지 않는다(에이전트 세션·CI 판정의 재료가 이것이다).
     case "breaker": return (await import("./breaker.js")).breakerCommand({ root, argv: rest, io, run: realRun, env: process.env });
+    // #236 (ADR-044) — 운영 세션의 로컬 integrity 판정. 러너에서는 거부한다 — env를 명시로 넘긴다(그 함수는 process.env를 읽지 않는다).
+    case "integrity": return (await import("./integrity.js")).integrityCommand({ root, argv: rest, io, run: realRun, env: process.env });
     default: io.err(`unknown factory command: ${sub}\n${HELP}`); return 1;
   }
 }
