@@ -11334,3 +11334,75 @@ test("test_236_local_merge_asks_gh_for_every_field_the_door_reads", async () => 
   for (const f of new Set([...binFields, ...verdictFields])) expect(asked, f).toContain(f);
   expect(asked).toContain("headRefOid");   // + the head this run merges
 });
+
+// ── #236 rework (cf1 / spec1 / qa1) — the statuses the run itself posts are fed back through commitStatuses. On a local merge the
+// process token is the operator's, so a factory/gates the run re-posted would become the newest one and H1b would refuse it. ──
+test("test_236_local_merge_feeds_its_own_posted_statuses_back_and_still_merges", async () => {
+  const charter = { self_change: { auto_merge_non_judge: true, auto_merge_judge: false, operator_merge_judge: false, veto_minutes: 15 }, never_automate: [] };
+  // One store for the PR head: gh.setStatus prepends what this process posts, under the token's own login (newest first, as the
+  // GitHub list is); every reader (the merge stage's H1b and the operator door) reads that same store.
+  const storeGh = ({ viewer, seed }) => {
+    const store = [...seed];
+    return {
+      store,
+      viewerLogin: vi.fn(async () => viewer),
+      userType: vi.fn(async (l) => ({ alice: "User", "ktb-bot": "User" })[l] ?? null),
+      commitStatuses: vi.fn(async () => store.map((s) => ({ ...s }))),
+      setStatus: vi.fn(async ({ context, state, description }) => { store.unshift({ context, state, description, creatorLogin: viewer }); }),
+      mergePr: vi.fn(async () => {}),
+      labelEvents: vi.fn(async () => []),
+      issueLabels: vi.fn(async () => []),
+    };
+  };
+  const compose = ({ gh, env, sink, log, operator, protectedFiles }) => {
+    const d = mergeHappyDeps({
+      checkoutHead: vi.fn(async () => ({ ok: true, sha: HEAD_236, pr: 9 })),
+      protectedPaths: async () => ({ ok: true, files: protectedFiles }),
+      runRecord: (l) => sink.push(...l),
+      transition: vi.fn(async ({ to }) => ({ ok: true, to })),
+      factoryLogins: async () => ({ ok: true, logins: ["ktb-bot"] }),
+      commitStatuses: (sha) => gh.commitStatuses(sha),
+      reportStatus: (s) => gh.setStatus(s),
+      breaker: vi.fn(async () => ({ ok: true, open: false, since: null, reason: null, detail: "closed" })),
+      persistSelfMerge: vi.fn(async () => ({ ok: true })),
+      sleep: vi.fn(async () => {}),
+    });
+    if (operator) {
+      wireOperatorMerge236(d, {
+        stage: "merge", env, run: prViewRun236(prJson236()), repo: "o/r", gh,
+        factoryLogins: async () => ({ ok: true, logins: ["ktb-bot"] }),
+        getCharter: () => charter, getEngine: () => true, getDefaultBranch: () => "main", log: (l) => log.push(l),
+      });
+      Object.defineProperties(d, Object.getOwnPropertyDescriptors(makeMergeSelfChangeDeps({ gh, issue: 7, getCharter: () => charter, getEngine: () => true, env })));
+    } else {
+      d.mergePr = gh.mergePr;
+    }
+    return d;
+  };
+
+  // (1) Local merge by alice, CI had posted factory-authored review/gates: the run merges, and nothing it posted is a
+  // factory/gates by alice — the newest factory/gates on the head is still the factory's.
+  {
+    const gh = storeGh({ viewer: "alice", seed: [LOCAL_OK_236, ...FACTORY_STATUSES_236] });
+    const sink = [], log = [];
+    const d = compose({ gh, env: { [OPERATOR_MERGE_ENV236]: "1" }, sink, log, operator: true, protectedFiles: ["factory/lib/status.js", "docs/factory/ops/runbook.md"] });
+    expect(d.operatorPresent).toBe(true);
+    const code = await runStage({ stage: "merge", issue: 7, deps: d, runnerId: "r" });
+    expect(sink.filter((l) => /posted by @alice/.test(l))).toEqual([]);
+    expect(code).toBe(0);
+    expect(gh.mergePr).toHaveBeenCalledTimes(1);
+    expect(d.transition.mock.calls.map((c) => c[0].to)).toContain("factory:merged");
+    expect(gh.store.filter((s) => s.context === "factory/gates" && s.creatorLogin === "alice")).toEqual([]);
+    expect(gh.store.find((s) => s.context === "factory/gates").creatorLogin).toBe("ktb-bot");
+  }
+  // (2) Without the operator dep (the CI path, factory token) the run still re-posts factory/gates on the head, as before.
+  {
+    const gh = storeGh({ viewer: "ktb-bot", seed: [...FACTORY_STATUSES_236] });
+    const sink = [];
+    const d = compose({ gh, env: {}, sink, log: [], operator: false, protectedFiles: [] });
+    expect(d.operatorPresent).toBeUndefined();
+    expect(await runStage({ stage: "merge", issue: 7, deps: d, runnerId: "r" })).toBe(0);
+    expect(gh.setStatus.mock.calls.map((c) => c[0].context)).toContain("factory/gates");
+    expect(gh.mergePr).toHaveBeenCalledTimes(1);
+  }
+});
