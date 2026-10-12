@@ -11337,7 +11337,7 @@ test("test_236_local_merge_asks_gh_for_every_field_the_door_reads", async () => 
 
 // ── #236 rework (cf1 / spec1 / qa1) — the statuses the run itself posts are fed back through commitStatuses. On a local merge the
 // process token is the operator's, so a factory/gates the run re-posted would become the newest one and H1b would refuse it. ──
-test("test_236_local_merge_feeds_its_own_posted_statuses_back_and_still_merges", async () => {
+test("test_236_local_merge_runs_merge_stage_with_the_operator_token_and_no_veto_wait — fed its own posted statuses back, it still merges", async () => {
   const charter = { self_change: { auto_merge_non_judge: true, auto_merge_judge: false, operator_merge_judge: false, veto_minutes: 15 }, never_automate: [] };
   // One store for the PR head: gh.setStatus prepends what this process posts, under the token's own login (newest first, as the
   // GitHub list is); every reader (the merge stage's H1b and the operator door) reads that same store.

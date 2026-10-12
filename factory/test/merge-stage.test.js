@@ -4379,7 +4379,7 @@ test("test_236_operator_present_skips_only_the_veto_window", async () => {
   expect(entry).toMatch(/operatorPresent/);
 });
 
-test("test_236_local_merge_pins_the_judged_head_on_mergePr", async () => {
+test("test_236_operator_present_skips_only_the_veto_window — and the local mergePr pins the judged head", async () => {
   // A local merge of an ordinary (non-self-change) PR: the operator door judged HEAD, then a push lands before the squash.
   // The merge call must carry the judged head, so the forge refuses the moved head instead of squashing a tree no
   // factory/integrity ever judged. The forge fake behaves like GitHub's --match-head-commit: no pin → it merges whatever is live.
