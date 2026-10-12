@@ -270,3 +270,31 @@ test("default spawnInherit and run are used when not injected (smoke — routes 
   const mod = await import("../cli/run.js");
   expect(typeof mod.runCommand).toBe("function");
 });
+
+// #236 — contract deviation pinned on purpose: dw4 wants a plain `factory run merge <n>` to merge locally, but the existing
+// "stage merge → error, runs only in CI" test above pins that exact refusal (tests_are_load_bearing; not in the issue's
+// tests_changed_allowed:). So the local merge opens only behind `--operator`, and the plain refusal must point the operator there
+// on BOTH env paths — off a runner and on one — while running and spawning nothing.
+test("test_236_plain_merge_keeps_the_pinned_refusal_and_names_the_operator_path", async () => {
+  for (const env of [{}, { GITHUB_ACTIONS: "true" }]) {
+    const root = makeRoot();
+    const { io: i, o } = io();
+    const run = vi.fn();
+    const spawnInherit = vi.fn(() => 0);
+    const code = await runCommand({ root, argv: ["merge", "5"], io: i, run, spawnInherit, env });
+    expect(code, JSON.stringify(env)).toBe(1);
+    const text = o.err.join("\n");
+    expect(text).toContain("merge runs only in CI (branch protection)");
+    expect(text).toContain("factory run merge <issue> --operator");
+    expect(run).not.toHaveBeenCalled();
+    expect(spawnInherit).not.toHaveBeenCalled();
+  }
+  // …and the same command with `--operator`, off a runner, does spawn the local merge (the path the refusal names).
+  const root = makeRoot();
+  const { io: i } = io();
+  const spawnInherit = vi.fn(() => 0);
+  const run = makeOkRun();
+  expect(await runCommand({ root, argv: ["merge", "5", "--operator"], io: i, run, spawnInherit, env: {} })).toBe(0);
+  expect(spawnInherit.mock.calls[0][1]).toEqual([".factory/bin/run-stage.js", "merge", "5"]);
+  expect(spawnInherit.mock.calls[0][2].env.FACTORY_OPERATOR_MERGE).toBe("1");
+});

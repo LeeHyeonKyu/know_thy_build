@@ -63,6 +63,11 @@ export async function runCommand({ root, argv = [], io, run = realRun, spawnInhe
   // 예전 거부 그대로다: 그 문구는 기존 테스트("stage merge → error, runs only in CI")가 고정하고(tests_are_load_bearing), 호출마다
   // 고르는 opt-in이 운영자 역할의 요구였다(plan dw4의 `factory run merge <issue>` 철자는 이 플래그로 연다; `--merge`는 P-7a).
   // 러너(`GITHUB_ACTIONS`)에서는 `--operator`도 거부한다 — 스테이지는 운영자가 아니다. run-stage도 같은 조건을 다시 본다.
+  // Contract deviation (#236 dw4, disputed — needs spec-conformance's explicit decision): dw4 says a plain `factory run merge <issue>`
+  // merges locally off a runner and its refusal no longer says "runs only in CI"/`--remote`. That cannot be built without changing
+  // factory/test/run-cli.test.js "stage merge → error, runs only in CI" (it pins this exact refusal for a plain call), and the issue
+  // lists no tests_changed_allowed:. So the plain call keeps the pinned refusal and names `--operator`, the one spelling that opens
+  // the local merge (pinned by test_236_plain_merge_keeps_the_pinned_refusal_and_names_the_operator_path on both env paths).
   const operator = argv.includes("--operator");
   if (stage === "merge" && !operator) { io.err("merge runs only in CI (branch protection) — use `factory run merge <issue> --remote` to dispatch it, or, from an operator session (not a CI runner), `factory run merge <issue> --operator` to merge locally with your own token (ADR-044)"); return 1; }
   if (stage === "merge" && env?.GITHUB_ACTIONS) { io.err("factory run merge --operator refused — GITHUB_ACTIONS is set, so this is a CI runner: a stage is never the operator, and the local merge (no veto wait) belongs to an operator session only. Nothing was merged."); return 1; }
