@@ -117,6 +117,9 @@ function once(fn) {
 
 const isSha40 = (s) => typeof s === 'string' && /^[0-9a-f]{40}$/.test(s);
 
+// #288 — the stage a self-loaded .factory/out/loaded.json must name (a stale file from the previous stage fails closed).
+const PAYLOAD_STAGE = 'implement';
+
 phase('Load');
 
 // 감사 M5 (2026-09-14) — `factory-loader`는 사라졌다. 그 에이전트가 한 일은 `context.json`과
@@ -131,6 +134,48 @@ phase('Load');
 // 파싱이 안 되면 그대로 두어 아래 fail-closed가 이름 있는 에러를 낸다.
 const parseIfString = (v) => { if (typeof v !== 'string') return v; try { return JSON.parse(v); } catch { return v; } };
 args = parseIfString(args) ?? {};
+// #288 (2026-10-12, #239 runs 38194052457·38194076065) — 디스패처가 `args.loaded`를 아예 넘기지 않은 채 Workflow를 불렀다(1턴·1.4초).
+// 그 페이로드의 원본은 러너가 이미 쓴 `.factory/out/loaded.json`이다 — 그래서 `args.loaded`가 없을 때만 리더 에이전트 하나가 그 파일을
+// 읽어 온다(디스패처가 넘긴 경우는 오늘과 같다: 리더 0회, LLM 호출 0회 — M5). 리더의 스키마는 불투명한 문자열 필드 하나뿐이다:
+// 페이로드의 키를 스키마에 적으면 구조화 출력이 이름 없는 키(must_fix·disputed·rework_pins·setup_dirty)를 떨굴 수 있다(#111).
+// 기대하는 이슈 번호는 디스패처의 `raw`/`issue`에서만 온다 — 검사 대상인 파일에서 가져오지 않는다. 둘 다 없거나, 리더가 죽거나
+// 파싱되지 않는 글을 주면 아무 것도 넣지 않아 아래의 오늘 그 fail-closed(`context payload missing`)가 그대로 나간다. 파일의 issue나
+// stage가 다르면 오늘의 `context issue mismatch` 접두로 닫는다 — run-stage의 dispatcherPayloadErrorOf가 둘 다 blocked/undecidable로 읽는다.
+// 리더의 "Read만"은 프롬프트의 지시일 뿐 강제된 도구 제한이 아니다(DECISIONS ADR-044). `loaded_json_length`는 run-stage가 같은 파일로
+// 다시 재어 맞춰 본다(잘림·필드 유실 탐지).
+const READER_SCHEMA = { type: 'object', required: ['loaded_json'], properties: { loaded_json: { type: 'string' } } };
+let loadedSource = 'args';
+let loadedJsonLength;
+if (args && typeof args === 'object' && args.loaded == null) {
+  const expectedIssue = Number(String(args.raw ?? args.issue ?? '').trim().split(/\s+/)[0]);
+  if (Number.isInteger(expectedIssue) && expectedIssue > 0) {
+    const readerPrompt =
+      `Use the Read tool on \`.factory/out/loaded.json\` and return the file's entire contents, verbatim and unabridged, ` +
+      `as the single string field \`loaded_json\`. Do not summarise, reformat, reorder, shorten or fix anything in it. ` +
+      `Read that one file only; never write, edit or run anything.`;
+    const reply = await once(() => agent(readerPrompt, { agentType: 'general-purpose', model: 'sonnet', label: 'load:reader', schema: READER_SCHEMA }))();
+    const text = typeof reply === 'string' ? reply : (reply && typeof reply.loaded_json === 'string' ? reply.loaded_json : null);
+    const read = text === null ? null : parseIfString(text);
+    if (read && typeof read === 'object' && !Array.isArray(read)) {
+      // 파일의 issue는 아래의 오늘 그 provenance 검사(`Number(loaded.issue) !== issue`)가 디스패처의 번호와 맞춰 본다 — 여기서는
+      // 그 검사가 보지 않는 stage만 본다: 앞 스테이지가 남긴 같은 이슈의 loaded.json은 issue가 같아도 다른 계약이다.
+      if (read.stage !== PAYLOAD_STAGE) {
+        return {
+          issue: expectedIssue,
+          error: `context issue mismatch: the self-loaded .factory/out/loaded.json is for stage ${read.stage}, this workflow is ${PAYLOAD_STAGE}`,
+          orchestration: 'workflow',
+          guarantee: 'structural',
+        };
+      }
+      args = { ...args, loaded: read };
+      loadedSource = 'file';
+      loadedJsonLength = JSON.stringify(read).length;
+    }
+  }
+}
+const loadedProvenance = loadedSource === 'file'
+  ? { loaded_source: 'file', loaded_json_length: loadedJsonLength }
+  : { loaded_source: 'args' };
 const loaded = parseIfString(args.loaded) ?? null;
 
 // KTB-27: Claude Code does not substitute positional `$1`/`$2` in a command md — only `$ARGUMENTS`
@@ -241,6 +286,7 @@ const reworkFailure = (out, gaps) => ({
   head_sha: out ? out.head_sha : undefined,
   pr: out ? out.pr : undefined,
   error: `rework response incomplete: ${gaps.join('; ')}`,
+  ...loadedProvenance,
   orchestration: 'workflow',
   guarantee: 'structural',
 });
@@ -652,6 +698,7 @@ return {
     ? { verdict: verdict.verdict, findings: verdict.findings || [], prove_test_read: verdict.prove_test_read === true }
     : {},
   ...(reworkResponse ? { rework_response: reworkResponse } : {}),
+  ...loadedProvenance,
   orchestration: 'workflow',
   guarantee: 'structural',
 };
