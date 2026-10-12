@@ -6587,6 +6587,144 @@ test("test_200_scope_check_fails_open_visibly_on_git_read_error", async () => {
   }
 });
 
+// ── #257: a review gate whose verdict differs from the implement gate on the SAME head gets one diagnostic record line ──
+// #253 head b4aac9b: implement `unit` GREEN, review `unit` RED, requeue GREEN — same head, same command. The review record now
+// says so next to FACTORY_GATES; the line is diagnostic only (verdict, transition, factory/gates status and exit code unchanged).
+// Every handoff below comes from the REAL producers: runStage("implement") → mirror commit → gates → makeVerifyStageDep (verify-stage
+// fills `data.gates` from the gates file — the builder's artifact carries none) → makeWriteHandoffDep. The review side is runStage
+// ("review") with the real makeCheckoutHead reading that comment, the real makeVerifyStageDep, and the real record path.
+import * as rs257 from "../bin/run-stage.js";
+const HEAD_257 = "c".repeat(40), BUILDER_257 = "b".repeat(40), MOVED_257 = "d".repeat(40);
+const gates257 = (status, level = "fast", head_sha = HEAD_257) => ({
+  schema: "factory.gates.v1", level, status, ...(head_sha ? { head_sha } : {}), passed: 9, failed: status === "GREEN" ? 0 : 1,
+  failing: status === "GREEN" ? [] : ["unit"], skipped: [], misconfigured: [], tests: { failing: [], excluded: [] },
+});
+const ENV_LINE_257 = "gates: verdict differs from the implement gate on the same head — environmental";
+const ctx257 = () => ({ roster: [], orchestration: "workflow", limits: { K: 3 } });
+const outRoot257 = () => { const r = mkdtempSync(join(tmpdir(), "rs-257-")); mkdirSync(join(r, ".factory/out"), { recursive: true }); return r; };
+const comments257 = (body) => [{ id: 1, createdAt: "2026-10-11T00:00:00Z", body }];
+/** The implement handoff comment as the implement run posts it. `mirror`: the runner's mirror commit makes HEAD_257 the new head. */
+const implement257 = async ({ gatesFile, mirror = true }) => {
+  const ctx = ctx257(), root = outRoot257(), posted = [];
+  const code = await runStage({ stage: "implement", issue: 253, deps: baseDeps({
+    buildContext: async () => ctx,
+    claudeP: async () => ({ is_error: false, result: JSON.stringify({ schema: "factory.implement.v1", issue: 253, head_sha: mirror ? BUILDER_257 : HEAD_257, pr: 31, verifier: { verdict: "accepted" }, orchestration: "workflow", guarantee: "verified" }) }),
+    mirror: async () => (mirror ? { ok: true, applicable: true, changed: ["factory/lib/x.js"], sha: HEAD_257 } : { ok: true, applicable: false, changed: [] }),
+    gates: async () => gatesFile,
+    verifyStage: rs257.makeVerifyStageDep({ root, stage: "implement", getCtx: () => ctx, getCharter: () => ({}), getHarness: () => ({}) }),
+    writeHandoff: rs257.makeWriteHandoffDep({ gh: { comment: async (_i, body) => posted.push(body) }, issue: 253, stage: "implement", getCtx: () => ctx }),
+    transition: async (t) => ({ ok: true, to: t.to }),
+  }) });
+  expect(code).toBe(0);
+  expect(posted).toHaveLength(1);
+  return posted[0];
+};
+const handoff257 = (body) => parseHandoffs(comments257(body)).find((h) => h.stage === "implement").data;
+/** An implement handoff from before #257's consumer existed: the same real comment, with no `gates` field. */
+const withoutGates257 = (body) => { const { gates: _g, ...data } = handoff257(body); return renderHandoff({ stage: "implement", issue: 253, summary: data.summary || "### implement 완료", data }); };
+const review257 = async ({ comment, reviewGates, prHead = HEAD_257, checkoutHead = null }) => {
+  const ctx = ctx257(), root = outRoot257(), lines = [], transitions = [], statuses = [];
+  const gh = { comments: vi.fn(async () => comments257(comment)), prHeadSha: vi.fn(async () => prHead) };
+  const run = makeFakeRun([
+    { match: (c, a) => c === "git" && a[0] === "fetch", result: { code: 0, stdout: "", stderr: "" } },
+    { match: (c, a) => c === "git" && a[0] === "checkout", result: { code: 0, stdout: "", stderr: "" } },
+  ]);
+  const review = { schema: "factory.review.v1", issue: 253, pr: 31, head_sha: HEAD_257, round: 1, orchestration: "workflow", guarantee: "verified",
+    verdicts: [{ role: "correctness", verdict: "approve", confidence: "high", must_fix: [], should_fix: [], verified: [] }] };
+  const deps = baseDeps({
+    buildContext: async () => ctx,
+    checkoutHead: checkoutHead ?? makeCheckoutHead({ gh, run, root: "/repo", issue: 253 }),
+    claudeP: async () => ({ is_error: false, result: JSON.stringify(review) }),
+    gates: async () => reviewGates,
+    verifyStage: rs257.makeVerifyStageDep({ root, stage: "review", getCtx: () => ctx, getCharter: () => ({}), getHarness: () => ({}) }),
+    transition: vi.fn(async (t) => { transitions.push(JSON.stringify(t)); return { ok: true, to: t.to }; }),
+    reportStatus: vi.fn(async (s) => { statuses.push(JSON.stringify(s)); }),
+    runRecord: (l) => lines.push(...l),
+  });
+  const code = await runStage({ stage: "review", issue: 253, deps });
+  return { code, lines, transitions, statuses };
+};
+
+test("test_257_review_gate_notes_a_verdict_differing_from_implement_on_the_same_head", async () => {
+  // The implement gate ran GREEN at level fast on the mirror commit — the normal mirror round (#253's b4aac9b was one).
+  const implement = await implement257({ gatesFile: gates257("GREEN") });
+  const h = handoff257(implement);
+  expect(h.gates).toEqual({ status: "GREEN", level: "fast" });               // filled by verify-stage from the gates file
+  expect([h.head_sha, h.builder_head_sha, h.mirror_sha]).toEqual([HEAD_257, BUILDER_257, HEAD_257]);
+  const withLine = await review257({ comment: implement, reviewGates: gates257("RED") });
+  expect(withLine.lines.filter((l) => l === ENV_LINE_257)).toHaveLength(1);
+  // Written through the real record path, right next to the FACTORY_GATES verdict line.
+  const at = withLine.lines.indexOf(ENV_LINE_257);
+  expect(withLine.lines[at - 1]).toMatch(/^FACTORY_GATES: level=fast status=RED /);
+  expect(withLine.lines).toContain("checkout: ccccccc");
+  // The same run on the same real handoff without its gates field: no line — and everything that decides is byte-identical.
+  const without = await review257({ comment: withoutGates257(implement), reviewGates: gates257("RED") });
+  expect(without.lines).not.toContain(ENV_LINE_257);
+  expect(withLine.code).toBe(without.code);
+  expect(withLine.transitions).toEqual(without.transitions);
+  expect(withLine.transitions).toHaveLength(1);
+  expect(withLine.statuses).toEqual(without.statuses);
+  expect(JSON.parse(withLine.statuses[0])).toMatchObject({ context: "factory/gates", state: "failure", sha: HEAD_257 });
+  expect(withLine.lines.filter((l) => l !== ENV_LINE_257)).toEqual(without.lines);
+  // A round with no mirror commit (head_sha is the builder's own sha) notes it the same way.
+  const plain = await implement257({ gatesFile: gates257("GREEN"), mirror: false });
+  expect(handoff257(plain).builder_head_sha).toBeUndefined();
+  expect((await review257({ comment: plain, reviewGates: gates257("RED") })).lines.filter((l) => l === ENV_LINE_257)).toHaveLength(1);
+});
+
+test("test_257_no_environmental_note_when_verdicts_match_heads_or_levels_differ_or_implement_gates_missing", async () => {
+  // Each suppression case is asserted on its own, next to a SIBLING run that carries the line — so every "absent" below is
+  // absent because of the one thing that case varies, not because nothing writes the line. "Review outcome unchanged" = the
+  // run is byte-identical (exit code, transitions, posted statuses, record lines) to today's run: the same review on the same
+  // real implement handoff without its gates field.
+  const implement = await implement257({ gatesFile: gates257("GREEN") });     // GREEN, fast, on HEAD_257 (a mirror round)
+  const old = withoutGates257(implement);
+  const red = gates257("RED"), green = gates257("GREEN");
+  const sibling = await review257({ comment: implement, reviewGates: red });
+  const suppressed = async (name, run, baseline) => {
+    expect(sibling.lines.filter((l) => l === ENV_LINE_257), `${name}: sibling`).toHaveLength(1);
+    expect(run.lines, name).not.toContain(ENV_LINE_257);
+    expect(run, name).toEqual(baseline);
+  };
+  // The mirror round is NOT a suppression case: builder_head_sha differs from head_sha, head_sha is the reviewed head → the line.
+  expect(handoff257(implement).builder_head_sha).not.toBe(handoff257(implement).head_sha);
+  expect(sibling.lines).toContain(ENV_LINE_257);
+  expect(sibling.lines.filter((l) => l !== ENV_LINE_257)).toEqual((await review257({ comment: old, reviewGates: red })).lines);
+
+  // (a) the statuses are equal — implement GREEN, review GREEN.
+  await suppressed("(a) statuses equal", await review257({ comment: implement, reviewGates: green }),
+    await review257({ comment: old, reviewGates: green }));
+  // (b) the levels differ — implement full, review fast: a different gate set, not the environment.
+  const full = await implement257({ gatesFile: gates257("GREEN", "full") });
+  expect(handoff257(full).gates).toEqual({ status: "GREEN", level: "full" });
+  await suppressed("(b) levels differ", await review257({ comment: full, reviewGates: red }),
+    await review257({ comment: withoutGates257(full), reviewGates: red }));
+  // (c) the reviewed head differs from the implement handoff's head_sha — three ways it can:
+  //  (c1) the PR head moved past the handoff's head_sha: the real makeCheckoutHead refuses the checkout, nothing is gated.
+  const prMoved = await review257({ comment: implement, reviewGates: red, prHead: MOVED_257 });
+  expect(prMoved.lines.some((l) => l.includes("PR head moved since implement handoff (ccccccc → ddddddd)"))).toBe(true);
+  await suppressed("(c1) PR head moved", prMoved, await review257({ comment: old, reviewGates: red, prHead: MOVED_257 }));
+  //  (c2) HEAD moved in the review checkout before the gate ran: the review gates file's head_sha (`git rev-parse HEAD` at gate
+  //       time, gates.js) is not the handoff's head_sha.
+  const movedGate = gates257("RED", "fast", MOVED_257);
+  await suppressed("(c2) gate measured another head", await review257({ comment: implement, reviewGates: movedGate }),
+    await review257({ comment: old, reviewGates: movedGate }));
+  //  (c3) a gates file with no head_sha: the reviewed head is the checkout's sha, and it is not the implement gate's head.
+  const noHead = gates257("RED", "fast", null);
+  const co = (sha, extra) => async () => ({ ok: true, sha, pr: 31, ...extra });
+  const ig = { implement_gates: { status: "GREEN", level: "fast", head_sha: HEAD_257 } };
+  expect((await review257({ comment: implement, reviewGates: noHead, checkoutHead: co(HEAD_257, ig) })).lines, "(c3): sibling").toContain(ENV_LINE_257);
+  await suppressed("(c3) checkout sha differs", await review257({ comment: implement, reviewGates: noHead, checkoutHead: co(MOVED_257, ig) }),
+    await review257({ comment: implement, reviewGates: noHead, checkoutHead: co(MOVED_257, {}) }));
+  // (d) the implement gate data is missing:
+  //  (d1) an old implement handoff with no gates field, through the real makeCheckoutHead.
+  await suppressed("(d1) old handoff", await review257({ comment: old, reviewGates: red }), await review257({ comment: old, reviewGates: red }));
+  //  (d2) a fake checkoutHead that never returns the field (the ~64 fakes in this file) — vs the same fake returning it.
+  expect((await review257({ comment: implement, reviewGates: red, checkoutHead: co(HEAD_257, ig) })).lines, "(d2): sibling").toContain(ENV_LINE_257);
+  await suppressed("(d2) fake checkoutHead without implement_gates", await review257({ comment: implement, reviewGates: red, checkoutHead: co(HEAD_257, {}) }),
+    await review257({ comment: old, reviewGates: red }));
+});
+
 // ── #233 → #254 (gap P-12 / ledger M-6) — 올린 tier가 생산 경로에 닿는다 ──────────────────────────────
 // verifyStage는 자기 호출자가 넘긴 것만 본다: 러너의 triage 검증(`makeVerifyStageDep`)이 harness `[load_bearing].paths`를
 // 넘겨야 올림이 산다. 올린 tier는 실제 writer를 지난 triage handoff와 tier 라벨에 닿는다(run 기록 줄은 없다 — plan non_goal).
