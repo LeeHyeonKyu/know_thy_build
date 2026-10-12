@@ -395,6 +395,13 @@ for (const v of r1) {
   v.verdict = v.must_fix.length > 0 ? 'reject' : 'approve';
 }
 
+// The R1 record for the handoff's `rounds` (P-9 / M-2, #244) — taken HERE, after the upheld/unruled
+// dispute items are re-attached and the verdict re-derived, so round 1 is the verdict this round actually
+// acted on (a snapshot from before the re-attach would show an invented reject→approve flip). `{role, verdict}`
+// copies, not references: nothing below may rewrite round 1 after the fact. A role that gave no R1 is absent.
+const roundOf = (n, list) => ({ round: n, verdicts: list.map((v) => ({ role: v.role, verdict: v.verdict })) });
+const round1 = roundOf(1, r1);
+
 phase('R2');
 
 const othersOf = (role) => r1.filter((v) => v.role !== role);
@@ -453,9 +460,17 @@ const lightPrompt = (v) => (
 );
 
 const anyReject = r1.some((v) => v.verdict === 'reject');
+// R2 skip switch (M-2, #244). Only the exact string `"skip"` turns the full R2 off; anything else — the field
+// absent, `"full"`, a typo — keeps today's full exchange (the safe direction). With `"skip"`, an R1 reject
+// goes straight back to rework on the R1 verdicts and no R2 agent is spawned. The unanimous-approve light R2
+// is not affected. Nothing fills `loaded.review_r2` yet: CHARTER turns it on once #239's flip count says so.
+const skipR2 = loaded.review_r2 === 'skip';
+const fullR2 = anyReject && !skipR2;
 let verdicts;
 
-if (anyReject) {
+if (anyReject && skipR2) {
+  verdicts = r1;
+} else if (anyReject) {
   verdicts = await parallel(r1.map((v) => () => {
     const r = byRole.get(v.role);
     return once(() => agent(fullPrompt(v), { agentType: r.agentType, model: r.model, label: `R2:${v.role}`, schema: R2_FULL }))()
@@ -489,7 +504,7 @@ const withdrawnCount = disputes.filter((d) => d.ruling === 'withdraw').length;
 const unruledCount = disputes.filter((d) => d.ruling === 'unruled').length;
 
 const summary =
-  `${anyReject ? 'Full' : 'Light'} round 2: ${approves} approve / ${verdicts.length - approves} reject ` +
+  `${fullR2 ? 'Full round 2' : anyReject ? 'Round 2 skipped (review_r2=skip), round 1 stands' : 'Light round 2'}: ${approves} approve / ${verdicts.length - approves} reject ` +
   `across ${verdicts.length} reviewer(s).` +
   (disputes.length > 0 ? ` Disputes: ${upheldCount} upheld, ${withdrawnCount} withdrawn, ${unruledCount} unruled.` : '') +
   (dropped.length > 0 ? ` No verdict from: ${dropped.join(', ')}.` : '');
@@ -503,9 +518,16 @@ return {
   head_sha: headSha,
   round: 0,
   verdicts,
-  // `r1`은 싣지 않는다(F7): `verdicts`가 이미 R2 결과이고, 경량 R2에서 missed가 없으면 R1 그대로다 —
-  // 두 벌을 함께 실으면 handoff 코멘트가 두 배가 되는 대신 새로 알려 주는 것은 "누가 R2에서 마음을 바꿨는가"
-  // 뿐인데, 그것은 `verdicts[].on_others`와 `summary`가 이미 말한다.
+  // F7 (#244, P-9 / M-2): R1의 **전체 판정**(must_fix·verified)은 여전히 싣지 않지만, 역할별 판정 한 단어는
+  // `rounds`로 남긴다 — `[{ round: 1, verdicts: [{ role, verdict }] }, { round: 2, verdicts: [...] }]`.
+  // 그래야 #239(run-stage)가 "R2가 판정을 뒤집은 횟수"(`flipped=<n>`)를 셀 수 있다. round 2 항목은 전체 R2가
+  // 돌았을 때만 있다: R1이 만장일치 approve(경량 R2 — missed로 승격된 리뷰어가 있어도)이거나 `review_r2:
+  // "skip"`이면 `rounds`는 한 항목이다. round 1은 dispute 항목을 되붙인 뒤의 판정이다.
+  rounds: fullR2 ? [round1, roundOf(2, verdicts)] : [round1],
+  // cf1 (rework): the R1 verdicts again under the cross-PR contract name `r1_verdicts` — the name run-stage.js
+  // (#239, `reviewR1Line(v.data.r1_verdicts, v.data.verdicts)`) reads to record `review-r1: … r2_flipped=<n>`.
+  // It does not read `rounds`, so without this the flip count this issue exists to feed is never taken.
+  r1_verdicts: round1.verdicts,
   disputes,
   orchestration: 'workflow',
   guarantee: 'structural',
