@@ -1407,11 +1407,39 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
    * 재검증은 그대로 돈다. 값이 정확히 `true`가 아니면 이 블록은 오늘의 코드 그대로다.
    */
   const operator = d.operatorPresent === true;
+  /**
+   * #236 sec1 — 기다림을 지워도 소유자의 **이미 붙어 있는** `factory:veto`는 지우지 않는다(ADR-039 §4의 거부권). 창의 폴링이 아니라
+   * 한 번 읽는다: `since`를 지금으로 두면 창 안 이벤트는 없고, 생산자(run-stage `vetoLabel`)는 지금 이슈에 붙어 있는 라벨로 답한다.
+   * 읽지 못하면 "거부 없음"이 아니라 판정 불가(blocked)다.
+   */
+  const standingVeto = async () => {
+    const what = `standing ${VETO_LABEL}`;
+    if (typeof d.vetoLabel !== "function" || typeof d.now !== "function") return await undecidable(what, "deps not wired (vetoLabel, now)");
+    let at, lab;
+    try { at = Number(d.now()); } catch (e) { return await undecidable(what, `clock unreadable: ${e?.message || e}`); }
+    if (!Number.isFinite(at)) return await undecidable(what, "clock returned no time");
+    try { lab = await d.vetoLabel({ since: new Date(at).toISOString() }); } catch (e) { lab = { ok: false, reason: `${e?.message || e}` }; }
+    if (!lab?.ok || !Array.isArray(lab.vetoes)) return await undecidable(what, `${VETO_LABEL} label read failed: ${lab?.reason || "no event list returned"}`);
+    if (!lab.vetoes.length) return null;
+    const by = lab.vetoes.map((v) => String(v?.login || "").trim()).find(Boolean);
+    const who = by ? `@${by}` : `an unidentified account (the ${VETO_LABEL} label event names no actor)`;
+    return await handToHuman({
+      reason: `vetoed by ${who} — ${HUMAN_MERGE_REQUIRED_TEXT}`,
+      sections: [{
+        heading: "거부권 행사",
+        why: [`추적 이슈 #${issue}에 ${who}의 \`${VETO_LABEL}\`가 붙어 있습니다. 로컬 머지(운영 세션)도 이 라벨을 넘지 않습니다.`, "", "바뀐 보호 경로:"],
+        files: prot.files,
+      }],
+    });
+  };
   if (selfPath) {
     const shut = await breakerGate("before the veto window");
     if (shut !== null) return shut;
-    if (operator) record([`merge: veto window skipped — operator present (local merge from an operator session, ADR-044); breaker, review re-verification and the operator door still run`]);
-    else {
+    if (operator) {
+      record([`merge: veto window skipped — operator present (local merge from an operator session, ADR-044); a standing ${VETO_LABEL}, breaker, review re-verification and the operator door still run`]);
+      const vetoed = await standingVeto();
+      if (vetoed !== null) return vetoed;
+    } else {
       const stopped = await vetoWindow({ selfPath, files: prot.files });
       if (stopped !== null) return stopped;
     }

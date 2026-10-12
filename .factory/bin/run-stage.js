@@ -4374,7 +4374,14 @@ export function mergeGitAuth({ stage, env }) {
  * 문은 `operatorMergeCheck`의 행위자 검사다: 머지하는 계정이 팩토리 계정이거나 사람(`User`)이 아니면 거부한다.
  */
 export const OPERATOR_MERGE_ENV = "FACTORY_OPERATOR_MERGE";
-export const isOperatorMerge = ({ stage, env }) => stage === "merge" && env?.[OPERATOR_MERGE_ENV] === "1" && env?.GITHUB_ACTIONS === undefined;
+// #236 skeptic r4 — `GITHUB_ACTIONS` 하나만 보면 두 배우 모드의 merge 잡(GH_TOKEN = 팩토리 로그인 목록에 없는 사람 `User` 계정의 머지 PAT)이
+// 그 한 줄을 지우고 표식을 심을 때 행위자 검사까지 지나간다. 그래서 러너 표식을 넷 더 본다: GitHub이 모든 러너 스텝에 싣고
+// `$GITHUB_ENV`로 덮을 수 없는 `GITHUB_RUN_ID`·`RUNNER_TEMP`(GITHUB_*·RUNNER_*), 그리고 factory-merge.yml의 Run stage 스텝 env가 싣는
+// `FACTORY_TWO_ACTOR`와 `FACTORY_RUNNER_ID=gha-<run_id>`. 어느 하나라도 있으면(빈 값도) 러너다. 그것들을 전부 지우는 것은 그 스텝 안에서
+// 도는 엔진 코드 자신뿐이다 — 이것은 여전히 거름망이고, 그 한계는 ADR-044 §2가 적는다.
+const RUNNER_MARKERS = ["GITHUB_ACTIONS", "GITHUB_RUN_ID", "RUNNER_TEMP", "FACTORY_TWO_ACTOR"];
+export const isOperatorMerge = ({ stage, env }) => stage === "merge" && env?.[OPERATOR_MERGE_ENV] === "1"
+  && RUNNER_MARKERS.every((k) => env?.[k] === undefined) && !/^gha-/.test(String(env?.FACTORY_RUNNER_ID ?? ""));
 /**
  * 운영 door(`bin/operator-merge-check.js`)가 `gh pr view`로 읽는 필드 그대로 + 이 런이 머지할 head. 공유되는 것은 판정 함수
  * (`operatorMergeVerdict`)와 CHARTER 스위치다. 필드 목록을 `lib/operator-merge.js`의 export로 옮기면 door 파일 두 개
@@ -4400,11 +4407,19 @@ export const OPERATOR_PR_FIELDS = "number,isDraft,mergeable,baseRefName,files,st
  * 앞선 로컬 스테이지의 것이 그렇다 — 그것을 세면 운영자가 팩토리 계정이 되어 모든 로컬 머지가 스스로를 거부한다. 둘 다 없으면 ok:false → 거부.
  * H1b(merge-stage verifyReview의 `d.factoryLogins`)와 운영 door가 **같은** 해석을 쓴다(wireOperatorMerge).
  */
+// #236 skeptic r4 — `runner: gha-<id>`은 코멘트 **본문**이라 코멘트를 쓸 수 있는 누구든 적는다. H1b에게 팩토리 계정이 늘어나는 것은
+// 통과가 넓어지는 쪽이므로: 운영자의 env가 `FACTORY_BOT_LOGIN`으로 팩토리를 말하면 그것만 쓰고(코멘트는 아무도 더하지 않는다),
+// 말하지 않으면 러너 하트비트의 작성자가 **정확히 한 계정**일 때만 쓴다 — 둘 이상이면 어느 것이 위조인지 모르므로 ok:false(거부).
+// 남는 것: 러너가 한 번도 돌지 않은 이슈에 위조 하트비트 하나뿐이면 그 작성자가 팩토리가 된다 — 그 쓰기 권한자는 L0 context를 이미
+// 직접 올릴 수 있다(ADR-044 남는 것, plan open_risks d2). 운영자가 `FACTORY_BOT_LOGIN`을 두면 닫힌다.
 function operatorFactoryLogins({ gh, env, issue, injected }) {
   if (injected) return injected;
   return async () => {
+    if (String(env?.FACTORY_BOT_LOGIN ?? "").trim()) return resolveFactoryLogins({ gh, env, comments: [] });
     const comments = await gh.comments(issue);
     const runnerWritten = (Array.isArray(comments) ? comments : []).filter((c) => /^gha-\d+$/.test(String(parseHeartbeatComment(c?.body)?.runner ?? "")));
+    const authors = [...new Set(runnerWritten.map((c) => String(c?.author ?? "").toLowerCase()).filter(Boolean))];
+    if (authors.length > 1) return { ok: false, reason: `runner heartbeats on #${issue} name ${authors.length} different authors (${authors.map((a) => `@${a}`).join(", ")}) — a heartbeat's runner field is comment text, so the factory account is ambiguous; set FACTORY_BOT_LOGIN` };
     return resolveFactoryLogins({ gh, env, comments: runnerWritten });
   };
 }
