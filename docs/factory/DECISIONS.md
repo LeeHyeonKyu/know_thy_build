@@ -4908,9 +4908,10 @@ dep을 싣는지는 소스 문자열 핀으로 고정하지 않는다(계획 non
    failure로 올린다. 설명은 `local:<login>`(`gh api user`). 러너(`GITHUB_ACTIONS`)에서, 로그인을 모를 때, head 커밋이 클론에 없을 때,
    merge-base를 못 구할 때는 아무것도 올리지 않는다. — `test_236_local_integrity_posts_the_same_verdict_as_ci_and_refuses_on_a_runner`,
    `test_236_local_integrity_judges_the_pr_head_sha_not_the_worktree`
-2. `factory run merge <issue> --operator`: 운영 세션(러너가 아님)만 merge 스테이지를 로컬에서 돌린다. `cli/run.js`가 `FACTORY_OPERATOR_MERGE=1`을
-   싣고, run-stage는 `GITHUB_ACTIONS`가 있으면 그 표식을 무시한다(`isOperatorMerge`) — 위조한 표식으로도 러너는 창을 연다. 플래그 없는
-   `factory run merge <issue>`는 예전 거부 문구 그대로다(기존 테스트가 고정한다; 호출마다 고르는 opt-in). `--remote`는 그대로다.
+2. `factory run merge <issue>`: 운영 세션(러너가 아님)만 merge 스테이지를 로컬에서 돌린다("merge는 로컬 금지" → "운영 세션에서만 로컬
+   허용"). `cli/run.js`가 `FACTORY_OPERATOR_MERGE=1`을 싣고, run-stage는 `GITHUB_ACTIONS`가 env에 있으면(빈 값도) 그 표식을 무시한다
+   (`isOperatorMerge`) — 위조한 표식으로도 러너는 창을 연다. env는 러너 위의 프로세스가 지울 수 있으므로 그것은 첫 거름망일 뿐이고, 문은
+   행위자 검사다: 머지하는 계정(`gh api user`)이 팩토리 계정이거나 사람(`User`)이 아니면 거부한다. `--remote`는 그대로다.
    — `test_236_local_merge_runs_merge_stage_with_the_operator_token_and_no_veto_wait`
 3. **ADR-033 개정**: merge-stage의 새 dep `operatorPresent`(정확히 `true`일 때만)는 거부권 창의 **기다림 하나**만 지운다 — 창 상태·알림 코멘트·
    라벨 폴링·sleep이 없다. 창 앞뒤의 차단기, 창 자리의 리뷰 재검증(H1b 포함), mergeGates, ready 뒤 재확인(head가 움직였는지 포함)은
@@ -4923,7 +4924,7 @@ dep을 싣는지는 소스 문자열 핀으로 고정하지 않는다(계획 non
    들어갔다. — `test_236_local_merge_refuses_door_files_and_non_green_checks`
 5. `factory/integrity`는 이 head에 있어야 한다(`operatorMergeVerdict`는 없는 체크를 묻지 않는다): CI check run이 GREEN이거나, 이 head의
    모든 `factory/integrity` 상태가 `local:<login>`·success·생성자 로그인 = 설명의 로그인·팩토리 계정 아님·사람 계정(`User`)이어야 한다.
-   옛 head의 상태는 세지 않는다. 행위자 로그인을 모르면 거부한다. 머지 뒤 감사 줄 `local-merge pr=<n> sha=<sha> actor=<login> veto=skipped`가
+   옛 head의 상태는 세지 않는다. 행위자 로그인을 모르거나, 행위자가 팩토리 계정이거나 사람 계정이 아니면 거부한다. 머지 뒤 감사 줄 `local-merge pr=<n> sha=<sha> actor=<login> veto=skipped`가
    run 기록과 stderr에 남는다. — `test_236_local_merge_refuses_stale_head_status_and_nonhuman_actor`
 
 **남는 것**(plan open_risks): 브랜치 보호의 L0 context는 앱에 묶이지 않아 statuses:write 토큰이 올린 아무 `factory/integrity`나 UI·`--admin`

@@ -15,7 +15,7 @@ export const HELP = `
     factory rehearse [--json]           Run the harness once ON THE RUNNER before the first issue (ADR-025);
                                         prints the step table and exits non-zero on RED
     factory run <stage> <issue>         Run a stage locally with the same scripts CI uses (triage|plan|implement|review)
-    factory run merge <issue> --operator
+    factory run merge <issue>
                                         Merge an approved issue locally from an operator session (your token, no veto
                                         wait; refused on a CI runner; door files and non-green checks refused — ADR-044)
     factory integrity <pr>              Post the CI integrity verdict for the PR head as factory/integrity (local:<login>);

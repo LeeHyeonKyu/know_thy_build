@@ -4367,13 +4367,14 @@ export function mergeGitAuth({ stage, env }) {
 }
 
 /**
- * ── #236 (ADR-044) — 로컬 머지: 운영 세션이 `factory run merge <issue> --operator`로 부른 merge ───────────────────────────
+ * ── #236 (ADR-044) — 로컬 머지: 운영 세션이 `factory run merge <issue>`로 부른 merge ───────────────────────────
  * `cli/run.js`가 러너가 아닐 때만 `FACTORY_OPERATOR_MERGE=1`을 심고, 여기서도 **다시** 묻는다: 그 표식은 env 한 줄이라 누구든
- * 심을 수 있으므로 `GITHUB_ACTIONS`가 있으면(러너, 곧 스테이지) 무시한다 — 러너는 어떤 철자로도 기다림 없는 머지에 닿지 못한다.
- * 정확히 "1"일 때만, merge 스테이지에서만 참이다.
+ * 심을 수 있으므로 `GITHUB_ACTIONS`가 env에 **있으면**(빈 값도 — 러너, 곧 스테이지) 무시한다. 정확히 "1"일 때만, merge
+ * 스테이지에서만 참이다. env는 러너 위의 프로세스가 지우거나 비울 수 있다(rework sec1) — 그래서 이것은 문이 아니라 첫 거름망이고,
+ * 문은 `operatorMergeCheck`의 행위자 검사다: 머지하는 계정이 팩토리 계정이거나 사람(`User`)이 아니면 거부한다.
  */
 export const OPERATOR_MERGE_ENV = "FACTORY_OPERATOR_MERGE";
-export const isOperatorMerge = ({ stage, env }) => stage === "merge" && env?.[OPERATOR_MERGE_ENV] === "1" && !env?.GITHUB_ACTIONS;
+export const isOperatorMerge = ({ stage, env }) => stage === "merge" && env?.[OPERATOR_MERGE_ENV] === "1" && env?.GITHUB_ACTIONS === undefined;
 /** 운영 door(`bin/operator-merge-check.js`)가 `gh pr view`로 읽는 필드 그대로 + 이 런이 머지할 head. */
 export const OPERATOR_PR_FIELDS = "number,isDraft,mergeable,baseRefName,files,statusCheckRollup,headRefOid";
 
@@ -4382,7 +4383,9 @@ export const OPERATOR_PR_FIELDS = "number,isDraft,mergeable,baseRefName,files,st
  *   - `operatorPresent: true` — merge-stage가 거부권 창의 **기다림만** 건너뛴다(차단기·리뷰 재검증·게이트·head 재확인은 그대로).
  *   - `operatorMergeCheck({pr, sha})` — mergePr 직전의 문: 운영 door와 같은 `operatorMergeVerdict`(같은 필드·같은 CHARTER 스위치
  *     `self_change.operator_merge_judge`·같은 엔진 판정)에, 이 head의 `factory/integrity`가 GREEN인지(`localIntegrityVerdict`)와
- *     PR head가 이 런이 검증한 sha인지를 더한다. 행위자(`gh api user`)를 모르면 거부한다 — 익명으로 머지하지 않는다.
+ *     PR head가 이 런이 검증한 sha인지를 더한다. 행위자(`gh api user`)를 모르면 거부한다 — 익명으로 머지하지 않는다. 행위자가
+ *     팩토리 계정이거나(팩토리 로그인을 모르면 그것도 거부) 사람 계정(`User`)이 아니면 거부한다(rework sec1): env를 뒤집은 러너의
+ *     팩토리 토큰은 운영자가 아니다.
  *   - `runRecord` — run 기록에 쓰는 줄을 stderr에도 낸다: 운영자가 거부 사유와 감사 줄을 그 자리에서 읽는다.
  */
 export function makeOperatorMergeDeps({ stage, env, run: runner, repo, gh, factoryLogins, getCharter = () => null, getEngine = () => false, getDefaultBranch = () => "main", runRecord, log = (l) => console.error(l) } = {}) {
@@ -4401,6 +4404,16 @@ export function makeOperatorMergeDeps({ stage, env, run: runner, repo, gh, facto
     reasons.push(...door.reasons);
     let logins;
     try { logins = await factoryLogins(); } catch (e) { logins = { ok: false, reason: `${e?.message || e}` }; }
+    if (actor) {
+      const factory = logins?.ok && Array.isArray(logins.logins) ? logins.logins.filter(Boolean).map((l) => String(l).toLowerCase()) : [];
+      if (!factory.length) reasons.push(`the factory account(s) could not be resolved — the merging actor @${actor} cannot be told from the factory token`);
+      else if (factory.includes(actor.toLowerCase())) reasons.push(`the merging actor @${actor} is a factory account — a local merge is the operator's, never the factory token's`);
+      else {
+        let type = null;
+        try { type = await gh.userType(actor); } catch { type = null; }
+        if (type !== "User") reasons.push(`the merging actor @${actor} is not a human account (${type || "unknown"}) — a local merge is made by a person's own token`);
+      }
+    }
     let statuses;
     try { statuses = await gh.commitStatuses(sha); } catch (e) { statuses = null; reasons.push(`commit statuses for ${String(sha).slice(0, 7)} unreadable: ${e?.message || e}`); }
     const integrity = await localIntegrityVerdict({

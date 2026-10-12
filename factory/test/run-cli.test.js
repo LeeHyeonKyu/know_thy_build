@@ -39,9 +39,11 @@ test("stage merge → error, runs only in CI, exit 1, no side effects", async ()
   const { io: i, o } = io();
   const run = vi.fn();
   const spawnInherit = vi.fn();
-  const code = await runCommand({ root, argv: ["merge", "5"], io: i, run, spawnInherit });
+  // #236 dw4 (rework spec1/qa1, the issue's own instruction "merge는 로컬 금지 → 운영 세션에서만 로컬 허용"): plain merge now runs
+  // locally off a runner, so this refusal holds on a runner only — env is injected and the pinned text is the runner refusal.
+  const code = await runCommand({ root, argv: ["merge", "5"], io: i, run, spawnInherit, env: { GITHUB_ACTIONS: "true" } });
   expect(code).toBe(1);
-  expect(o.err.join("\n")).toContain("merge runs only in CI (branch protection)");
+  expect(o.err.join("\n")).toContain("merge runs locally only from an operator session");
   expect(run).not.toHaveBeenCalled();
   expect(spawnInherit).not.toHaveBeenCalled();
 });
@@ -271,30 +273,25 @@ test("default spawnInherit and run are used when not injected (smoke — routes 
   expect(typeof mod.runCommand).toBe("function");
 });
 
-// #236 — contract deviation pinned on purpose: dw4 wants a plain `factory run merge <n>` to merge locally, but the existing
-// "stage merge → error, runs only in CI" test above pins that exact refusal (tests_are_load_bearing; not in the issue's
-// tests_changed_allowed:). So the local merge opens only behind `--operator`, and the plain refusal must point the operator there
-// on BOTH env paths — off a runner and on one — while running and spawning nothing.
-test("test_236_plain_merge_keeps_the_pinned_refusal_and_names_the_operator_path", async () => {
-  for (const env of [{}, { GITHUB_ACTIONS: "true" }]) {
-    const root = makeRoot();
-    const { io: i, o } = io();
-    const run = vi.fn();
-    const spawnInherit = vi.fn(() => 0);
-    const code = await runCommand({ root, argv: ["merge", "5"], io: i, run, spawnInherit, env });
-    expect(code, JSON.stringify(env)).toBe(1);
-    const text = o.err.join("\n");
-    expect(text).toContain("merge runs only in CI (branch protection)");
-    expect(text).toContain("factory run merge <issue> --operator");
-    expect(run).not.toHaveBeenCalled();
-    expect(spawnInherit).not.toHaveBeenCalled();
-  }
-  // …and the same command with `--operator`, off a runner, does spawn the local merge (the path the refusal names).
+// #236 dw4 (rework spec1/qa1) — plain `factory run merge <n>`: off a runner it spawns the local merge with the operator marker;
+// on a runner (GITHUB_ACTIONS set — blank included, sec1) it refuses, spawns nothing, and never sends anyone to CI or `--remote`.
+test("test_236_plain_merge_runs_locally_off_a_runner_and_is_refused_on_one", async () => {
   const root = makeRoot();
-  const { io: i } = io();
+  const { io: i, o } = io();
   const spawnInherit = vi.fn(() => 0);
-  const run = makeOkRun();
-  expect(await runCommand({ root, argv: ["merge", "5", "--operator"], io: i, run, spawnInherit, env: {} })).toBe(0);
+  expect(await runCommand({ root, argv: ["merge", "5"], io: i, run: makeOkRun(), spawnInherit, env: {} })).toBe(0);
+  expect(o.err).toEqual([]);
   expect(spawnInherit.mock.calls[0][1]).toEqual([".factory/bin/run-stage.js", "merge", "5"]);
   expect(spawnInherit.mock.calls[0][2].env.FACTORY_OPERATOR_MERGE).toBe("1");
+  for (const env of [{ GITHUB_ACTIONS: "true" }, { GITHUB_ACTIONS: "" }]) {
+    const r = io();
+    const run = vi.fn();
+    const spawn = vi.fn(() => 0);
+    expect(await runCommand({ root, argv: ["merge", "5"], io: r.io, run, spawnInherit: spawn, env }), JSON.stringify(env)).toBe(1);
+    const text = r.o.err.join("\n");
+    expect(text).toMatch(/GITHUB_ACTIONS/);
+    expect(text).not.toMatch(/runs only in CI|--remote/);
+    expect(run).not.toHaveBeenCalled();
+    expect(spawn).not.toHaveBeenCalled();
+  }
 });

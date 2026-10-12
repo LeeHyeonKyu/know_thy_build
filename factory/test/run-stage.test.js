@@ -10982,10 +10982,10 @@ test("test_236_local_merge_runs_merge_stage_with_the_operator_token_and_no_veto_
   ]);
   const ioOf = () => { const o = { out: [], err: [] }; return { io: { out: (s) => o.out.push(String(s)), err: (s) => o.err.push(String(s)) }, o }; };
 
-  // (1) Off a runner: `factory run merge 42 --operator` spawns the CI's own run-stage, for merge, with the operator marker.
+  // (1) Off a runner: plain `factory run merge 42` spawns the CI's own run-stage, for merge, with the operator marker.
   const spawnInherit = vi.fn(() => 0);
   const off = ioOf();
-  expect(await runCommand236({ root, argv: ["merge", "42", "--operator"], io: off.io, run: okRun(), spawnInherit, env: { PATH: "/usr/bin" } })).toBe(0);
+  expect(await runCommand236({ root, argv: ["merge", "42"], io: off.io, run: okRun(), spawnInherit, env: { PATH: "/usr/bin" } })).toBe(0);
   expect(spawnInherit).toHaveBeenCalledTimes(1);
   const [cmd, args, opts] = spawnInherit.mock.calls[0];
   expect([cmd, ...args]).toEqual(["node", ".factory/bin/run-stage.js", "merge", "42"]);
@@ -11021,11 +11021,12 @@ test("test_236_local_merge_runs_merge_stage_with_the_operator_token_and_no_veto_
     expect(d.vetoWindow.open, door).not.toHaveBeenCalled();
   }
 
-  // (4) On a runner: `--operator` exits non-zero and nothing is spawned, and the text does not send the operator to CI.
-  for (const env of [{ GITHUB_ACTIONS: "true" }, { GITHUB_ACTIONS: "true", [OPERATOR_MERGE_ENV236]: "1" }]) {
+  // (4) On a runner (GITHUB_ACTIONS set, even blank): plain merge exits non-zero and nothing is spawned, and the text does not
+  // send the operator to CI or to `--remote` (sec1: a blanked GITHUB_ACTIONS is still a runner).
+  for (const env of [{ GITHUB_ACTIONS: "true" }, { GITHUB_ACTIONS: "true", [OPERATOR_MERGE_ENV236]: "1" }, { GITHUB_ACTIONS: "" }]) {
     const spawn = vi.fn(() => 0);
     const r = ioOf();
-    const code = await runCommand236({ root, argv: ["merge", "42", "--operator"], io: r.io, run: okRun(), spawnInherit: spawn, env });
+    const code = await runCommand236({ root, argv: ["merge", "42"], io: r.io, run: okRun(), spawnInherit: spawn, env });
     expect(code).not.toBe(0);
     expect(spawn).not.toHaveBeenCalled();
     const text = r.o.err.join("\n");
@@ -11044,6 +11045,8 @@ test("test_236_local_merge_runs_merge_stage_with_the_operator_token_and_no_veto_
     expect(d.sleep).toHaveBeenCalled();
     expect(lines.some((l) => l.startsWith("local-merge "))).toBe(false);
   }
+  // …a blanked GITHUB_ACTIONS is still a runner (sec1: `GITHUB_ACTIONS= FACTORY_OPERATOR_MERGE=1 …` must not open operator mode)…
+  expect(makeOperatorMergeDeps236({ stage: "merge", env: { ...spawnedEnv, GITHUB_ACTIONS: "" } })).toEqual({});
   // …and a marker for another stage, or a marker that is not exactly "1", is not operator mode either.
   expect(makeOperatorMergeDeps236({ stage: "review", env: { [OPERATOR_MERGE_ENV236]: "1" } })).toEqual({});
   expect(makeOperatorMergeDeps236({ stage: "merge", env: { [OPERATOR_MERGE_ENV236]: "true" } })).toEqual({});
@@ -11132,6 +11135,10 @@ test("test_236_local_merge_refuses_stale_head_status_and_nonhuman_actor", async 
     ["not a local: status at all", { gh: operatorGh236({ statuses: { [HEAD_236]: [{ ...LOCAL_OK_236, description: "looks fine" }] } }) }, /is not a local:<login> status/],
     ["creator's account type unknown", { gh: operatorGh236({ types: {} }) }, /which is not a human account \(unknown\)/],
     ["the PR head moved past the checked head", { pr: prJson236({ headRefOid: "c".repeat(40) }) }, /PR head moved/],
+    // sec1 — the MERGING actor (gh api user) must be a human, non-factory account: an env flip alone never makes the factory
+    // token (or any bot) the operator, even when every other check — the CI factory/integrity check run included — is green.
+    ["the merging actor is the factory account", { gh: operatorGh236({ viewer: "ktb-bot" }) }, /the merging actor @ktb-bot is a factory account/],
+    ["the merging actor is a bot", { gh: operatorGh236({ viewer: "ci-bot[bot]" }) }, /the merging actor @ci-bot\[bot\] is not a human account \(Bot\)/],
   ];
   for (const [label, o, why] of cases) {
     const v = await check(o);
@@ -11153,6 +11160,17 @@ test("test_236_local_merge_refuses_stale_head_status_and_nonhuman_actor", async 
     const v = await check({ gh });
     expect(v.ok).toBe(false);
     expect(v.reasons.join("; ")).toMatch(/operator's login could not be resolved/);
+  }
+  // sec1 in the merge stage: the factory token as actor, with the CI factory/integrity check run green (which alone satisfies the
+  // integrity verdict), never reaches mergePr — and the same fixture with a human actor does (so the refusal is the actor's).
+  for (const [viewer, merged] of [["ktb-bot", false], ["ci-bot[bot]", false], ["alice", true]]) {
+    const log = [];
+    const ciRun = [{ __typename: "CheckRun", name: "factory/integrity", status: "COMPLETED", conclusion: "SUCCESS" }];
+    const { deps } = operatorDeps236({ pr: prJson236({ statusCheckRollup: ROLLUP_236(ciRun) }), gh: operatorGh236({ viewer, statuses: { [HEAD_236]: FACTORY_STATUSES_236 } }), log });
+    const d = mergeD236(deps);
+    expect(await runMerge236(d, (lines) => d.runRecord(lines)), viewer).toBe(merged ? 0 : 2);
+    expect(d.mergePr.mock.calls.length, viewer).toBe(merged ? 1 : 0);
+    if (!merged) expect(log.join("\n"), viewer).toMatch(new RegExp(`the merging actor @${viewer.replace(/[[\]]/g, "\\$&")} is`));
   }
   // In the merge stage: a stale-head status never reaches mergePr.
   {
