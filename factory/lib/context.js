@@ -246,12 +246,74 @@ export function explicitSubmission(comments) {
 /** #238 — a JSON-object value (not null, not an array). The one test for "a rejected plan we can carry" (run-stage imports it). */
 export const isPlainObject = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
 
-export async function buildContext({ root, gh, issue, stage, run = null, base = null, setupDirty = null, planRepair = null, planRepairPrevious = null, mergeConflicts = null }) {
+/**
+ * ── #227 — **a PR number is external state; check it before trusting it** ─────────────────────────────────────────────
+ *
+ * 2026-10-10 #207: the factory's PR #220 was hidden from everyone (ADR-038). The requeued implement trusted the handoff's `pr: 220`,
+ * the builder reported pushing to it, and review died on `gh pr view 220` → needs-human with nothing a person could do. A PR can be
+ * deleted, hidden, closed or re-pointed, so implement (here), the post-builder hand-off and review/merge's checkout (run-stage.js) ask
+ * `gh.prView` first and act ONLY on proof:
+ *   - `gone`    — gh says "Could not resolve to a PullRequest" (the real text gh prints for a missing/hidden PR), the head branch is not
+ *                 this issue's branch, or the PR is CLOSED. Implement drops the number; review/merge return the issue to planned.
+ *   - `merged`  — the PR is MERGED. Never a rebuild (the code already landed); every stage stops for a human (plan non-goal: #227 (c)).
+ *   - `unknown` — any other gh failure (5xx, rate limit, auth, timeout) or a view we do not recognise. It proves nothing about the PR,
+ *                 so every caller keeps today's behaviour — dropping on a blip would open a duplicate PR or throw away a finished build.
+ *   - `ok`      — OPEN on the expected branch.
+ * The expected branch is passed in by the caller (run-stage's `stageBranch`) — this module does not know the naming rule.
+ * One rule, three callers: they must not disagree on what "gone" means.
+ */
+export const PR_NOT_FOUND = /Could not resolve to a PullRequest/;
+export function classifyHandoffPr({ view = null, error = null, branch }) {
+  if (error != null) {
+    const msg = String(error?.message ?? error).replace(/\s+/g, " ").trim().slice(0, 240);
+    if (PR_NOT_FOUND.test(msg)) return { state: "gone", why: "not visible (gh: Could not resolve to a PullRequest)" };
+    return { state: "unknown", why: `gh pr view failed — ${msg}` };
+  }
+  if (view?.state === "MERGED") return { state: "merged", why: "already MERGED" };
+  if (typeof view?.headRefName === "string" && view.headRefName !== branch) return { state: "gone", why: `on branch ${view.headRefName}, not ${branch}` };
+  if (view?.state === "CLOSED") return { state: "gone", why: "CLOSED" };
+  if (view?.state === "OPEN" && view?.headRefName === branch) return { state: "ok", why: "OPEN" };
+  return { state: "unknown", why: `unrecognised PR view (state=${view?.state ?? "?"}, headRefName=${view?.headRefName ?? "?"})` };
+}
+/** `classifyHandoffPr` over one live `prView(pr)` call. Never throws. */
+export async function checkHandoffPr({ prView, pr, branch }) {
+  let view;
+  try { view = await prView(pr); }
+  catch (error) { return classifyHandoffPr({ error, branch }); }
+  return classifyHandoffPr({ view, branch });
+}
+/** The run-record line implement writes when it drops a gone handoff PR (#227's wording, then why). */
+export const prDroppedLine = (pr, why) => `pr: #${pr} not visible/not this branch — the builder opens a new PR (${why})`;
+
+export async function buildContext({ root, gh, issue, stage, run = null, base = null, setupDirty = null, planRepair = null, planRepairPrevious = null, mergeConflicts = null, prBranch = null }) {
   const harness = loadHarness(root), charter = loadCharter(root), roles = loadRoles(root);
   const it = await gh.issue(issue);
   const comments = await gh.comments(issue);
   const handoffs = {};
   for (const s of ["triage", "plan", "implement", "review"]) { const h = latestHandoff(comments, s); if (h) handoffs[s] = h.data; }
+  /**
+   * #227 — implement only, and only when the caller names the expected branch (run-stage passes `stageBranch(issue)`). A `gone` PR is
+   * removed from every input the builder reads BEFORE anything is derived from it: `loaded.pr`/`head_sha`/`disputed` (loadedFor reads
+   * these handoffs and skips the PR's comments when there is no number), `loaded.k_restart_brief.pr` (loadedFor, from `prCheck`) and the
+   * `handoffs` block of `context.json`/`context.<role>.json`.
+   * The review handoff carries the same number on a rework round, so it goes too. The note travels as a NON-enumerable property: it
+   * names the dropped number, and nothing the builder reads may carry it. A gh client without `prView` is a caller that did not ask.
+   */
+  let prCheck = null;
+  const handoffPr = handoffs.implement?.pr;
+  if (stage === "implement" && prBranch && typeof handoffPr === "number" && typeof gh.prView === "function") {
+    const c = await checkHandoffPr({ prView: (n) => gh.prView(n), pr: handoffPr, branch: prBranch });
+    prCheck = { pr: handoffPr, ...c, line: null };
+    if (c.state === "gone") {
+      handoffs.implement = { ...handoffs.implement, pr: null, head_sha: null };
+      if (handoffs.review && handoffs.review.pr === handoffPr) handoffs.review = { ...handoffs.review, pr: null, head_sha: null };
+      prCheck.line = prDroppedLine(handoffPr, c.why);
+    } else if (c.state === "merged") {
+      prCheck.line = `pr: #${handoffPr} is already MERGED — implement does not rebuild over a merged PR; stopping for a human`;
+    } else if (c.state === "unknown") {
+      prCheck.line = `pr: #${handoffPr} could not be checked — ${c.why} (keeping the number)`;
+    }
+  }
   const tier = handoffs.triage?.tier ?? charter.tier_default;
   const submission = stage === "triage" ? explicitSubmission(comments) : null;
   // 감사 H3 — 로스터·계획은 **신고가 아니라 실효 tier**를 읽는다.
@@ -328,6 +390,7 @@ export async function buildContext({ root, gh, issue, stage, run = null, base = 
      */
     ...(stage === "implement" && Array.isArray(mergeConflicts) && mergeConflicts.length ? { merge_conflicts: [...mergeConflicts] } : {}),
   };
+  if (prCheck) Object.defineProperty(ctx, "prCheck", { value: prCheck, enumerable: false });
   ctx.loaded = await loadedFor({ ctx, roleBlock, gh, comments });
   // #212 dw5 — the merge stage's reason was reworded: not a conflict-only round, and run-stage writes this line so it is not silent.
   if (stage === "implement") { const note = conflictExemptionNote(commentsSinceRequeue(comments)); if (note) ctx.conflict_only_note = note; }
@@ -516,7 +579,10 @@ async function loadedFor({ ctx, roleBlock, gh, comments = [] }) {
    * K 카운터와 같은 창(`commentsSinceRequeue`)의 **쓰인** 재시작 하나(`kRestartState`)다 — 뒤에 붙은 마커가 바꾸지 못한다.
    * `loaded.must_fix`는 재시작 뒤 첫 리뷰부터 그 라운드의 것이 되므로 얼린 목록은 여기 따로 간다. 재시작이 없으면 키가 없다.
    */
-  const kRestartBrief = ctx.stage === "implement" ? kRestartState(commentsSinceRequeue(comments)).brief : null;
+  const restartBrief = ctx.stage === "implement" ? kRestartState(commentsSinceRequeue(comments)).brief : null;
+  // #227 cf-s2 — the brief's `pr` comes from the restart comment, not from the handoffs the drop rewrote: a gone number goes here too.
+  const dropped = ctx.prCheck?.state === "gone" ? ctx.prCheck.pr : null;
+  const kRestartBrief = restartBrief && dropped != null && restartBrief.pr === dropped ? { ...restartBrief, pr: null } : restartBrief;
   const review = ctx.handoffs?.review ?? null;
   const conflictOnly = ctx.stage === "implement" && !conflictBoundSpent(comments, ctx.issue?.number)
     ? conflictOnlyOf({ comments: commentsSinceRequeue(comments), mergeConflicts: ctx.merge_conflicts, review }) : null;

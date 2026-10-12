@@ -6594,6 +6594,345 @@ test("test_200_scope_check_fails_open_visibly_on_git_read_error", async () => {
 });
 
 /**
+ * ── #227 — a PR number is external state: check it before trusting it ─────────────────────────────────────────────────
+ *
+ * 2026-10-10 #207: PR #220 was hidden from everyone (ADR-038). The requeued implement trusted the handoff's `pr: 220`, the builder
+ * reported a push to it, and review died on `gh pr view 220` → needs-human with nothing a person could do. Three checks close it:
+ * (1) implement's context drops a gone PR (context.test.js); (2) after the builder, the engine refuses a builder PR that is not
+ * visible / not on claude/fq-<n> / not OPEN before `factory:awaiting-review`; (3) review and merge send a gone PR back to
+ * `factory:planned` (two new graph edges) once per requeue window. The gh fixtures are the REAL gh texts fed through the real
+ * `makeGh().prView`; transitions go through the REAL `transition()`/`canTransition`/requirements wherever the route is the claim.
+ */
+import { makeTransitionDep as makeTransitionDep227, prNotVisibleReason as prNotVisibleReason227, prNotVisibleReturns as prNotVisibleReturns227 } from "../bin/run-stage.js";
+const GH_NOT_FOUND_227 = (n) => `GraphQL: Could not resolve to a PullRequest with the number of ${n}. (repository.pullRequest)`;
+const GH_401_227 = "HTTP 401: Bad credentials (https://api.github.com/graphql)\nTry authenticating with:  gh auth login -h github.com";
+const GH_502_227 = "HTTP 502: Bad Gateway (https://api.github.com/graphql)";
+const H227 = "a".repeat(40);
+/** The production `prView` (lib/gh.js) over a fake gh process. `{ stderr }` → exit 1 with that text; otherwise the PR view JSON. */
+const prView227 = (o) => makeGh195({
+  repo: "LeeHyeonKyu/know_thy_build",
+  run: makeFakeRun([{
+    match: (c, a) => c === "gh" && a[0] === "pr" && a[1] === "view",
+    result: (_c, a) => (o.stderr
+      ? { code: 1, stdout: "", stderr: typeof o.stderr === "function" ? o.stderr(a[2]) : o.stderr }
+      : { code: 0, stdout: JSON.stringify({ number: Number(a[2]), state: o.state, mergeable: "MERGEABLE", headRefName: o.headRefName, headRefOid: H227, baseRefName: "main", labels: [] }), stderr: "" }),
+  }]),
+}).prView;
+const implHandoff227 = (pr, at = "2026-10-10T01:00:00Z") => ({ body: renderHandoff({ stage: "implement", issue: 227, summary: "s", data: { schema: "factory.implement.v1", issue: 227, pr, head_sha: H227 } }), createdAt: at });
+/** A fake gh backing the REAL transition for #227: a plan handoff, an implement handoff naming `pr`, and a label that follows each transition. */
+function gh227({ label, pr = 220, view }) {
+  let lab = label;
+  const comments = [
+    { body: renderHandoff({ stage: "plan", issue: 227, data: { ...planHandoff, issue: 227 } }), createdAt: "2026-10-10T00:00:00Z" },
+    implHandoff227(pr),
+  ];
+  return {
+    get label() { return lab; },
+    relabel(l) { lab = l; },
+    push(c) { comments.push(c); },
+    issue: async () => ({ number: 227, title: "t", body: "", labels: [lab] }),
+    comments: async () => comments.slice(),
+    comment: async (_n, body) => { comments.push({ body, createdAt: "2026-10-10T02:00:00Z" }); },
+    setFactoryLabel: async (_n, to) => { lab = to; },
+    prHeadSha: vi.fn(async () => H227),
+    prView: vi.fn(prView227(view)),
+  };
+}
+/** main()'s transition dep, through the exported `makeTransitionDep` + the REAL buildCtxExtra and transition(). */
+const realTransition227 = (gh, stage) => vi.fn(makeTransitionDep227({
+  gh, issue: 227, stage,
+  buildExtra: async ({ to, data }) => ({ ...(await buildCtxExtra({ gh, issue: 227, to, data, ctx: null, stage })), gatesChecked: true }),
+}));
+const fakeGit227 = () => makeFakeRun([{ match: (c) => c === "git", result: { code: 0, stdout: "", stderr: "" } }]);
+async function review227(gh, over = {}) {
+  const lines = [];
+  const d = checkoutBaseDeps({
+    checkoutHead: makeCheckoutHead({ gh, run: fakeGit227(), root: "/repo", issue: 227 }),
+    transition: realTransition227(gh, "review"),
+    claudeP: vi.fn(async () => ({ is_error: false, result: "{}" })),
+    runRecord: (l) => lines.push(...l),
+    ...over,
+  });
+  const code = await runStage({ stage: "review", issue: 227, deps: d, runnerId: "r" });
+  return { code, lines, d };
+}
+async function merge227(gh) {
+  const lines = [];
+  const d = mergeHappyDeps({
+    checkoutHead: makeCheckoutHead({ gh, run: fakeGit227(), root: "/repo", issue: 227 }),
+    transition: realTransition227(gh, "merge"),
+    gates: vi.fn(async () => ({ schema: "factory.gates.v1", status: "GREEN", head_sha: H227 })),
+    mergePr: vi.fn(async () => {}),
+    runRecord: (l) => lines.push(...l),
+  });
+  const code = await runStage({ stage: "merge", issue: 227, deps: d, runnerId: "r" });
+  return { code, lines, d };
+}
+const lastTransitionComment227 = async (gh) => (await gh.comments()).map((c) => c.body).filter((b) => TRANSITION_TO.test(b)).at(-1);
+import { TRANSITION_TO } from "../lib/retro/issue-comments.js";
+
+test("test_227_review_with_an_invisible_pr_returns_to_planned", async () => {
+  // review (from awaiting-review): not found, another branch, CLOSED → factory:planned through the real graph, no review session.
+  for (const view of [{ stderr: GH_NOT_FOUND_227 }, { state: "OPEN", headRefName: "claude/fq-207" }, { state: "CLOSED", headRefName: "claude/fq-227" }]) {
+    const gh = gh227({ label: "factory:awaiting-review", view });
+    const { code, lines, d } = await review227(gh);
+    const what = JSON.stringify(view);
+    expect(gh.label, what).toBe("factory:planned");
+    expect(code, what).toBe(0);
+    expect(d.claudeP, what).not.toHaveBeenCalled();
+    const body = await lastTransitionComment227(gh);
+    expect(body, what).toMatch(/from=factory:awaiting-review to=factory:planned/);
+    expect(body, what).toContain("#220");
+    expect((await gh.comments()).some((c) => /factory-transition-refused/.test(c.body)), what).toBe(false);
+    expect(lines.some((l) => /#220/.test(l) && /factory:planned/.test(l)), what).toBe(true);
+  }
+  // merge (from approved): the same, and no gates, no merge.
+  const gm = gh227({ label: "factory:approved", view: { stderr: GH_NOT_FOUND_227 } });
+  const m = await merge227(gm);
+  expect(gm.label).toBe("factory:planned");
+  expect(m.code).toBe(0);
+  expect(m.d.mergePr).not.toHaveBeenCalled();
+  expect(m.d.gates).not.toHaveBeenCalled();
+  expect(await lastTransitionComment227(gm)).toMatch(/from=factory:approved to=factory:planned[\s\S]*#220/);
+
+  // Any other checkout failure still goes to needs-human: the PR is visible, OPEN, on this branch, but its head moved.
+  const moved = gh227({ label: "factory:awaiting-review", view: { state: "OPEN", headRefName: "claude/fq-227" } });
+  moved.prHeadSha = vi.fn(async () => "b".repeat(40));
+  const mv = await review227(moved);
+  expect(moved.label).toBe("factory:needs-human");
+  expect(mv.code).toBe(2);
+  expect(await lastTransitionComment227(moved)).toMatch(/PR head moved since implement handoff/);
+});
+
+test("test_227_a_second_invisible_pr_in_one_cycle_goes_to_needs_human", async () => {
+  const gh = gh227({ label: "factory:awaiting-review", view: { stderr: GH_NOT_FOUND_227 } });
+  const first = await review227(gh);
+  expect(first.code).toBe(0);
+  expect(gh.label).toBe("factory:planned");
+  // The marker the next run reads is the one the production writer put into the transition reason.
+  const firstBody = await lastTransitionComment227(gh);
+  expect(firstBody).toContain(prNotVisibleReason227({ pr: 220, why: "not visible (gh: Could not resolve to a PullRequest)" }));
+  expect(prNotVisibleReturns227(await gh.comments())).toBe(1);
+
+  // implement ran again and handed off a new PR that is ALSO invisible (e.g. a hidden-but-open #220 refused `gh pr create`).
+  gh.push(implHandoff227(221, "2026-10-10T03:00:00Z"));
+  gh.relabel("factory:awaiting-review");
+  const second = await review227(gh);
+  expect(second.code).toBe(2);
+  expect(gh.label).toBe("factory:needs-human");
+  const secondBody = await lastTransitionComment227(gh);
+  expect(secondBody).toMatch(/to=factory:needs-human/);
+  expect(secondBody).toContain("#221");
+  expect(secondBody).toContain("not visible");
+  expect(second.d.claudeP).not.toHaveBeenCalled();
+
+  // A requeue opens a new window: the next not-visible result gets its one return again.
+  gh.push({ body: "<!-- factory-transition:v1 from=factory:needs-human to=factory:queue by=human -->\nfactory:needs-human → factory:queue", createdAt: "2026-10-10T04:00:00Z" });
+  gh.relabel("factory:awaiting-review");
+  await review227(gh);
+  expect(gh.label).toBe("factory:planned");
+});
+
+test("test_227_a_transient_gh_failure_or_merged_pr_never_triggers_a_rebuild — review/merge", async () => {
+  // A transient gh failure keeps today's route: needs-human from checkout, never planned, and no 'not visible'.
+  for (const stderr of [GH_401_227, GH_502_227]) {
+    const gh = gh227({ label: "factory:awaiting-review", view: { stderr } });
+    gh.prHeadSha = vi.fn(async () => { throw new Error(`gh pr view failed (1): ${stderr}`); });
+    const { code, lines } = await review227(gh);
+    expect(gh.label, stderr).toBe("factory:needs-human");
+    expect(code, stderr).toBe(2);
+    const body = await lastTransitionComment227(gh);
+    expect(body, stderr).not.toMatch(/to=factory:planned/);
+    expect(body, stderr).not.toContain("not visible");
+    expect(lines.some((l) => /not visible/.test(l)), stderr).toBe(false);
+  }
+  // MERGED: review and merge stop at needs-human naming the merged PR; planned is never requested.
+  for (const [label, run] of [["factory:awaiting-review", review227], ["factory:approved", merge227]]) {
+    const gh = gh227({ label, view: { state: "MERGED", headRefName: "claude/fq-227" } });
+    const { code, d } = await run(gh);
+    expect(gh.label, label).toBe("factory:needs-human");
+    expect(code, label).toBe(2);
+    expect(d.transition.mock.calls.map((c) => c[0].to), label).not.toContain("factory:planned");
+    expect(await lastTransitionComment227(gh), label).toMatch(/#220[\s\S]*MERGED|MERGED[\s\S]*#220/);
+  }
+});
+
+const GREEN227 = { schema: "factory.gates.v1", level: "full", status: "GREEN", passed: 1, failed: 0, skipped: [], misconfigured: [], tests: { excluded: [] } };
+async function implementRound227(view, over = {}) {
+  const lines = [];
+  const d = implDeps({
+    gates: async () => GREEN227,
+    prView: vi.fn(prView227(view)),
+    writeHandoff: vi.fn(async () => {}),
+    runRecord: (l) => lines.push(...l),
+    ...over,
+  });
+  const code = await runStage({ stage: "implement", issue: 7, deps: d, runnerId: "r" });
+  return { code, lines, d };
+}
+
+test("test_227_implement_refuses_a_handoff_whose_pr_is_invisible_or_off_branch", async () => {
+  // The builder reports pr 9 (implDeps). Not found, another branch, CLOSED, MERGED: no awaiting-review, no handoff with that number.
+  for (const view of [{ stderr: GH_NOT_FOUND_227 }, { state: "OPEN", headRefName: "claude/fq-207" }, { state: "CLOSED", headRefName: "claude/fq-7" }, { state: "MERGED", headRefName: "claude/fq-7" }]) {
+    const what = JSON.stringify(view);
+    const { code, lines, d } = await implementRound227(view);
+    expect(code, what).toBe(2);
+    const tos = d.transition.mock.calls.map((c) => c[0].to);
+    expect(tos, what).not.toContain("factory:awaiting-review");
+    expect(tos.at(-1), what).toBe("factory:needs-human");
+    expect(d.transition.mock.calls.at(-1)[0].reason, what).toContain("#9");
+    expect(d.writeHandoff, what).not.toHaveBeenCalled();
+    expect(d.prView, what).toHaveBeenCalledWith(9);
+    expect(lines.some((l) => /^pr: /.test(l) && /#9/.test(l)), what).toBe(true);
+  }
+  const offBranch = await implementRound227({ state: "OPEN", headRefName: "claude/fq-207" });
+  expect(offBranch.lines.find((l) => /^pr: /.test(l))).toContain("claude/fq-207");
+  const closed = await implementRound227({ state: "CLOSED", headRefName: "claude/fq-7" });
+  expect(closed.lines.find((l) => /^pr: /.test(l))).toContain("CLOSED");
+
+  // The builder could not create a PR (no number at all): that failure is recorded and nothing reaches awaiting-review.
+  const noPr = await implementRound227({ state: "OPEN", headRefName: "claude/fq-7" }, {
+    claudeP: async () => ({ is_error: false, result: JSON.stringify({ schema: "factory.implement.v1", issue: 7, head_sha: H227, gates: { status: "GREEN", level: "full" }, verifier: { verdict: "accepted" }, orchestration: "workflow", guarantee: "verified" }) }),
+  });
+  expect(noPr.d.transition.mock.calls.map((c) => c[0].to)).not.toContain("factory:awaiting-review");
+  expect(noPr.d.writeHandoff).not.toHaveBeenCalled();
+  // The record says WHY: the round failed verify, and the reason listed under it names the missing `pr` field — not any line that
+  // merely mentions "pr" near a hyphen.
+  const fail = noPr.lines.indexOf("verify: FAIL");
+  expect(fail).toBeGreaterThanOrEqual(0);
+  const reasons = noPr.lines.slice(fail + 1).filter((l) => l.startsWith("- "));
+  expect(reasons.some((l) => /(^|[^a-z_])pr([^a-z_]|$)/.test(l.slice(2)) && /required|missing/i.test(l)), JSON.stringify(reasons)).toBe(true);
+  expect(noPr.d.transition.mock.calls.at(-1)[0].to).toBe("factory:needs-human");
+  expect(noPr.d.prView).not.toHaveBeenCalled();
+
+  // The check runs before EVERY path that writes the implement handoff — the harness_needed branch included.
+  const ensureHarnessIssue = vi.fn(async () => ({ issue: 900, created: true }));
+  const harness = await implementRound227({ stderr: GH_NOT_FOUND_227 }, {
+    ensureHarnessIssue,
+    claudeP: async () => ({ is_error: false, result: JSON.stringify({ schema: "factory.implement.v1", issue: 7, head_sha: H227, pr: 9, gates: { status: "GREEN", level: "full" }, verifier: { verdict: "accepted" }, orchestration: "workflow", guarantee: "verified", harness_needed: [{ file: "package.json", change: "add pg", why: "dw1" }] }) }),
+  });
+  expect(harness.d.writeHandoff).not.toHaveBeenCalled();
+  expect(ensureHarnessIssue).not.toHaveBeenCalled();
+  expect(harness.d.transition.mock.calls.at(-1)[0].to).toBe("factory:needs-human");
+
+  // Visible, OPEN, on claude/fq-7: awaiting-review with that number in the handoff.
+  const ok = await implementRound227({ state: "OPEN", headRefName: "claude/fq-7" });
+  expect(ok.code).toBe(0);
+  expect(ok.d.transition.mock.calls.at(-1)[0].to).toBe("factory:awaiting-review");
+  expect(ok.d.writeHandoff.mock.calls.at(-1)[0].data.pr).toBe(9);
+  expect(ok.lines.some((l) => /^pr: /.test(l))).toBe(false);
+
+  // A transient gh failure after the builder is not a refusal: the round hands off as before.
+  const transient = await implementRound227({ stderr: GH_502_227 });
+  expect(transient.d.transition.mock.calls.at(-1)[0].to).toBe("factory:awaiting-review");
+  expect(transient.d.writeHandoff.mock.calls.at(-1)[0].data.pr).toBe(9);
+});
+
+/**
+ * #227 skeptic f5 — dw4 names three gone shapes for BOTH review and merge, and a head-moved failure that still reaches needs-human.
+ * The test above runs merge with not-found only; here merge (from `factory:approved`) gets the other two shapes and the head-moved case.
+ */
+test("test_227_review_with_an_invisible_pr_returns_to_planned — merge: another branch, CLOSED, head moved", async () => {
+  for (const view of [{ state: "OPEN", headRefName: "claude/fq-207" }, { state: "CLOSED", headRefName: "claude/fq-227" }]) {
+    const what = JSON.stringify(view);
+    const gm = gh227({ label: "factory:approved", view });
+    const m = await merge227(gm);
+    expect(gm.label, what).toBe("factory:planned");
+    expect(m.code, what).toBe(0);
+    expect(m.d.mergePr, what).not.toHaveBeenCalled();
+    expect(m.d.gates, what).not.toHaveBeenCalled();
+    const body = await lastTransitionComment227(gm);
+    expect(body, what).toMatch(/from=factory:approved to=factory:planned/);
+    expect(body, what).toContain("#220");
+    expect(body, what).toContain(view.state === "CLOSED" ? "CLOSED" : "claude/fq-207");
+    expect((await gm.comments()).some((c) => /factory-transition-refused/.test(c.body)), what).toBe(false);
+  }
+  const moved = gh227({ label: "factory:approved", view: { state: "OPEN", headRefName: "claude/fq-227" } });
+  moved.prHeadSha = vi.fn(async () => "b".repeat(40));
+  const mv = await merge227(moved);
+  expect(moved.label).toBe("factory:needs-human");
+  expect(mv.code).toBe(2);
+  expect(mv.d.mergePr).not.toHaveBeenCalled();
+  expect(await lastTransitionComment227(moved)).toMatch(/PR head moved since implement handoff/);
+});
+
+/**
+ * #227 dw6 (arch1/sec-s2) — the window's one return is a CEILING, so it is counted the way the library counts ceilings
+ * (lib/retro/issue-comments.js `countedTransitionIndices`, `honourFailed: false`, as `kRestartState().attempts` does): a
+ * `factory-transition-failed:v1 … to=factory:planned` marker does not reopen it. The transition comment is written BEFORE the label
+ * swap; when the swap fails the real `transition()` follows it with that marker. A failed marker is a comment anyone with the factory's
+ * hands can write, so honouring it would let one comment delay the stop. The price — a genuinely failed swap uses up the return — fails
+ * safe: the next not-visible result goes to needs-human with the PR named.
+ */
+test("test_227_a_second_invisible_pr_in_one_cycle_goes_to_needs_human — a failed planned swap does not reopen the window's return", async () => {
+  const gh = gh227({ label: "factory:awaiting-review", view: { stderr: GH_NOT_FOUND_227 } });
+  const swap = gh.setFactoryLabel;
+  let fails = 1;
+  gh.setFactoryLabel = async (n, to) => { if (fails-- > 0) throw new Error("gh issue edit failed (1): HTTP 502: Bad Gateway (https://api.github.com/graphql)"); return swap(n, to); };
+  const first = await review227(gh);
+  expect(first.code).not.toBe(0);   // the swap threw: the round did not complete
+  expect(first.d.claudeP).not.toHaveBeenCalled();
+  expect(gh.label).toBe("factory:awaiting-review");
+  const bodies = (await gh.comments()).map((c) => c.body);
+  expect(bodies.some((b) => /factory-transition:v1 from=factory:awaiting-review to=factory:planned/.test(b) && b.includes("pr-not-visible:"))).toBe(true);
+  expect(bodies.some((b) => /factory-transition-failed:v1 from=factory:awaiting-review to=factory:planned/.test(b))).toBe(true);
+  expect(prNotVisibleReturns227(await gh.comments())).toBe(1);
+
+  // The next not-visible result in the same window goes to needs-human, naming the PR — the failed marker did not reopen the return.
+  const next = await review227(gh);
+  expect(next.code).toBe(2);
+  expect(gh.label).toBe("factory:needs-human");
+  const body = await lastTransitionComment227(gh);
+  expect(body).toMatch(/to=factory:needs-human/);
+  expect(body).toContain("#220");
+  expect(body).toContain("not visible");
+  expect(next.d.claudeP).not.toHaveBeenCalled();
+
+  // A requeue still opens a new window.
+  gh.push({ body: "<!-- factory-transition:v1 from=factory:needs-human to=factory:queue by=human -->\nfactory:needs-human → factory:queue", createdAt: "2026-10-10T04:00:00Z" });
+  gh.relabel("factory:awaiting-review");
+  await review227(gh);
+  expect(gh.label).toBe("factory:planned");
+});
+
+/**
+ * #227 skeptic f3 — dw5 names a rate limit and a thrown timeout as well as 5xx/auth. The rate-limit fixtures are gh's own shapes: gh
+ * prints a GraphQL error as `GraphQL: <message>` (the same prefix as the not-found text the classifier matches — the closest neighbour
+ * to a false "gone"), a REST-level refusal as `HTTP 403: <message> (<url>)`; the messages are GitHub's documented primary/secondary
+ * rate-limit texts. The timeout is produced by the production `bounded()` in lib/gh.js, not typed by hand.
+ */
+import { bounded as bounded227 } from "../lib/gh.js";
+const GH_RATE_GRAPHQL_227 = "GraphQL: API rate limit exceeded for user ID 1.";
+const GH_RATE_403_227 = "HTTP 403: API rate limit exceeded for user ID 1. (https://api.github.com/graphql)";
+const GH_RATE_SECONDARY_227 = "HTTP 403: You have exceeded a secondary rate limit. Please wait a few minutes before you try again. (https://api.github.com/graphql)";
+const timeoutError227 = () => bounded227(() => new Promise(() => {}), { ms: 1, what: "gh pr view" }).then(() => null, (e) => e);
+test("test_227_a_transient_gh_failure_or_merged_pr_never_triggers_a_rebuild — rate limit and timeout, review and merge", async () => {
+  const timeout = await timeoutError227();
+  expect(timeout.message).toBe("gh pr view timed out after 1 ms");
+  const cases = [
+    ...[GH_RATE_GRAPHQL_227, GH_RATE_403_227, GH_RATE_SECONDARY_227, GH_502_227, GH_401_227].map((stderr) => ({ name: stderr, view: { stderr }, sha: new Error(`gh pr view failed (1): ${stderr}`) })),
+    { name: "timeout", view: { state: "OPEN", headRefName: "claude/fq-227" }, thrown: timeout, sha: timeout },
+  ];
+  for (const c of cases) {
+    for (const [label, run] of [["factory:awaiting-review", review227], ["factory:approved", merge227]]) {
+      const what = `${label} ${c.name}`;
+      const gh = gh227({ label, view: c.view });
+      if (c.thrown) gh.prView = vi.fn(async () => { throw c.thrown; });
+      gh.prHeadSha = vi.fn(async () => { throw c.sha; });
+      const { code, lines, d } = await run(gh);
+      expect(gh.prView, what).toHaveBeenCalledWith(220);
+      expect(gh.label, what).toBe("factory:needs-human");
+      expect(code, what).toBe(2);
+      expect(d.transition.mock.calls.map((x) => x[0].to), what).not.toContain("factory:planned");
+      const body = await lastTransitionComment227(gh);
+      expect(body, what).not.toContain("not visible");
+      expect(body, what).not.toContain("pr-not-visible:");
+      expect(lines.some((l) => /not visible/.test(l)), what).toBe(false);
+    }
+  }
+});
+
+/**
  * ── #206 — a gates-RED self-gate finding carries the gate's own reason ──────────────────────────────────────────
  * Gates that are not tests (must-not, lint, prove-test contract violations) have no failing ids, so the finding used to
  * read `failing: (no test names; see the gate log)` and the retrying builder guessed (#195 attempt 1). The reason is the
@@ -9838,4 +10177,46 @@ test("test_212_crashed_or_parked_rereview_keeps_the_conflict_exemption", async (
   await reviewStage212(rej, { runnerId: "gha-r1", verdicts: [], throwAt: "verify" });
   await reviewStage212(rej, { runnerId: "gha-r2", verdicts: [reject212("correctness"), approve212("qa")] });
   expect(rej.capCheck()).toMatchObject({ ok: false, conflictRevokedUsd: 9.5, conflictRevokedRuns: 1 });
+});
+
+/**
+ * #227 self-critique f1 — dw4: "the reason starts with a fixed greppable prefix and names the PR". The transition comment writes
+ * `<from> → <to> — <reason>` on its second line (lib/transition.js), so the reason's start is pinned there with a LITERAL prefix — not
+ * through `prNotVisibleReason`, whose output an assertion must not copy. Review and merge, each of the three gone shapes.
+ */
+test("test_227_review_with_an_invisible_pr_returns_to_planned — the reason starts with the literal pr-not-visible prefix", async () => {
+  const views = [{ stderr: GH_NOT_FOUND_227 }, { state: "OPEN", headRefName: "claude/fq-207" }, { state: "CLOSED", headRefName: "claude/fq-227" }];
+  for (const [label, run] of [["factory:awaiting-review", review227], ["factory:approved", merge227]]) {
+    for (const view of views) {
+      const what = `${label} ${JSON.stringify(view)}`;
+      const gh = gh227({ label, view });
+      await run(gh);
+      expect(gh.label, what).toBe("factory:planned");
+      const reasonLine = (await lastTransitionComment227(gh)).split("\n")[1];
+      expect(reasonLine.startsWith(`${label} → factory:planned — `), what).toBe(true);
+      const reason = reasonLine.slice(`${label} → factory:planned — `.length);
+      expect(reason, what).toMatch(/^pr-not-visible: PR #220 /);
+    }
+  }
+});
+
+/**
+ * #227 self-critique f2 — dw4: "a missing PR number still goes to needs-human". The handoff carries no `pr`, and gh would answer
+ * not-found for any number asked — so a null-pr guard moved below the visibility check, or a null pr classified as gone, would send
+ * the issue to factory:planned. It must reach needs-human with today's reason, without asking gh about a PR at all.
+ */
+test("test_227_review_with_an_invisible_pr_returns_to_planned — a missing PR number still goes to needs-human", async () => {
+  for (const [label, run] of [["factory:awaiting-review", review227], ["factory:approved", merge227]]) {
+    const gh = gh227({ label, pr: null, view: { stderr: GH_NOT_FOUND_227 } });
+    const { code, lines, d } = await run(gh);
+    expect(gh.label, label).toBe("factory:needs-human");
+    expect(code, label).toBe(2);
+    expect(gh.prView, label).not.toHaveBeenCalled();
+    expect(d.transition.mock.calls.map((c) => c[0].to), label).not.toContain("factory:planned");
+    const body = await lastTransitionComment227(gh);
+    expect(body, label).toMatch(/to=factory:needs-human/);
+    expect(body, label).toContain("implement handoff has no PR number");
+    expect(body, label).not.toContain("pr-not-visible:");
+    expect(lines.some((l) => /not visible/.test(l)), label).toBe(false);
+  }
 });
