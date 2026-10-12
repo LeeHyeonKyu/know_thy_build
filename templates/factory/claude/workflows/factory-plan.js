@@ -456,6 +456,45 @@ if (mode === 'single') {
   });
 }
 
+const synthesisReading =
+  `Read \`${args.context}\` first (issue, tier, spec_path, handoffs.triage, harness.maturity, limits), ` +
+  `then the spec at its \`spec_path\` if one is named, \`docs/TECHNICAL.md\` (if present — it may not ` +
+  `exist yet, and that is not a finding), and your lessons file at ` +
+  `\`.factory/lessons/plan-synthesizer.md\` (treat every entry as a checklist item). ` +
+  `Cite concrete repository paths. Every done_when needs a \`check\` ({kind, ref} — for a test, ` +
+  `ref is a test id of the form test_${issue}_<slug>), a \`rubric\` (the one-line reviewer bar), and a ` +
+  `\`level\` within \`harness.maturity\`: M0 → \`unit\` only, ` +
+  `M1 → \`unit\` or \`integration\`, M2 → \`unit\`, \`integration\` or \`e2e\`. ` +
+  `Answer with the English field names of your output schema.`;
+
+// #243 (P-14, M-8) — a debate-mode repair turn is ONE synthesis over the rejected plan: positions, cross-examination
+// and sign-off already happened on the turn the validator rejected, and re-running them cannot answer a validator
+// reason. The phases stay declared so `meta` is one shape; no R1/R2/sign-off agent is dispatched.
+if (repairOf) {
+  phase('Positions');
+  phase('Cross-examination');
+  phase('Synthesis');
+  const repaired = boundToMaturity(await once(() => agent(
+    `${synthesisReading}\n\n` +
+    `Issue #${issue} (tier ${tier}). Repair the plan the validator rejected — this turn has no new positions, ` +
+    `no cross-examination and no sign-off; the debate already happened. done_when stays the acceptance ` +
+    `contract (each item with a \`check\` and a \`rubric\`), and every dissent_log entry keeps its \`id\`, ` +
+    `\`role\` and \`severity\`.\n\n${planRules}\n${issueCoverRule}${repairDirective}`,
+    { agentType: 'plan-synthesizer', model: 'opus', schema: PLAN_V1 },
+  ))());
+  phase('Sign-off');
+  return withRepairOf({
+    ...(repaired || {}),
+    issue,
+    tier,
+    roles: rosterNames,
+    rounds,
+    orchestration: 'workflow',
+    guarantee: 'structural',
+    debate: { mode: 'debate', repair: true, r1: [], r2_objections: 0, votes: [] },
+  });
+}
+
 phase('Positions');
 
 // R1 is independent by construction: no role's prompt contains any other role's position.
@@ -495,17 +534,6 @@ const r2 = rounds >= 3 && r1.length > 0
   : [];
 
 phase('Synthesis');
-
-const synthesisReading =
-  `Read \`${args.context}\` first (issue, tier, spec_path, handoffs.triage, harness.maturity, limits), ` +
-  `then the spec at its \`spec_path\` if one is named, \`docs/TECHNICAL.md\` (if present — it may not ` +
-  `exist yet, and that is not a finding), and your lessons file at ` +
-  `\`.factory/lessons/plan-synthesizer.md\` (treat every entry as a checklist item). ` +
-  `Cite concrete repository paths. Every done_when needs a \`check\` ({kind, ref} — for a test, ` +
-  `ref is a test id of the form test_${issue}_<slug>), a \`rubric\` (the one-line reviewer bar), and a ` +
-  `\`level\` within \`harness.maturity\`: M0 → \`unit\` only, ` +
-  `M1 → \`unit\` or \`integration\`, M2 → \`unit\`, \`integration\` or \`e2e\`. ` +
-  `Answer with the English field names of your output schema.`;
 
 let plan = r1.length > 0
   ? boundToMaturity(await once(() => agent(
@@ -559,15 +587,15 @@ if (plan) {
           ...superseded,
           // 1.4.43: a surviving sign-off objection is injected by the WORKFLOW, after synthesis — like the
           // maturity note (L39) it needs an id and a severity or the validator names it by position and
-          // nothing can ever cover it. It is a real objection, so it is `medium`: the validator requires a
-          // done_when to cover `signoff-<role>` (the repair turn can, because the id is deterministic) or the
-          // plan goes to a human — which is what an un-gated objection from a signing role deserves.
+          // nothing can ever cover it. #243 (P-13, M-7): it is `low` — a medium `signoff-<role>` was always
+          // rejected and forced a repair turn that could not change the vote. The objection is not hidden:
+          // it travels as the top-level `signoff_objections` entry above, which is where it is surfaced.
           ...objections.map((o) => ({
             id: `signoff-${o.role}`,
-            severity: 'medium',
+            severity: 'low',
             role: o.role,
             objection: o.reason,
-            resolution: 'unresolved — proceeding',
+            resolution: 'unresolved — proceeding; surfaced in signoff_objections',
           })),
         ],
       };
