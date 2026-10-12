@@ -1058,3 +1058,35 @@ test("test_212_overlay_reverted_branch_mirror_path_restored_by_the_mirror_commit
   const foreign = await dep212(w.r, ctx(w.approved))({ gates: GREEN212, mirrorSha, mergedBase: w.base, runnerMirror: [MA] });
   expect(conflictScopeGreen212(foreign)).toBe(false);
 });
+
+// ── #199 (ADR-037 §5) — `judgeReworkScope` is the ONE place the `where` exemption and the one-cause-one-finding rule live ─────────
+// run-stage measures (every added export, every non-plan id); the judge alone drops what `where` allows and what a file finding owns.
+import { judgeReworkScope as judgeReworkScope199 } from "../lib/self-gate.js";
+
+test("test_199_judge_reworkscope_owns_the_where_exemption_and_one_cause", () => {
+  const heads = (fs) => fs.map((f) => f.detail.split(" — ")[0]).sort();
+  const input = {
+    round: 2, where: ["lib/a.js", "lib/new-ok.js"],
+    newFiles: ["lib/new-ok.js", "lib/new-bad.js", "test/new-bad.test.js"],
+    newExports: [{ path: "lib/a.js", name: "inWhere" }, { path: "lib/b.js", name: "outside" }],
+    newTestIds: [{ path: "test/new-bad.test.js", id: "test_199_x" }, { path: "lib/new-ok.js", id: "test_199_y" }, { path: "test/old.test.js", id: "test_199_z" }],
+  };
+  const plain = judgeReworkScope199(input);
+  expect(plain.every((f) => f.check === "rework-scope" && f.blocking)).toBe(true);
+  expect(heads(plain)).toEqual([
+    "new done_when id outside the plan: test_199_y in lib/new-ok.js",
+    "new done_when id outside the plan: test_199_z in test/old.test.js",
+    "new export outside the review findings: outside in lib/b.js",
+    "new file outside the review findings: lib/new-bad.js",
+    "new file outside the review findings: test/new-bad.test.js",
+  ]);
+  for (const f of plain) expect(f.detail).toContain("rework round 2 is subtract-only (ADR-037 §5)");
+
+  // Restart round: restart-brief owns new files outside the brief — no rework-scope file finding, and no second (id) finding for them.
+  const restart = judgeReworkScope199({ ...input, restartPaths: ["lib/new-bad.js"] });
+  expect(heads(restart)).toEqual([
+    "new done_when id outside the plan: test_199_y in lib/new-ok.js",
+    "new done_when id outside the plan: test_199_z in test/old.test.js",
+    "new export outside the review findings: outside in lib/b.js",
+  ]);
+});
