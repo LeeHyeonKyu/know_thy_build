@@ -10,7 +10,7 @@ import { LOCAL_INTEGRITY_CONTEXT, localIntegrityDescription, ciRunnerMarker } fr
 /**
  * #236 (ADR-044, 허점 원장 B-1 P-7b) — `factory integrity <pr>`: Actions가 막힌 저장소에서 `factory-integrity.yml` 잡이 하는 판정을
  * 운영 세션이 로컬에서 **같은 함수**(`lib/integrity.js`의 `integrityCheck`, CI bin `bin/integrity.js`가 부르는 그것)로 돌리고,
- * 결과를 PR head에 `factory/integrity` commit status로 올린다. 설명은 `local:<login>` — CI의 check run과 구별되고, 로컬 머지
+ * 결과를 PR head에 `factory/integrity` commit status로 올린다. 보호 경로를 바꾼 PR은 failure다(dw1; CI bin은 알림만 남긴다, KTB-5). 설명은 `local:<login>` — CI의 check run과 구별되고, 로컬 머지
  * door(run-stage `makeOperatorMergeDeps`)가 그 로그인을 생성자와 대조한다. 이 파일은 그 door가 믿는 홉이라 DOOR_FILES에 있다.
  *
  * 판정 대상은 **PR head sha**다, 운영자의 작업 트리가 아니다: diff는 `<merge-base>...<head sha>`이고 파일 내용은 `git show
@@ -109,9 +109,13 @@ export async function integrityCommand({ root, argv = [], io, run = realRun, env
   let verdict;
   try { verdict = await integrityCheck({ run, cwd: root, base, head: sha, harness, readFile }); }
   catch (e) { return noVerdict(`the verdict could not be computed — ${e?.message || e}`); }
-  const state = verdict?.ok === true ? "success" : "failure";
+  // dw1 (rework spec1): a protected path fails the local status. The CI bin only logs it (KTB-5, its check run stays green); here the
+  // status is what the local merge door reads, so a PR that needs a person is never greened by an operator session.
+  const protectedFiles = Array.isArray(verdict?.protected) ? verdict.protected : [];
+  const state = verdict?.ok === true && protectedFiles.length === 0 ? "success" : "failure";
   io.out(JSON.stringify(verdict, null, 2));
   for (const v of verdict?.violations || []) io.out(`integrity: ${v.file}: ${v.rule}`);
+  for (const f of protectedFiles) io.out(`integrity: ${f}: protected path changed (human merge required) — posted failure`);
 
   try {
     await client.setStatus({ sha, context: LOCAL_INTEGRITY_CONTEXT, state, description: localIntegrityDescription(login) });

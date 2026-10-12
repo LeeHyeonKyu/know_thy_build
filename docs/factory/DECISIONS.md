@@ -4906,11 +4906,10 @@ dep을 싣는지는 소스 문자열 핀으로 고정하지 않는다(계획 non
 1. `factory integrity <pr>`(`factory/cli/integrity.js`): CI 잡과 **같은 함수**(`integrityCheck`)로 PR **head sha**를 판정하고(diff는
    `<merge-base>...<sha>`, 내용은 `git show <sha>:<path>` — 운영자의 작업 트리가 아니다) `factory/integrity` commit status를 success 또는
    failure로 올린다. 설명은 `local:<login>`(`gh api user`). 러너(§2의 러너 표식 — 같은 함수 `ciRunnerMarker`)에서, 로그인을 모를 때, head 커밋이 클론에 없을 때,
-   merge-base를 못 구할 때는 아무것도 올리지 않는다. 보호 경로만 바꾼 PR은 CI처럼 **success**다 — 보호 경로는 실패가 아니라 알림이고
-   (KTB-5, `bin/integrity.js`), 그 PR의 사람 머지는 merge 스테이지의 `protectedPaths`가 맡는다. CI가 실패시키는 보호 경로 fixture(보호된
-   `.factory/**` 아래의 깨진 lessons 파일)는 failure다. **계약 충돌 — spec-conformance 승인 필요**: plan dw1 문장의 "protected-path fixture는
-   failure"는 같은 항목의 "CI bin과 같은 판정"과 알림뿐인 보호 경로 fixture에서 충돌한다. 이 diff는 CI와 같은 판정을 구현하고 그 한 점을
-   리뷰에 올린다 — 빌더가 정한 것이 아니다. — `test_236_local_integrity_posts_the_same_verdict_as_ci_and_refuses_on_a_runner`(— protected-path fixtures get CI's own verdict 포함),
+   merge-base를 못 구할 때는 아무것도 올리지 않는다. 보호 경로를 바꾼 PR은 **failure**다(plan dw1 "failure on a violating or protected-path
+   fixture", rework spec1) — 판정 객체는 CI와 같은 `integrityCheck`의 것이고, CI bin은 그 `protected`를 알림으로만 남기지만(KTB-5, `bin/integrity.js`)
+   로컬 상태는 로컬 머지 door가 읽는 것이라 사람이 머지해야 하는 PR을 운영 세션이 초록으로 만들지 않는다. 대가: Actions 없는 저장소에서 보호 경로
+   PR은 로컬 상태로 초록이 되지 않는다 — 그 PR은 원래 사람이 머지한다(merge 스테이지 `protectedPaths`). — `test_236_local_integrity_posts_the_same_verdict_as_ci_and_refuses_on_a_runner`(— protected-path fixtures are posted failure 포함),
    `test_236_local_integrity_judges_the_pr_head_sha_not_the_worktree`
 2. `factory run merge <issue>`: 운영 세션(러너가 아님)만 merge 스테이지를 로컬에서 돌린다("merge는 로컬 금지" → "운영 세션에서만 로컬
    허용"). `cli/run.js`가 `FACTORY_OPERATOR_MERGE=1`을 싣고, run-stage는 러너 표식 — `GITHUB_ACTIONS`·`GITHUB_RUN_ID`·`RUNNER_TEMP`

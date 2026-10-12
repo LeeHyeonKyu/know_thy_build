@@ -82,12 +82,10 @@ test("test_236_local_integrity_posts_the_same_verdict_as_ci_and_refuses_on_a_run
   const { root, shas } = await fixtureRepo();
 
   // Off a runner: one factory/integrity status on the PR head, with the state CI's integrityCheck gives that head.
-  // Contract note (#236 dw1): dw1's text says "failure on a … protected-path fixture", but its governing clause is "matches the verdict
-  // integrityCheck gives in the CI bin", and CI posts success there — protected paths are a notice, not a failure (KTB-5,
-  // factory/bin/integrity.js:22; factory/lib/integrity.js:11-19), and the human merge they require is the merge stage's
-  // protectedPaths hand-off (factory/lib/merge-stage.js:656), not this check. The conflict is raised for spec-conformance sign-off in
-  // ADR-044 §1, not settled here; a protected-path fixture that CI fails is posted failure (the "protected-path fixtures" test below).
-  const expected = { clean: "success", violating: "failure", lessons: "failure", protectedOnly: "success" };
+  // dw1: "success on a clean fixture, failure on a violating or protected-path fixture" (rework spec1). The verdict is CI's own
+  // integrityCheck object; the CLI posts success only when it is ok AND names no protected path — a protected path is the one thing the
+  // CI bin reports as a notice (KTB-5) that the local status turns into failure, so a local status never greens a PR that needs a person.
+  const expected = { clean: "success", violating: "failure", lessons: "failure", protectedOnly: "failure" };
   for (const [kind, sha] of Object.entries(shas)) {
     const ci = await ciVerdict(root, sha);
     const gh = fakeGh({ sha });
@@ -96,11 +94,11 @@ test("test_236_local_integrity_posts_the_same_verdict_as_ci_and_refuses_on_a_run
     const posted = gh.setStatus.mock.calls[0][0];
     expect(posted.sha, kind).toBe(sha);
     expect(posted.context, kind).toBe("factory/integrity");
-    expect(posted.state, kind).toBe(ci.ok ? "success" : "failure");   // the same verdict as the CI bin
+    expect(posted.state, kind).toBe(ci.ok && ci.protected.length === 0 ? "success" : "failure");   // CI's verdict object, protected paths failing
     expect(posted.state, kind).toBe(expected[kind]);                    // …and that verdict is what the fixture is
     expect(posted.description, kind).toMatch(/^local:alice\b/);
     expect(code, kind).toBe(posted.state === "success" ? 0 : 1);
-    if (posted.state === "failure") expect(o.out.join("\n"), kind).toContain(ci.violations[0].rule);
+    if (posted.state === "failure") expect(o.out.join("\n"), kind).toContain(ci.violations[0]?.rule ?? ci.protected[0]);
   }
 
   // On a runner: refused before anything is asked or posted, and the reason is on stderr.
@@ -315,16 +313,14 @@ test("test_236_local_integrity_refuses_a_runner_whose_github_actions_is_blank", 
   expect(gh.setStatus).toHaveBeenCalledTimes(1);
 });
 
-// ── #236 skeptic self-critique (round 5) — dw1's "failure on a … protected-path fixture", pinned separately. A protected-path fixture
-// that the CI bin fails (here: a malformed lessons file under the protected `.factory/**`) is posted failure; a protected-path fixture
-// that the CI bin passes (a notice only — KTB-5) is posted what CI posts. Both fixtures really are protected-path fixtures (CI's own
-// `protected` list names the file), so neither verdict is the CLI's choice. The notice-only case is the one point where dw1's text and
-// its "matches the verdict integrityCheck gives in the CI bin" clause disagree; ADR-044 §1 raises it for spec-conformance sign-off. ──
-test("test_236_local_integrity_posts_the_same_verdict_as_ci_and_refuses_on_a_runner — protected-path fixtures get CI's own verdict", async () => {
+// ── #236 dw1's "failure on a … protected-path fixture", pinned separately (rework spec1). Both fixtures really are protected-path
+// fixtures (CI's own `protected` list names the file): one the CI bin also fails (a malformed lessons file under the protected
+// `.factory/**`), one the CI bin passes with a notice only (KTB-5). Both are posted failure, and the reason names the file. ──
+test("test_236_local_integrity_posts_the_same_verdict_as_ci_and_refuses_on_a_runner — protected-path fixtures are posted failure", async () => {
   const { root, shas } = await fixtureRepo();
   const cases = [
     { sha: shas.lessons, file: ".factory/lessons/reviewer-x.md", ciOk: false, state: "failure", code: 1 },
-    { sha: shas.protectedOnly, file: ".factory/notes.md", ciOk: true, state: "success", code: 0 },
+    { sha: shas.protectedOnly, file: ".factory/notes.md", ciOk: true, state: "failure", code: 1 },
   ];
   for (const c of cases) {
     const ci = await ciVerdict(root, c.sha);
@@ -334,6 +330,7 @@ test("test_236_local_integrity_posts_the_same_verdict_as_ci_and_refuses_on_a_run
     const { code, o } = await integrity({ root, gh, env: {} });
     expect(gh.setStatus.mock.calls.map((x) => x[0]), c.file).toEqual([expect.objectContaining({ sha: c.sha, context: "factory/integrity", state: c.state, description: expect.stringMatching(/^local:alice\b/) })]);
     expect(code, c.file).toBe(c.code);
-    if (c.state === "failure") expect(o.out.join("\n"), c.file).toContain(ci.violations[0].rule);
+    expect(o.out.join("\n"), c.file).toContain(c.file);
+    if (!c.ciOk) expect(o.out.join("\n"), c.file).toContain(ci.violations[0].rule);
   }
 });
