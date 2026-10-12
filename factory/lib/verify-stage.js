@@ -306,6 +306,12 @@ const isSignoffObjection = (d) => {
   return !!role && typeof d?.id === "string" && d.id.trim().toLowerCase() === `signoff-${role.toLowerCase()}`;
 };
 const SIGNOFF_TEXT_MAX = 120;
+/**
+ * #239 — agent text bound for the agent-unwritable run record as a single token (a sign-off role, a dropped skeptic
+ * done_when id): any whitespace/control run — line terminators \n, \r, U+2028/9 included — becomes `_`, so it can never
+ * start a `review-evidence:` / `stage-settled:` line of its own (same class as review-r1's sec1).
+ */
+const recordToken = (t) => String(t ?? "?").replace(/[\s\u0000-\u001f\u007f-\u009f]+/g, "_");
 
 /**
  * #239 — what the plan verifier does to a plan **before** it checks it, computed in one place so the validator and
@@ -345,13 +351,11 @@ export function normalizePlanHandoff(plan, { maxDoneWhen = 6 } = {}) {
       const raw = typeof d.objection === "string" ? d.objection : typeof d.text === "string" ? d.text : "";
       return { id: d.id, role: d.role.trim(), text: raw.slice(0, SIGNOFF_TEXT_MAX) };   // the first 120 characters, verbatim
     });
-  // The role is agent text bound for the agent-unwritable run record (same class as review-r1's sec1): any
-  // whitespace/control run — line terminators included — becomes `_`, so it can never start a line of its own.
-  const oneLine = (t) => String(t ?? "?").replace(/[\s\u0000-\u001f\u007f-\u009f]+/g, "_");
   const notes = [
     // one record line per objection: each whitespace character becomes one space (no collapsing, the cut does not move).
-    ...signoffObjections.map((o) => `plan: unresolved sign-off objection from ${oneLine(o.role)}: ${o.text.replace(/\s/g, " ")}`),
-    ...(dropped.length ? [`plan: skeptic items beyond max_done_when dropped: ${dropped.join(", ")}`] : []),
+    ...signoffObjections.map((o) => `plan: unresolved sign-off objection from ${recordToken(o.role)}: ${o.text.replace(/\s/g, " ")}`),
+    // the dropped ids are agent text too (skeptic self-critique: an id carrying "\n<review-evidence …>" forged a line).
+    ...(dropped.length ? [`plan: skeptic items beyond max_done_when dropped: ${dropped.map(recordToken).join(", ")}`] : []),
   ];
   return { doneWhen, dropped, signoffObjections, notes };
 }
@@ -386,7 +390,7 @@ export function validatePlanHandoff(plan, { maxDoneWhen = 6, issueBody = "", not
   const seen = uncoveredEntries.map((e) => `${e.id}${e.hasId ? "" : " (no id — named by position)"}: severity ${e.severity ? JSON.stringify(e.severity) : "missing"}`).join("; ");
   const coveredList = covered.size ? [...covered].join(", ") : "none";
   // #239 (M-9) — say when a cover went away with a dropped skeptic item, so the repair turn knows why it no longer counts.
-  const droppedNote = dropped.length ? `; dropped skeptic items beyond max_done_when (their covers do not count): ${dropped.join(", ")}` : "";
+  const droppedNote = dropped.length ? `; dropped skeptic items beyond max_done_when (their covers do not count): ${dropped.map(recordToken).join(", ")}` : "";
   // 1.4.26 (L29, own-calendar #46) — 수리 턴에 되먹이는 문장은 **무엇을 쓰라는지**까지 말한다: 계획이 두 번 연속 같은 이유로
   // 죽었다(첫 판 `dissent-1`, 수리 판 `d1, d2` — id도 severity도 없는 dissent 항목, 그것을 짚는 done_when 없음). "덮이지 않았다"만
   // 들은 계획자는 항목을 고쳐 쓰는 대신 이름만 바꿨다.
