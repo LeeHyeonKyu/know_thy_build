@@ -5,7 +5,7 @@ import { run as realRun } from "../lib/exec.js";
 import { makeGh, resolveRepo } from "../lib/gh.js";
 import { loadHarness as realLoadHarness } from "../lib/config.js";
 import { integrityCheck } from "../lib/integrity.js";
-import { LOCAL_INTEGRITY_CONTEXT, localIntegrityDescription } from "../lib/merge-stage.js";
+import { LOCAL_INTEGRITY_CONTEXT, localIntegrityDescription, ciRunnerMarker } from "../lib/merge-stage.js";
 
 /**
  * #236 (ADR-044, 허점 원장 B-1 P-7b) — `factory integrity <pr>`: Actions가 막힌 저장소에서 `factory-integrity.yml` 잡이 하는 판정을
@@ -31,9 +31,10 @@ export async function integrityCommand({ root, argv = [], io, run = realRun, env
     io.err("factory integrity refused — no env was injected, so this cannot tell an operator session from a CI runner (it never reads process.env on its own). Nothing was posted.");
     return 2;
   }
-  // 러너는 GITHUB_ACTIONS가 env에 **있는** 것이다 — 빈 값도 러너다(sec1; cli/run.js·run-stage isOperatorMerge와 같은 규칙).
-  if (env.GITHUB_ACTIONS !== undefined) {
-    io.err("factory integrity refused — GITHUB_ACTIONS is set (even blank), so this is a CI runner: a stage never posts its own factory/integrity (H1b); the CI job posts the check there. Nothing was posted.");
+  // 러너 판정은 merge-stage `ciRunnerMarker` 한 곳이다 — cli/run.js·run-stage isOperatorMerge가 같은 함수를 부른다(rework arch1).
+  const marker = ciRunnerMarker(env);
+  if (marker) {
+    io.err(`factory integrity refused — ${marker} is set (even blank), so this is a CI runner: a stage never posts its own factory/integrity (H1b); the CI job posts the check there. Nothing was posted.`);
     return 2;
   }
   const arg = argv.find((a) => !String(a).startsWith("-"));

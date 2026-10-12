@@ -3,6 +3,7 @@ import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 import { run as realRun } from "../lib/exec.js";
 import { resolveRepo as realResolveRepo } from "../lib/gh.js";
+import { ciRunnerMarker } from "../lib/merge-stage.js";
 
 const STAGES = ["triage", "plan", "implement", "review"];
 /** `--remote`는 merge도 받는다 — 브랜치 보호가 막는 것은 **로컬 실행**이고, dispatch는 CI에서 도는 일이다. */
@@ -61,7 +62,7 @@ export async function runCommand({ root, argv = [], io, run = realRun, spawnInhe
 
   // (1) 스테이지 검증
   // #236 dw4 (ADR-044) — "merge는 로컬 금지"가 "merge는 운영 세션에서만 로컬 허용"이 됐다: 러너가 아니면 plain `factory run merge <n>`이
-  // 로컬 merge를 돌린다. 러너(`GITHUB_ACTIONS`가 env에 있으면 — 빈 값도 러너다, sec1)에서는 거부한다 — 스테이지는 운영자가 아니다.
+  // 로컬 merge를 돌린다. 러너(merge-stage `ciRunnerMarker`의 표식 중 하나라도 env에 있으면 — 빈 값도 러너다, sec1)에서는 거부한다 — 스테이지는 운영자가 아니다.
   // run-stage도 같은 조건을 다시 보고, 행위자가 사람 계정인지까지 확인한다(makeOperatorMergeDeps).
   // env를 주입하지 않은 호출자는 러너가 아님을 증명하지 못한다 — process.env로 추측하지 않고 예전 거부를 그대로 낸다(fail-closed;
   // integrityCommand와 같은 규칙). 실제 진입점 cli/index.js는 env를 명시로 넘기므로 운영자는 이 문구를 보지 않는다.
@@ -69,7 +70,9 @@ export async function runCommand({ root, argv = [], io, run = realRun, spawnInhe
   // run-cli.test.js가 /runs only in CI|--remote/의 부재를 고정한다)다. 이 줄의 옛 문구는 env 없는 호출자 전용이고, 기존 테스트
   // ("stage merge → error, runs only in CI")가 그 문구를 단언하므로 남긴다(tests_are_load_bearing — 기존 단언은 바꾸지 않는다).
   if (stage === "merge" && injectedEnv === undefined) { io.err("merge runs only in CI (branch protection) for a caller that injects no env — the local operator merge needs the caller's env (cli/index.js passes it). Nothing was merged."); return 1; }
-  if (stage === "merge" && env?.GITHUB_ACTIONS !== undefined) { io.err("factory run merge refused — GITHUB_ACTIONS is set, so this is a CI runner: merge runs locally only from an operator session (ADR-044), and a stage is never the operator. Nothing was merged."); return 1; }
+  // 러너 판정은 merge-stage `ciRunnerMarker` 한 곳이다 — cli/integrity.js·run-stage isOperatorMerge가 같은 함수를 부른다(rework arch1).
+  const runnerMarker = stage === "merge" ? ciRunnerMarker(env) : null;
+  if (runnerMarker) { io.err(`factory run merge refused — ${runnerMarker} is set, so this is a CI runner: merge runs locally only from an operator session (ADR-044), and a stage is never the operator. Nothing was merged.`); return 1; }
   if (!isRetro && !STAGES.includes(stage) && stage !== "merge") { io.err(USAGE); return 1; }
   let issue = 0;
   if (!isRetro) {

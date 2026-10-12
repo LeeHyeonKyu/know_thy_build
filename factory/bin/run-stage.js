@@ -45,7 +45,7 @@ import { syncRecords, hydrateRecord, readRecordsDetailed } from "../lib/records-
 import { budgetCheck, budgetLine } from "../lib/budget.js";
 import { trustWorkspace } from "./trust-workspace.js";
 import { scrubText, secretValues } from "./scrub-artifacts.js";
-import { runMergeStage, idlessFailedSuites, VETO_WINDOW_CONTEXT, localIntegrityVerdict } from "../lib/merge-stage.js";
+import { runMergeStage, idlessFailedSuites, VETO_WINDOW_CONTEXT, localIntegrityVerdict, ciRunnerMarker } from "../lib/merge-stage.js";
 import { operatorMergeVerdict } from "../lib/operator-merge.js";
 import { readBreaker, makeRecordsUploadGuard, makeMergeAbortVouch, persistSelfMergeEvidence } from "../lib/breaker.js";
 import { isEngineCheckout } from "../lib/non-judge-paths.js";
@@ -4378,10 +4378,9 @@ export const OPERATOR_MERGE_ENV = "FACTORY_OPERATOR_MERGE";
 // 그 한 줄을 지우고 표식을 심을 때 행위자 검사까지 지나간다. 그래서 러너 표식을 넷 더 본다: GitHub이 모든 러너 스텝에 싣고
 // `$GITHUB_ENV`로 덮을 수 없는 `GITHUB_RUN_ID`·`RUNNER_TEMP`(GITHUB_*·RUNNER_*), 그리고 factory-merge.yml의 Run stage 스텝 env가 싣는
 // `FACTORY_TWO_ACTOR`와 `FACTORY_RUNNER_ID=gha-<run_id>`. 어느 하나라도 있으면(빈 값도) 러너다. 그것들을 전부 지우는 것은 그 스텝 안에서
-// 도는 엔진 코드 자신뿐이다 — 이것은 여전히 거름망이고, 그 한계는 ADR-044 §2가 적는다.
-const RUNNER_MARKERS = ["GITHUB_ACTIONS", "GITHUB_RUN_ID", "RUNNER_TEMP", "FACTORY_TWO_ACTOR"];
-export const isOperatorMerge = ({ stage, env }) => stage === "merge" && env?.[OPERATOR_MERGE_ENV] === "1"
-  && RUNNER_MARKERS.every((k) => env?.[k] === undefined) && !/^gha-/.test(String(env?.FACTORY_RUNNER_ID ?? ""));
+// 도는 엔진 코드 자신뿐이다 — 이것은 여전히 거름망이고, 그 한계는 ADR-044 §2가 적는다. 규칙은 merge-stage `ciRunnerMarker` 한 곳이다
+// (rework arch1 — cli/run.js·cli/integrity.js가 같은 함수를 부른다).
+export const isOperatorMerge = ({ stage, env }) => stage === "merge" && env?.[OPERATOR_MERGE_ENV] === "1" && ciRunnerMarker(env) === null;
 /**
  * 운영 door(`bin/operator-merge-check.js`)가 `gh pr view`로 읽는 필드 그대로 + 이 런이 머지할 head. 공유되는 것은 판정 함수
  * (`operatorMergeVerdict`)와 CHARTER 스위치다. 필드 목록을 `lib/operator-merge.js`의 export로 옮기면 door 파일 두 개

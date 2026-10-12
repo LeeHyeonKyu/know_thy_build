@@ -4905,7 +4905,7 @@ dep을 싣는지는 소스 문자열 핀으로 고정하지 않는다(계획 non
 **결정**:
 1. `factory integrity <pr>`(`factory/cli/integrity.js`): CI 잡과 **같은 함수**(`integrityCheck`)로 PR **head sha**를 판정하고(diff는
    `<merge-base>...<sha>`, 내용은 `git show <sha>:<path>` — 운영자의 작업 트리가 아니다) `factory/integrity` commit status를 success 또는
-   failure로 올린다. 설명은 `local:<login>`(`gh api user`). 러너(`GITHUB_ACTIONS`)에서, 로그인을 모를 때, head 커밋이 클론에 없을 때,
+   failure로 올린다. 설명은 `local:<login>`(`gh api user`). 러너(§2의 러너 표식 — 같은 함수 `ciRunnerMarker`)에서, 로그인을 모를 때, head 커밋이 클론에 없을 때,
    merge-base를 못 구할 때는 아무것도 올리지 않는다. 보호 경로만 바꾼 PR은 CI처럼 **success**다 — 보호 경로는 실패가 아니라 알림이고
    (KTB-5, `bin/integrity.js`), 그 PR의 사람 머지는 merge 스테이지의 `protectedPaths`가 맡는다. plan dw1 문장의 "protected-path fixture는
    failure"는 같은 항목의 "CI bin과 같은 판정"과 충돌하며, 이 결정은 CI와 같은 판정을 따른다. — `test_236_local_integrity_posts_the_same_verdict_as_ci_and_refuses_on_a_runner`,
@@ -4913,7 +4913,8 @@ dep을 싣는지는 소스 문자열 핀으로 고정하지 않는다(계획 non
 2. `factory run merge <issue>`: 운영 세션(러너가 아님)만 merge 스테이지를 로컬에서 돌린다("merge는 로컬 금지" → "운영 세션에서만 로컬
    허용"). `cli/run.js`가 `FACTORY_OPERATOR_MERGE=1`을 싣고, run-stage는 러너 표식 — `GITHUB_ACTIONS`·`GITHUB_RUN_ID`·`RUNNER_TEMP`
    (GitHub이 모든 러너 스텝에 싣고 `$GITHUB_ENV`로 덮을 수 없다), merge 잡 스텝 env의 `FACTORY_TWO_ACTOR`·`FACTORY_RUNNER_ID=gha-…` — 중
-   하나라도 env에 있으면(빈 값도) 그 표식을 무시한다(`isOperatorMerge`) — 위조한 표식으로도 러너는 창을 연다. 두 배우 모드의 머지 PAT은
+   하나라도 env에 있으면(빈 값도) 그 표식을 무시한다(`isOperatorMerge`) — 위조한 표식으로도 러너는 창을 연다. 이 판정은 merge-stage
+   `ciRunnerMarker` 하나이고 `cli/run.js`·`cli/integrity.js`·`isOperatorMerge`가 모두 그것을 부른다(rework arch1 — `test_236_local_merge_runs_merge_stage_with_the_operator_token_and_no_veto_wait — every runner marker refuses both entry points, as isOperatorMerge does`). 두 배우 모드의 머지 PAT은
    팩토리 로그인 목록에 없는 사람 계정이라 행위자 검사로는 러너를 가르지 못한다; 그래서 표식이 여럿이다. 그것을 전부 지울 수 있는 것은
    merge 스텝 안에서 도는 엔진 코드 자신뿐이고, 그 너머는 이 거름망의 한계다. 행위자 검사는 그대로다: 머지하는 계정(`gh api user`)이
    팩토리 계정이거나 사람(`User`)이 아니면 거부한다. 운영 모드의 팩토리 계정은 운영자 env의 `FACTORY_BOT_LOGIN`이 있으면 그것만이고,
@@ -4929,7 +4930,10 @@ dep을 싣는지는 소스 문자열 핀으로 고정하지 않는다(계획 non
 4. 로컬 머지의 문: mergePr 전에 run-stage가 운영 door와 **같은** `operatorMergeVerdict`(같은 `gh pr view` 필드, 같은 CHARTER 스위치
    `self_change.operator_merge_judge`, 같은 엔진 판정)를 코드로 부른다 — 훅은 node가 부르는 머지를 보지 못한다. door 파일이 든 PR과
    GREEN이 아닌 체크(같은 context의 CI 체크와 로컬 상태가 함께 있으면 어느 하나라도)는 거부된다. `factory/cli/integrity.js`는 DOOR_FILES에
-   들어갔다. — `test_236_local_merge_refuses_door_files_and_non_green_checks`
+   들어갔다. 그 상태를 소비해 기다림을 건너뛸지 정하는 판정 코드 — `factory/lib/merge-stage.js`·`factory/bin/run-stage.js`와 그 설치본 —
+   도 DOOR_FILES다(rework sec1/arch2): 생산자만 두면 소비자를 약하게 고친 PR이 운영 door로 머지되고 그 뒤의 모든 로컬 머지가 약해진
+   문을 지난다. 그래서 이 두 엔진 파일을 건드리는 PR은 운영 door로 머지되지 않는다(공장의 자기 변경 머지는 그대로다).
+   — `test_236_local_merge_refuses_door_files_and_non_green_checks`
 5. `factory/integrity`는 이 head에 있어야 한다(`operatorMergeVerdict`는 없는 체크를 묻지 않는다): CI check run이 GREEN이거나, 이 head의
    모든 `factory/integrity` 상태가 `local:<login>`·success·생성자 로그인 = 설명의 로그인·팩토리 계정 아님·사람 계정(`User`)이어야 한다.
    옛 head의 상태는 세지 않는다. 행위자 로그인을 모르거나, 행위자가 팩토리 계정이거나 사람 계정이 아니면 거부한다. 머지 뒤 감사 줄 `local-merge pr=<n> sha=<sha> actor=<login> veto=skipped`가

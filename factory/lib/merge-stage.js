@@ -109,6 +109,21 @@ export function verifyFactoryStatuses({ sha, statuses, logins }) {
  * 이 파일에 있는 이유: 설치본(`.factory/lib/`)에도 미러되는 판정 모듈이고, `.factory/cli/`는 존재하지 않는다.
  */
 export const LOCAL_INTEGRITY_CONTEXT = "factory/integrity";
+
+/**
+ * #236 rework arch1 — **"이것이 CI 러너인가?"의 유일한 규칙.** 운영 진입점 둘(`cli/run.js`의 `factory run merge`, `cli/integrity.js`)과
+ * run-stage `isOperatorMerge`가 모두 이것을 부른다 — 세 벌이던 때 integrity 쪽이 `GITHUB_ACTIONS` 하나만 보아 이미 갈라져 있었다.
+ * 러너 표식: GitHub이 모든 러너 스텝에 싣고 `$GITHUB_ENV`로 덮을 수 없는 `GITHUB_ACTIONS`·`GITHUB_RUN_ID`·`RUNNER_TEMP`, 그리고
+ * factory-merge.yml Run stage 스텝 env의 `FACTORY_TWO_ACTOR`·`FACTORY_RUNNER_ID=gha-<run_id>`. 어느 하나라도 env에 **있으면**(빈 값도)
+ * 러너다 — 두 배우 merge 잡이 `GITHUB_ACTIONS` 한 줄을 지워도 나머지가 남는다(skeptic r4). 걸린 표식의 이름을 돌려주고(거부 문구가
+ * 그것을 말한다), 러너가 아니면 null이다. env 한 줄 검사라 문이 아니라 거름망이다 — 한계는 ADR-044 §2.
+ */
+const RUNNER_MARKERS = ["GITHUB_ACTIONS", "GITHUB_RUN_ID", "RUNNER_TEMP", "FACTORY_TWO_ACTOR"];
+export function ciRunnerMarker(env) {
+  const hit = RUNNER_MARKERS.find((k) => env?.[k] !== undefined);
+  if (hit) return hit;
+  return /^gha-/.test(String(env?.FACTORY_RUNNER_ID ?? "")) ? "FACTORY_RUNNER_ID=gha-*" : null;
+}
 export const localIntegrityDescription = (login) => `local:${login}`;
 /** 설명이 정확히 `local:<login>`이면 그 로그인, 아니면 null(공백·빈 값은 로그인이 아니다). */
 export const localIntegrityLoginOf = (description) => /^local:([^\s:]+)$/.exec(String(description ?? ""))?.[1] ?? null;
