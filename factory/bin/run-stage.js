@@ -2709,7 +2709,14 @@ export function makeVerifyStageDep({ root, stage, getCtx, getCharter, getHarness
 export function makeWriteHandoffDep({ gh, issue, stage, getCtx }) {
   return async ({ data }) => {
     const ctx = getCtx();
-    const d2 = ctx?.tier_effective ? { ...data, tier_effective: ctx.tier_effective, tier_source: ctx.tier_source } : data;
+    let d2 = ctx?.tier_effective ? { ...data, tier_effective: ctx.tier_effective, tier_source: ctx.tier_source } : data;
+    // #287 — triage의 ctx 실효 tier는 **올리기 전** 라벨에서 온다. 러너가 이 triage에서 tier를 올렸으면(`tier_declared`는
+    // verifyStage만 쓴다 — 에이전트 값은 먼저 지워진다) 그 값을 그대로 실으면 한 코멘트가 tier: load-bearing과
+    // tier_effective: standard를 함께 말한다. 그래서 그때는 둘 중 높은 쪽을 싣고, 바뀌었으면 출처는 이 triage의 판정이다.
+    if (stage === "triage" && ctx?.tier_effective && typeof data?.tier_declared === "string" && data.tier) {
+      const eff = maxTier(ctx.tier_effective, data.tier);
+      d2 = { ...d2, tier_effective: eff, tier_source: eff === ctx.tier_effective ? ctx.tier_source : "triage" };
+    }
     await gh.comment(issue, renderHandoff({ stage, issue, summary: d2.summary || `### ${stage} 완료`, data: d2 }));
   };
 }

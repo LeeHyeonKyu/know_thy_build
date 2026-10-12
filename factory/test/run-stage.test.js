@@ -10374,7 +10374,8 @@ test("test_287_posted_triage_handoff_names_judge_path_raise", async () => {
   const judge = await postTriage287({ ...eng, ctx, out: triageOut287(["docs/TECHNICAL.md", "factory/lib/verify-stage.js", "factory/bin/gates.js"]) });
   expect(judge.handoff.tier).toBe("load-bearing");
   expect(judge.handoff.tier_declared).toBe("standard");
-  expect([judge.handoff.tier_effective, judge.handoff.tier_source]).toEqual(["standard", "triage"]);
+  // 게시된 실효 tier는 러너가 올린 쪽이다 — ctx의 올리기 전 값(standard)을 그대로 실으면 같은 코멘트가 서로 다른 tier를 말한다
+  expect([judge.handoff.tier_effective, judge.handoff.tier_source]).toEqual(["load-bearing", "triage"]);
   expect(judge.handoff.judge_path_hit).toEqual([{ path: "factory/lib/verify-stage.js", source: "judge-path" }, { path: "factory/bin/gates.js", source: "judge-path" }]);
   expect(judge.handoff.load_bearing_hit).toBeUndefined();                       // [load_bearing].paths 올림과 구분된다
   expect(judge.posted.join("\n")).toContain("judge-path");                      // 코멘트만 읽는 운영자도 이유를 본다
@@ -10383,6 +10384,7 @@ test("test_287_posted_triage_handoff_names_judge_path_raise", async () => {
   const lb = await postTriage287({ ...eng, ctx, out: triageOut287(["factory/bin/run-stage.js"]) });
   expect(lb.handoff.load_bearing_hit).toEqual([{ path: "factory/bin/run-stage.js", glob: "factory/bin/run-stage.js" }]);
   expect(lb.handoff.judge_path_hit).toEqual([{ path: "factory/bin/run-stage.js", source: "judge-path" }]);
+  expect([lb.handoff.tier, lb.handoff.tier_declared, lb.handoff.tier_effective, lb.handoff.tier_source]).toEqual(["load-bearing", "standard", "load-bearing", "triage"]);
 
   // 에이전트가 스스로 judge_path_hit·tier_declared를 적어도, 비판정 경로만 신고했으면 둘 다 게시되지 않고 tier는 신고 그대로
   const forged = await postTriage287({ ...eng, ctx, out: triageOut287(["factory/lib/status.js", "docs/TECHNICAL.md"], { judge_path_hit: [{ path: "factory/lib/status.js", source: "judge-path" }], tier_declared: "docs" }) });
@@ -10390,6 +10392,7 @@ test("test_287_posted_triage_handoff_names_judge_path_raise", async () => {
   expect(forged.handoff.judge_path_hit).toBeUndefined();
   expect(forged.handoff.tier_declared).toBeUndefined();
   expect(forged.labels).toEqual(["standard"]);
+  expect([forged.handoff.tier_effective, forged.handoff.tier_source]).toEqual(["standard", "triage"]);   // 올림이 없으면 ctx의 값 그대로
   // 실제 올림에서는 에이전트 값이 아니라 러너가 계산한 값만 남는다
   const mixed = await postTriage287({ ...eng, ctx, out: triageOut287(["factory/lib/context.js"], { judge_path_hit: [{ path: "factory/lib/status.js", source: "judge-path" }], tier_declared: "docs" }) });
   expect(mixed.handoff.judge_path_hit).toEqual([{ path: "factory/lib/context.js", source: "judge-path" }]);
