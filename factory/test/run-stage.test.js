@@ -1308,7 +1308,9 @@ test("makeLocalEntry: backlog issue with no factory label → sets factory:queue
   const setFactoryLabel = vi.fn(async () => {});
   const comment = vi.fn(async () => {});
   const gh = { issue: async () => ({ number: 12, title: "t", body: "", labels: ["backlog", "priority:p1"] }), setFactoryLabel, comment };
-  const entry = makeLocalEntry({ gh, issue: 12, stage: "triage", env: { FACTORY_LOCAL_ENTRY: "1" }, rehearsal: async () => ({ ok: true }) });
+  // #247 dw3 (spec1): an omitted admission dep now refuses (fail closed), so this test passes one that admits — the plan's rubric
+  // ("the existing local-entry tests are updated to pass admission, not made green by making admission optional"). Assertions unchanged.
+  const entry = makeLocalEntry({ gh, issue: 12, stage: "triage", env: { FACTORY_LOCAL_ENTRY: "1" }, rehearsal: async () => ({ ok: true }), admission: async () => ({ ok: true }) });
   const line = await entry();
   expect(line).toBe("local entry: backlog → factory:queue");
   expect(setFactoryLabel).toHaveBeenCalledWith(12, "factory:queue");
@@ -5003,7 +5005,8 @@ test("test_157_out_of_root_report_is_no_rerun", async () => {
 });
 
 // ── #179 (S4a-2, ADR-033) — merge 스테이지의 자기 변경 deps는 실제 생산자에서 온다 ─────────────────────────────
-import { makeMergeSelfChangeDeps, mergeEngineAtBase } from "../bin/run-stage.js";
+import { makeMergeSelfChangeDeps, mergeEngineAtBase, mergeGitAuth } from "../bin/run-stage.js";
+import { gitAuthEnv } from "../lib/exec.js";
 import { runMergeStage, VETO_WINDOW_CONTEXT } from "../lib/merge-stage.js";
 import { mirrorApplicable } from "../lib/mirror.js";
 import { parseSelfChange } from "../lib/config.js";
@@ -5043,10 +5046,21 @@ test("test_179_run_stage_wires_merge_self_change_deps", async () => {
   expect(deps.engine).toBe(true);
   expect(deps.jobStartedAt).toBe(1790000000 * 1000);
   expect(deps.jobTimeoutMinutes).toBe(90);
+  expect(deps.gitTokenTtlMinutes).toBeNull();                           // ADR-038 보정 — 수명을 싣지 않으면 만료 없음
   expect(deps.now()).toBe(42);
   const noEnv = makeMergeSelfChangeDeps({ gh, issue: 7, getCharter: () => charter, getEngine: () => false, env: {} });
   expect(noEnv.jobStartedAt).toBeNull();
   expect(noEnv.jobTimeoutMinutes).toBeNull();
+  expect(noEnv.gitTokenTtlMinutes).toBeNull();
+  // ADR-038 보정 — 워크플로가 싣는 체크아웃 토큰 수명: App 설치 토큰 "60" → 60, 머지 PAT "0" → null(만료 없음), 모양이 틀리면 null
+  for (const [ttl, want] of [["60", 60], ["0", null], ["an hour", null], ["-60", null]]) {
+    expect(makeMergeSelfChangeDeps({ gh, issue: 7, getCharter: () => charter, getEngine: () => false, env: { FACTORY_GIT_TOKEN_TTL_MINUTES: ttl } }).gitTokenTtlMinutes, ttl).toBe(want);
+  }
+  // ADR-038 보정 — merge 스테이지의 엔진 git은 GH_TOKEN(두 배우 모드 = 만료 없는 머지 PAT)으로 인증한다; 다른 스테이지·토큰 없음 → null
+  expect(mergeGitAuth({ stage: "merge", env: { GH_TOKEN: "ghp_m" } })).toEqual(gitAuthEnv({ token: "ghp_m" }));
+  expect(mergeGitAuth({ stage: "merge", env: { GH_TOKEN: "ghp_m", GITHUB_SERVER_URL: "https://ghe.example.com" } }).GIT_CONFIG_KEY_1).toBe("http.https://ghe.example.com/.extraheader");
+  expect(mergeGitAuth({ stage: "merge", env: {} })).toBeNull();
+  for (const stage of ["triage", "plan", "implement", "review"]) expect(mergeGitAuth({ stage, env: { GH_TOKEN: "ghp_m" } }), stage).toBeNull();
   expect(makeMergeSelfChangeDeps({ gh, issue: 7, getCharter: () => charter, getEngine: () => false, env: { FACTORY_JOB_STARTED: "soon", FACTORY_JOB_TIMEOUT_MINUTES: "-5" } }).jobTimeoutMinutes).toBeNull();
 
   const sha = "b".repeat(40);
@@ -6736,4 +6750,1879 @@ test("test_239_review_r1_line_cannot_forge_review_evidence", async () => {
     const p = appendRunRecord({ root, issue: 239, stage: "review", runnerId: "gha-9001", lines, now: "2026-10-11T00:00:00Z" });
     expect(parseReviewEvidence(readFileSync(p, "utf8"), { runId: "9001" })).toBe(null);
   }
+});
+// ── #257: a review gate whose verdict differs from the implement gate on the SAME head gets one diagnostic record line ──
+// #253 head b4aac9b: implement `unit` GREEN, review `unit` RED, requeue GREEN — same head, same command. The review record now
+// says so next to FACTORY_GATES; the line is diagnostic only (verdict, transition, factory/gates status and exit code unchanged).
+// Every handoff below comes from the REAL producers: runStage("implement") → mirror commit → gates → makeVerifyStageDep (verify-stage
+// fills `data.gates` from the gates file — the builder's artifact carries none) → makeWriteHandoffDep. The review side is runStage
+// ("review") with the real makeCheckoutHead reading that comment, the real makeVerifyStageDep, and the real record path.
+import * as rs257 from "../bin/run-stage.js";
+const HEAD_257 = "c".repeat(40), BUILDER_257 = "b".repeat(40), MOVED_257 = "d".repeat(40);
+const gates257 = (status, level = "fast", head_sha = HEAD_257) => ({
+  schema: "factory.gates.v1", level, status, ...(head_sha ? { head_sha } : {}), passed: 9, failed: status === "GREEN" ? 0 : 1,
+  failing: status === "GREEN" ? [] : ["unit"], skipped: [], misconfigured: [], tests: { failing: [], excluded: [] },
+});
+const ENV_LINE_257 = "gates: verdict differs from the implement gate on the same head — environmental";
+const ctx257 = () => ({ roster: [], orchestration: "workflow", limits: { K: 3 } });
+const outRoot257 = () => { const r = mkdtempSync(join(tmpdir(), "rs-257-")); mkdirSync(join(r, ".factory/out"), { recursive: true }); return r; };
+const comments257 = (body) => [{ id: 1, createdAt: "2026-10-11T00:00:00Z", body }];
+/** The implement handoff comment as the implement run posts it. `mirror`: the runner's mirror commit makes HEAD_257 the new head. */
+const implement257 = async ({ gatesFile, mirror = true }) => {
+  const ctx = ctx257(), root = outRoot257(), posted = [];
+  const code = await runStage({ stage: "implement", issue: 253, deps: baseDeps({
+    buildContext: async () => ctx,
+    claudeP: async () => ({ is_error: false, result: JSON.stringify({ schema: "factory.implement.v1", issue: 253, head_sha: mirror ? BUILDER_257 : HEAD_257, pr: 31, verifier: { verdict: "accepted" }, orchestration: "workflow", guarantee: "verified" }) }),
+    mirror: async () => (mirror ? { ok: true, applicable: true, changed: ["factory/lib/x.js"], sha: HEAD_257 } : { ok: true, applicable: false, changed: [] }),
+    gates: async () => gatesFile,
+    verifyStage: rs257.makeVerifyStageDep({ root, stage: "implement", getCtx: () => ctx, getCharter: () => ({}), getHarness: () => ({}) }),
+    writeHandoff: rs257.makeWriteHandoffDep({ gh: { comment: async (_i, body) => posted.push(body) }, issue: 253, stage: "implement", getCtx: () => ctx }),
+    transition: async (t) => ({ ok: true, to: t.to }),
+  }) });
+  expect(code).toBe(0);
+  expect(posted).toHaveLength(1);
+  return posted[0];
+};
+const handoff257 = (body) => parseHandoffs(comments257(body)).find((h) => h.stage === "implement").data;
+/** An implement handoff from before #257's consumer existed: the same real comment, with no `gates` field. */
+const withoutGates257 = (body) => { const { gates: _g, ...data } = handoff257(body); return renderHandoff({ stage: "implement", issue: 253, summary: data.summary || "### implement 완료", data }); };
+const review257 = async ({ comment, reviewGates, prHead = HEAD_257, checkoutHead = null }) => {
+  const ctx = ctx257(), root = outRoot257(), lines = [], transitions = [], statuses = [];
+  const gh = { comments: vi.fn(async () => comments257(comment)), prHeadSha: vi.fn(async () => prHead) };
+  const run = makeFakeRun([
+    { match: (c, a) => c === "git" && a[0] === "fetch", result: { code: 0, stdout: "", stderr: "" } },
+    { match: (c, a) => c === "git" && a[0] === "checkout", result: { code: 0, stdout: "", stderr: "" } },
+  ]);
+  const review = { schema: "factory.review.v1", issue: 253, pr: 31, head_sha: HEAD_257, round: 1, orchestration: "workflow", guarantee: "verified",
+    verdicts: [{ role: "correctness", verdict: "approve", confidence: "high", must_fix: [], should_fix: [], verified: [] }] };
+  const deps = baseDeps({
+    buildContext: async () => ctx,
+    checkoutHead: checkoutHead ?? makeCheckoutHead({ gh, run, root: "/repo", issue: 253 }),
+    claudeP: async () => ({ is_error: false, result: JSON.stringify(review) }),
+    gates: async () => reviewGates,
+    verifyStage: rs257.makeVerifyStageDep({ root, stage: "review", getCtx: () => ctx, getCharter: () => ({}), getHarness: () => ({}) }),
+    transition: vi.fn(async (t) => { transitions.push(JSON.stringify(t)); return { ok: true, to: t.to }; }),
+    reportStatus: vi.fn(async (s) => { statuses.push(JSON.stringify(s)); }),
+    runRecord: (l) => lines.push(...l),
+  });
+  const code = await runStage({ stage: "review", issue: 253, deps });
+  return { code, lines, transitions, statuses };
+};
+
+test("test_257_review_gate_notes_a_verdict_differing_from_implement_on_the_same_head", async () => {
+  // The implement gate ran GREEN at level fast on the mirror commit — the normal mirror round (#253's b4aac9b was one).
+  const implement = await implement257({ gatesFile: gates257("GREEN") });
+  const h = handoff257(implement);
+  expect(h.gates).toEqual({ status: "GREEN", level: "fast" });               // filled by verify-stage from the gates file
+  expect([h.head_sha, h.builder_head_sha, h.mirror_sha]).toEqual([HEAD_257, BUILDER_257, HEAD_257]);
+  const withLine = await review257({ comment: implement, reviewGates: gates257("RED") });
+  expect(withLine.lines.filter((l) => l === ENV_LINE_257)).toHaveLength(1);
+  // Written through the real record path, right next to the FACTORY_GATES verdict line.
+  const at = withLine.lines.indexOf(ENV_LINE_257);
+  expect(withLine.lines[at - 1]).toMatch(/^FACTORY_GATES: level=fast status=RED /);
+  expect(withLine.lines).toContain("checkout: ccccccc");
+  // The same run on the same real handoff without its gates field: no line — and everything that decides is byte-identical.
+  const without = await review257({ comment: withoutGates257(implement), reviewGates: gates257("RED") });
+  expect(without.lines).not.toContain(ENV_LINE_257);
+  expect(withLine.code).toBe(without.code);
+  expect(withLine.transitions).toEqual(without.transitions);
+  expect(withLine.transitions).toHaveLength(1);
+  expect(withLine.statuses).toEqual(without.statuses);
+  expect(JSON.parse(withLine.statuses[0])).toMatchObject({ context: "factory/gates", state: "failure", sha: HEAD_257 });
+  expect(withLine.lines.filter((l) => l !== ENV_LINE_257)).toEqual(without.lines);
+  // A round with no mirror commit (head_sha is the builder's own sha) notes it the same way.
+  const plain = await implement257({ gatesFile: gates257("GREEN"), mirror: false });
+  expect(handoff257(plain).builder_head_sha).toBeUndefined();
+  expect((await review257({ comment: plain, reviewGates: gates257("RED") })).lines.filter((l) => l === ENV_LINE_257)).toHaveLength(1);
+});
+
+test("test_257_no_environmental_note_when_verdicts_match_heads_or_levels_differ_or_implement_gates_missing", async () => {
+  // Each suppression case is asserted on its own, next to a SIBLING run that carries the line — so every "absent" below is
+  // absent because of the one thing that case varies, not because nothing writes the line. "Review outcome unchanged" = the
+  // run is byte-identical (exit code, transitions, posted statuses, record lines) to today's run: the same review on the same
+  // real implement handoff without its gates field.
+  const implement = await implement257({ gatesFile: gates257("GREEN") });     // GREEN, fast, on HEAD_257 (a mirror round)
+  const old = withoutGates257(implement);
+  const red = gates257("RED"), green = gates257("GREEN");
+  const sibling = await review257({ comment: implement, reviewGates: red });
+  const suppressed = async (name, run, baseline) => {
+    expect(sibling.lines.filter((l) => l === ENV_LINE_257), `${name}: sibling`).toHaveLength(1);
+    expect(run.lines, name).not.toContain(ENV_LINE_257);
+    expect(run, name).toEqual(baseline);
+  };
+  // The mirror round is NOT a suppression case: builder_head_sha differs from head_sha, head_sha is the reviewed head → the line.
+  expect(handoff257(implement).builder_head_sha).not.toBe(handoff257(implement).head_sha);
+  expect(sibling.lines).toContain(ENV_LINE_257);
+  expect(sibling.lines.filter((l) => l !== ENV_LINE_257)).toEqual((await review257({ comment: old, reviewGates: red })).lines);
+
+  // (a) the statuses are equal — implement GREEN, review GREEN.
+  await suppressed("(a) statuses equal", await review257({ comment: implement, reviewGates: green }),
+    await review257({ comment: old, reviewGates: green }));
+  // (b) the levels differ — implement full, review fast: a different gate set, not the environment.
+  const full = await implement257({ gatesFile: gates257("GREEN", "full") });
+  expect(handoff257(full).gates).toEqual({ status: "GREEN", level: "full" });
+  await suppressed("(b) levels differ", await review257({ comment: full, reviewGates: red }),
+    await review257({ comment: withoutGates257(full), reviewGates: red }));
+  // (c) the reviewed head differs from the implement handoff's head_sha — three ways it can:
+  //  (c1) the PR head moved past the handoff's head_sha: the real makeCheckoutHead refuses the checkout, nothing is gated.
+  const prMoved = await review257({ comment: implement, reviewGates: red, prHead: MOVED_257 });
+  expect(prMoved.lines.some((l) => l.includes("PR head moved since implement handoff (ccccccc → ddddddd)"))).toBe(true);
+  await suppressed("(c1) PR head moved", prMoved, await review257({ comment: old, reviewGates: red, prHead: MOVED_257 }));
+  //  (c2) HEAD moved in the review checkout before the gate ran: the review gates file's head_sha (`git rev-parse HEAD` at gate
+  //       time, gates.js) is not the handoff's head_sha.
+  const movedGate = gates257("RED", "fast", MOVED_257);
+  await suppressed("(c2) gate measured another head", await review257({ comment: implement, reviewGates: movedGate }),
+    await review257({ comment: old, reviewGates: movedGate }));
+  //  (c3) a gates file with no head_sha: the reviewed head is the checkout's sha, and it is not the implement gate's head.
+  const noHead = gates257("RED", "fast", null);
+  const co = (sha, extra) => async () => ({ ok: true, sha, pr: 31, ...extra });
+  const ig = { implement_gates: { status: "GREEN", level: "fast", head_sha: HEAD_257 } };
+  expect((await review257({ comment: implement, reviewGates: noHead, checkoutHead: co(HEAD_257, ig) })).lines, "(c3): sibling").toContain(ENV_LINE_257);
+  await suppressed("(c3) checkout sha differs", await review257({ comment: implement, reviewGates: noHead, checkoutHead: co(MOVED_257, ig) }),
+    await review257({ comment: implement, reviewGates: noHead, checkoutHead: co(MOVED_257, {}) }));
+  // (d) the implement gate data is missing:
+  //  (d1) an old implement handoff with no gates field, through the real makeCheckoutHead.
+  await suppressed("(d1) old handoff", await review257({ comment: old, reviewGates: red }), await review257({ comment: old, reviewGates: red }));
+  //  (d2) a fake checkoutHead that never returns the field (the ~64 fakes in this file) — vs the same fake returning it.
+  expect((await review257({ comment: implement, reviewGates: red, checkoutHead: co(HEAD_257, ig) })).lines, "(d2): sibling").toContain(ENV_LINE_257);
+  await suppressed("(d2) fake checkoutHead without implement_gates", await review257({ comment: implement, reviewGates: red, checkoutHead: co(HEAD_257, {}) }),
+    await review257({ comment: old, reviewGates: red }));
+});
+
+// ── #233 → #254 (gap P-12 / ledger M-6) — 올린 tier가 생산 경로에 닿는다 ──────────────────────────────
+// verifyStage는 자기 호출자가 넘긴 것만 본다: 러너의 triage 검증(`makeVerifyStageDep`)이 harness `[load_bearing].paths`를
+// 넘겨야 올림이 산다. 올린 tier는 실제 writer를 지난 triage handoff와 tier 라벨에 닿는다(run 기록 줄은 없다 — plan non_goal).
+import * as rs233 from "../bin/run-stage.js";
+
+test("test_254_raised_tier_reaches_the_triage_handoff_and_label", async () => {
+  const runTriage = async ({ impact_paths, tier = "standard", loadBearing }) => {
+    const root = mkdtempSync(join(tmpdir(), "rs-233-"));
+    const ctx = { roster: [], orchestration: "workflow", limits: { K: 3 }, tier, tier_effective: tier, tier_source: "triage", tier_floor: "docs" };
+    const posted = [], lines = [], labels = [];
+    const gh = { comment: async (_issue, body) => posted.push(body) };
+    const deps = baseDeps({
+      buildContext: async () => ctx,
+      claudeP: async () => ({ is_error: false, result: JSON.stringify({ schema: "factory.triage.v1", issue: 7, disposition: "ready", tier, impact_paths, reason: "r", orchestration: "workflow" }) }),
+      verifyStage: rs233.makeVerifyStageDep({ root, stage: "triage", getCtx: () => ctx, getCharter: () => ({ never_automate: [] }), getHarness: () => ({ load_bearing: { paths: loadBearing } }) }),
+      writeHandoff: rs233.makeWriteHandoffDep({ gh, issue: 7, stage: "triage", getCtx: () => ctx }),
+      setTierLabel: async (t) => labels.push(t),
+      transition: async () => ({ ok: true, to: "factory:ready" }),
+      runRecord: (l) => lines.push(...l),
+    });
+    const code = await runStage({ stage: "triage", issue: 7, deps });
+    const handoffs = parseHandoffs(posted.map((body, i) => ({ id: i, body, createdAt: "2026-10-10T00:00:00Z" })));
+    return { code, lines, labels, handoff: handoffs.find((h) => h.stage === "triage")?.data };
+  };
+  const LB = ["factory/bin/run-stage.js", ".factory/bin/run-stage.js"];
+
+  const hit = await runTriage({ impact_paths: ["factory/lib/context.js", "factory/bin/run-stage.js"], loadBearing: LB });
+  expect(hit.code).toBe(0);
+  expect([hit.handoff.tier, hit.handoff.tier_declared]).toEqual(["load-bearing", "standard"]);   // 실제 writer를 지나도 올림이 남는다
+  expect(hit.handoff.load_bearing_hit).toEqual([{ path: "factory/bin/run-stage.js", glob: "factory/bin/run-stage.js" }]);
+  expect(hit.labels).toEqual(["load-bearing"]);                                     // 사람이 보는 라벨도 올라간 쪽
+
+  // 같은 이슈, 하네스에 load_bearing이 없으면(= 글롭이 verifyStage에 안 닿으면) 올림이 없다
+  const unwired = await runTriage({ impact_paths: ["factory/bin/run-stage.js"], loadBearing: [] });
+  expect(unwired.handoff.load_bearing_hit).toBeUndefined();
+  expect(unwired.handoff.tier).toBe("standard");
+  expect(unwired.labels).toEqual(["standard"]);
+
+  // miss — 신고 tier 그대로(오늘의 동작)
+  const miss = await runTriage({ impact_paths: ["factory/lib/context.js"], loadBearing: LB });
+  expect([miss.handoff.tier, miss.handoff.load_bearing_hit]).toEqual(["standard", undefined]);
+  expect(miss.labels).toEqual(["standard"]);
+});
+
+// #254 skeptic f1 — the test above hands makeVerifyStageDep its OWN getHarness, so main() could pass `() => null` (or go back to
+// an inline closure with no loadBearing) and production would silently never raise. This one closes the chain main() actually
+// runs: the dep is built BEFORE the harness exists (main builds deps first), main's own `makeCharterReady` then reads THIS repo's
+// real `.factory/harness.toml` through its `set`, and the same lazy getter must see it. The source pin then holds main()'s deps
+// object to exactly that getter over that variable — replace it with `() => null`, drop the dep, or stop assigning `harness`
+// from charterReady's `set`, and this fails.
+test("test_254_main_wires_the_charter_ready_harness_into_triage_verify", async () => {
+  const repoRoot = new URL("../..", import.meta.url).pathname;
+  const outRoot = mkdtempSync(join(tmpdir(), "rs-254-main-"));
+  const ctx = { roster: [], orchestration: "workflow", tier: "standard" };
+  const triageOut = (impact_paths) => ({ is_error: false, result: JSON.stringify({ schema: "factory.triage.v1", issue: 7, disposition: "ready", tier: "standard", impact_paths, reason: "r", orchestration: "workflow" }) });
+  let charter, harness;                                                    // main()'s two `let`s, filled only by charterReady
+  const verify = rs233.makeVerifyStageDep({ root: outRoot, stage: "triage", getCtx: () => ctx, getCharter: () => charter, getHarness: () => harness });
+
+  // before charterReady: no harness yet → the declared tier stands (the getter is lazy, not a snapshot)
+  const early = verify({ out: triageOut(["factory/bin/run-stage.js"]), gates: null });
+  expect([early.data.tier, early.data.load_bearing_hit]).toEqual(["standard", undefined]);
+
+  const ready = rs233.makeCharterReady({ root: repoRoot, set: (s) => { if ("charter" in s) charter = s.charter; if ("harness" in s) harness = s.harness; }, engineAt: () => false, log: () => {} });
+  await ready();
+  expect(harness?.load_bearing?.paths).toContain("factory/bin/run-stage.js");   // the real harness, read by the real reader
+
+  const hit = verify({ out: triageOut(["factory/lib/context.js", "factory/bin/run-stage.js"]), gates: null });
+  expect(hit.ok).toBe(true);
+  expect([hit.data.tier, hit.data.tier_declared]).toEqual(["load-bearing", "standard"]);
+  expect(hit.data.load_bearing_hit).toEqual([{ path: "factory/bin/run-stage.js", glob: "factory/bin/run-stage.js" }]);
+  const miss = verify({ out: triageOut(["factory/lib/context.js"]), gates: null });
+  expect([miss.data.tier, miss.data.load_bearing_hit]).toEqual(["standard", undefined]);
+
+  // main()'s own wiring: the deps object takes verifyStage from makeVerifyStageDep with exactly these getters, and
+  // charterReady's `set` is what fills the `harness` those getters close over.
+  const src = readFileSync(new URL("../bin/run-stage.js", import.meta.url), "utf8");
+  const mainSrc = src.slice(src.indexOf("async function main()"));
+  const depsBlock = mainSrc.slice(mainSrc.indexOf("const deps = {"), mainSrc.indexOf("\n  };\n", mainSrc.indexOf("const deps = {")));
+  const wired = depsBlock.match(/\n {4}verifyStage:\s*makeVerifyStageDep\(\{([^}]*)\}\)/);
+  expect(wired, "main() must build verifyStage from makeVerifyStageDep").not.toBeNull();
+  expect(wired[1]).toMatch(/getHarness:\s*\(\)\s*=>\s*harness\s*[,}]?/);
+  expect(wired[1]).toMatch(/getCharter:\s*\(\)\s*=>\s*charter\s*[,}]?/);
+  expect(depsBlock.match(/\n {4}verifyStage\s*:/g)).toHaveLength(1);            // no second, inline key overriding it
+  expect(depsBlock).toMatch(/charterReady:\s*makeCharterReady\(\{\s*root,\s*set:\s*\(s\)\s*=>\s*\{[^}]*if \("harness" in s\) harness = s\.harness;/);
+  expect(mainSrc.slice(0, mainSrc.indexOf("const deps = {"))).toMatch(/\blet\b[^;]*\bharness\b/);
+});
+
+// ── #230 — one door into the queue: the triage entry re-runs admission; local entry admits ───────────────────────
+// Every test here drives the real door: real transition(), real makeQueueAdmission (through main's `makeStageAdmission`
+// where the wiring is the point), a fake gh that keeps labels and comments. Verdicts come from the fake gh's state —
+// the final label, the comments the issue actually got, whether the agent was launched — not from mock arguments.
+import { makeStageAdmission, TRIAGE_RECHECK_UNWIRED } from "../bin/run-stage.js";
+import { blockedOrigin as blockedOrigin230 } from "../lib/retro/issue-comments.js";
+
+const CHARTER_230 = { never_automate: ["templates/factory/**"], back_pressure: { queue_max: 3 }, self_generated: { open_max: 2, depth_max: 1 } };
+const WELL_FORMED_230 = "## What\nfix the button\n\n## Impact paths\n- `src/button.js`\n\n## done_when\n- [ ] `test_9_button` — it clicks";
+const NO_DONE_WHEN_230 = "## What\nplease fix the button\n\n## Impact paths\n- `src/button.js`";
+const NEVER_AUTO_230 = "## What\nbump the template\n\n## Impact paths\n- `templates/factory/github/workflows/x.yml`\n\n## done_when\n- [ ] `test_9_tpl` — bumped";
+const store230 = (issues) => {
+  const store = new Map();
+  for (const i of issues) store.set(i.number, { state: "open", title: `#${i.number}`, author: "LeeHyeonKyu", comments: [], ...i, labels: [...i.labels] });
+  const gh = {
+    store,
+    async issue(n) { const i = store.get(Number(n)); if (!i) throw new Error(`no issue #${n}`); return { ...i, labels: [...i.labels] }; },
+    async comments(n) { return [...(store.get(Number(n))?.comments ?? [])]; },
+    async comment(n, body) { store.get(Number(n)).comments.push({ body }); },
+    async setFactoryLabel(n, to) { const i = store.get(Number(n)); i.labels = [...i.labels.filter((l) => !STATES.has(l)), to]; },
+    async searchIssues(label) { return [...store.values()].filter((i) => i.state === "open" && i.labels.includes(label)).map((i) => ({ number: i.number })); },
+  };
+  return gh;
+};
+const logins230 = async () => ({ ok: true, logins: ["factory-bot"] });
+const rehearsed230 = async () => ({ ok: true });
+/** What the real `transition({ to: "factory:queue" })` says about the same body — on a backlog twin in a fresh, under-capacity store. */
+const doorReason230 = async (body, extra = {}) => {
+  const gh = store230([{ number: 900, labels: ["backlog"], body, ...extra }]);
+  const t = await realTransition({ gh, issue: 900, to: "factory:queue", rehearsal: rehearsed230, admission: makeQueueAdmission({ gh, charter: CHARTER_230, factoryLogins: logins230 }) });
+  expect(t.ok).toBe(false);
+  return t.reason;
+};
+/** A triage run's deps the way main() assembles them: production transition dep + production admission closure. */
+const triageDeps230 = (gh, n, { charter = CHARTER_230, admission, transition, lines = [], ...over } = {}) => {
+  const adm = admission === undefined ? makeStageAdmission({ gh, getCharter: () => charter, factoryLogins: logins230 }) : admission;
+  return baseDeps({
+    issueLabels: async () => (await gh.issue(n)).labels,
+    blockedOrigin: async () => blockedOrigin230(await gh.comments(n)),
+    transition: transition ?? makeTransitionDep({ gh, issue: n, stage: "triage", rehearsal: rehearsed230, admission: adm, buildExtra: async () => ({}) }),
+    ...(adm ? { admission: adm } : {}),
+    claudeP: vi.fn(async () => ({ is_error: false, result: "{}" })),
+    release: vi.fn(async () => true),
+    runRecord: (l) => lines.push(...l),
+    ...over,
+  });
+};
+const stateOf230 = (gh, n) => gh.store.get(n).labels.find((l) => STATES.has(l));
+
+test("test_230_triage_entry_reruns_admission_and_refuses_like_transition", async () => {
+  // (a) no done_when → needs-info; (b) NEVER_AUTOMATE impact path → wont-do (the state triage's own override forces, run-stage :1089)
+  for (const [body, end] of [[NO_DONE_WHEN_230, "factory:needs-info"], [NEVER_AUTO_230, "factory:wont-do"]]) {
+    const gh = store230([{ number: 9, labels: ["factory:queue"], body }]);
+    const lines = [];
+    const d = triageDeps230(gh, 9, { lines });
+    expect(await runStage({ stage: "triage", issue: 9, deps: d }), end).toBe(0);
+    expect(stateOf230(gh, 9), end).toBe(end);                                   // the label actually left factory:queue
+    expect(d.claudeP, end).not.toHaveBeenCalled();                              // no agent money spent
+    expect(d.release, end).toHaveBeenCalled();                                  // the claim is released
+    const expected = await doorReason230(body);
+    expect(expected, end).toMatch(/^queue admission refused — /);
+    const comments = gh.store.get(9).comments.map((c) => c.body);
+    expect(comments, end).toHaveLength(1);                                      // one comment — transition()'s own
+    expect(comments[0], end).toMatch(new RegExp(`^<!-- factory-transition:v1 from=factory:queue to=${end} by=script -->\n`));
+    expect(comments[0].split("\n")[1], end).toBe(`factory:queue → ${end} — ${expected}`);
+    expect(lines.some((l) => l.includes(expected)), end).toBe(true);
+  }
+
+  // (c) an admissible issue reaches the agent — and the run calls the same deps in the same order as a run without the re-check
+  const gh = store230([{ number: 9, labels: ["factory:queue"], body: WELL_FORMED_230 }]);
+  // runRecord calls are logged with their first line, so the one line an unwired run adds (and nothing else) can be named
+  const order = (d, calls) => Object.fromEntries(Object.entries(d).map(([k, v]) => [k, typeof v === "function" ? async (...a) => { calls.push(k === "runRecord" ? `runRecord:${a[0]?.[0]}` : k); return v(...a); } : v]));
+  const today = [], now = [];
+  const stub = () => ({ transition: vi.fn(async ({ to }) => ({ ok: true, to })) });
+  const without = triageDeps230(gh, 9, { admission: null, ...stub() });
+  expect(without.admission).toBeUndefined();
+  await runStage({ stage: "triage", issue: 9, deps: order(without, today) });
+  const withIt = triageDeps230(gh, 9, stub());
+  await runStage({ stage: "triage", issue: 9, deps: order(withIt, now) });
+  expect(withIt.claudeP).toHaveBeenCalledTimes(1);
+  expect(now.filter((k) => k === "admission")).toHaveLength(1);
+  // a run without the re-check says so in its record (never silently) — that one line is the only difference from today
+  expect(today.filter((k) => k === `runRecord:${TRIAGE_RECHECK_UNWIRED}`)).toHaveLength(1);
+  expect(now.some((k) => k === `runRecord:${TRIAGE_RECHECK_UNWIRED}`)).toBe(false);
+  expect(now.filter((k) => k !== "admission")).toEqual(today.filter((k) => k !== `runRecord:${TRIAGE_RECHECK_UNWIRED}`));
+  expect(now.indexOf("admission")).toBeLessThan(now.indexOf("claudeP"));
+  // "today" is pinned literally, not only as this PR's other branch: the sequence up to the agent launch, as the pre-#230
+  // run-stage.js (0627918) calls it for these deps, with the one re-check call between the entry-label read and the heartbeat
+  const PRE_230_UP_TO_AGENT = ["charterReady", "trustWorkspace", "claim", "issueLabels", "heartbeat", "assertHandoff", "buildContext", "resetAgentsLog", "claudeP"];
+  expect(now.slice(0, now.indexOf("claudeP") + 1)).toEqual([...PRE_230_UP_TO_AGENT.slice(0, 4), "admission", ...PRE_230_UP_TO_AGENT.slice(4)]);
+  expect(gh.store.get(9).comments).toEqual([]);                                 // nothing said about admission on the happy path
+
+  // main() wires the one admission closure into the triage entry and into local entry
+  const src = readFileSync(new URL("../bin/run-stage.js", import.meta.url), "utf8");
+  expect(src).toMatch(/const admission = makeStageAdmission\(\{ gh, getCharter: \(\) => charter, factoryLogins: \(\) => resolveFactoryLogins\(\{ gh, env: process\.env \}\) \}\);/);
+  expect(src).toMatch(/\n    admission,\n/);
+  // …and it is a top-level key of the very `deps` object main() hands to runStage (not some other object literal), never reassigned
+  const mainSrc = src.slice(src.indexOf("\nasync function main() {"));
+  const depsAt = mainSrc.indexOf("\n  const deps = {\n");
+  const runAt = mainSrc.indexOf("process.exit(await runStage({ stage, issue, deps, runnerId, runAttempt }));");
+  expect(depsAt).toBeGreaterThan(-1);
+  expect(runAt).toBeGreaterThan(depsAt);
+  const depsEnd = mainSrc.indexOf("\n  };\n", depsAt);
+  expect(depsEnd).toBeGreaterThan(depsAt);
+  expect(depsEnd).toBeLessThan(runAt);
+  expect(mainSrc.slice(depsAt, depsEnd)).toMatch(/\n    admission,\n/);
+  expect(mainSrc.slice(depsEnd, runAt)).not.toMatch(/\bdeps\s*=|delete deps\.admission|deps\.admission\s*=/);
+});
+
+test("test_230_triage_entry_admissible_issue_passes_when_queue_is_at_capacity", async () => {
+  // queue_max 3 counting the triaged issue itself (#9 + #1 + #2), and #9 is a self-generated harness issue whose two active
+  // self-generated siblings (#21, #22) sit exactly at self_generated.open_max 2.
+  const harness9 = "<!-- factory-harness-request for=5 -->\n## harness\nadd pg";
+  const gh = store230([
+    { number: 5, labels: ["factory:in-progress"], body: WELL_FORMED_230 },
+    { number: 9, labels: ["factory:queue", "factory:harness"], body: harness9, author: "factory-bot" },
+    { number: 1, labels: ["factory:queue"], body: WELL_FORMED_230 },
+    { number: 21, labels: ["factory:queue", "factory:flaky"], body: "Detected while implementing #5. evidence: {}" },
+    { number: 22, labels: ["factory:ready", "factory:flaky"], body: "Detected while implementing #5. evidence: {}" },
+  ]);
+  // the fixture really is at capacity: the shared admission, asked about #9 itself, names both caps (and only those)
+  const self = await makeQueueAdmission({ gh, charter: CHARTER_230, factoryLogins: logins230 })({ issue: 9 });
+  // Scope change (#247): dw2 — the pure queueAdmission no longer counts the judged issue against queue_max (the plan puts the
+  // self-exclusion there, mirroring open_max), so #9 asked about itself in a queue of three (#9, #1, #21) names only the open_max cap.
+  // The triage run below is unchanged: #9 still reaches the agent and nobody is demoted.
+  expect(self.reasons).toEqual(["self-generated open 2 ≥ 2 (self_generated.open_max)"]);
+  // …and the queue itself really is at queue_max: a backlog newcomer to this same repo state is refused with the branch's own
+  // "queue 3 ≥ 3" sentence (the newcomer is not in the list, so all three members count — the count #9 used to make of itself).
+  const twin = store230([...[5, 9, 1, 21, 22].map((n) => ({ ...gh.store.get(n), labels: [...gh.store.get(n).labels], comments: [] })), { number: 30, labels: ["backlog"], body: WELL_FORMED_230 }]);
+  expect((await makeQueueAdmission({ gh: twin, charter: CHARTER_230, factoryLogins: logins230 })({ issue: 30 })).reasons).toEqual(["queue 3 ≥ 3 (back_pressure.queue_max)"]);
+  const atLaunch = [];
+  const d = triageDeps230(gh, 9, {
+    claudeP: vi.fn(async () => { atLaunch.push(...[9, 1, 21, 22].map((n) => [n, stateOf230(gh, n)])); return { is_error: false, result: "{}" }; }),
+  });
+  await runStage({ stage: "triage", issue: 9, deps: d });
+  expect(d.claudeP).toHaveBeenCalledTimes(1);                                   // the agent is launched
+  expect(atLaunch).toEqual([[9, "factory:queue"], [1, "factory:queue"], [21, "factory:queue"], [22, "factory:ready"]]);   // nobody demoted
+  expect(gh.store.get(9).comments.some((c) => /queue admission refused/.test(c.body))).toBe(false);
+});
+
+test("test_230_triage_entry_unreadable_admission_blocks_retryably_not_demotes", async () => {
+  const unreadable = [
+    ["gh throws inside admission", (gh) => ({ gh: { ...gh, searchIssues: async () => { throw new Error("HTTP 502 search"); } }, charter: CHARTER_230 }), /HTTP 502 search/],
+    ["CHARTER not loaded", (gh) => ({ gh, charter: undefined }), /CHARTER not loaded/],
+  ];
+  for (const [name, wire, why] of unreadable) {
+    const gh = store230([{ number: 9, labels: ["factory:queue"], body: NO_DONE_WHEN_230 }]);
+    const { gh: admGh, charter } = wire(gh);
+    const lines = [];
+    const d = triageDeps230(gh, 9, { lines, admission: makeStageAdmission({ gh: admGh, getCharter: () => charter, factoryLogins: logins230 }) });
+    expect(await runStage({ stage: "triage", issue: 9, deps: d }), name).toBe(2);
+    expect(stateOf230(gh, 9), name).toBe("factory:blocked");                    // never needs-info / wont-do / backlog
+    expect(blockedOrigin230(await gh.comments(9)), name).toMatchObject({ from: "factory:queue", stage: "triage", cause: "api-error" });
+    expect(gh.store.get(9).comments.some((c) => /admission refused|inadmissible/.test(c.body)), name).toBe(false);
+    expect(d.claudeP, name).not.toHaveBeenCalled();
+    expect(lines.some((l) => l.startsWith("triage entry: queue admission unreadable") && why.test(l)), name).toBe(true);
+  }
+  // an admission dep that throws is the same unreadable, not a verdict
+  const gh = store230([{ number: 9, labels: ["factory:queue"], body: WELL_FORMED_230 }]);
+  const d = triageDeps230(gh, 9, { admission: async () => { throw new Error("boom"); } });
+  expect(await runStage({ stage: "triage", issue: 9, deps: d })).toBe(2);
+  expect(stateOf230(gh, 9)).toBe("factory:blocked");
+  expect(d.claudeP).not.toHaveBeenCalled();
+
+  // the sweeper's blocked retry (origin factory:queue) re-enters triage: it cannot reach the agent unless admission passes
+  const seed = async (body) => {
+    const g = store230([{ number: 9, labels: ["factory:queue"], body }]);
+    expect((await realTransition({ gh: g, issue: 9, to: "factory:blocked", reason: "entry state unreadable — HTTP 502", stage: "triage", cause: "api-error" })).ok).toBe(true);
+    return g;
+  };
+  // production wiring: the hop itself goes through the door
+  const g1 = await seed(NO_DONE_WHEN_230);
+  const d1 = triageDeps230(g1, 9);
+  await runStage({ stage: "triage", issue: 9, deps: d1 });
+  expect(d1.claudeP).not.toHaveBeenCalled();
+  expect(stateOf230(g1, 9)).not.toBe("factory:ready");
+  // even a hop that skipped the door lands in front of the entry re-check
+  const g2 = await seed(NO_DONE_WHEN_230);
+  const adm2 = makeStageAdmission({ gh: g2, getCharter: () => CHARTER_230, factoryLogins: logins230 });
+  const d2 = triageDeps230(g2, 9, { admission: adm2, transition: makeTransitionDep({ gh: g2, issue: 9, stage: "triage", rehearsal: rehearsed230, admission: adm2, buildExtra: async () => ({}),
+    transitionFn: (a) => realTransition({ ...a, ...(a.to === "factory:queue" ? { skipRehearsal: true } : {}) }) }) });
+  expect(await runStage({ stage: "triage", issue: 9, deps: d2 })).toBe(0);
+  expect(d2.claudeP).not.toHaveBeenCalled();
+  expect(stateOf230(g2, 9)).toBe("factory:needs-info");
+  // and an admissible issue's retry still reaches the agent
+  const g3 = await seed(WELL_FORMED_230);
+  const d3 = triageDeps230(g3, 9);
+  await runStage({ stage: "triage", issue: 9, deps: d3 });
+  expect(d3.claudeP).toHaveBeenCalledTimes(1);
+  // a run whose deps carry no admission (main() always wires one — pinned above) never skips the re-check silently: the run
+  // record names it before the agent starts, so a wiring defect is visible in every run it touches. This case also strips the
+  // hop's door (`skipRehearsal`, test-only) — the one shape where nothing judges the retry. With the door in place (d6 below)
+  // the retry of an inadmissible issue stops at the hop. The entry itself is not fail-closed because the pre-#230 test
+  // "KTB-15b: triage entering from factory:blocked…" runs this retry with no admission dep and expects the agent (ADR-040).
+  const g4 = await seed(NO_DONE_WHEN_230);
+  const order4 = [];
+  const adm4 = makeStageAdmission({ gh: g4, getCharter: () => CHARTER_230, factoryLogins: logins230 });
+  const d4 = triageDeps230(g4, 9, { admission: null, transition: makeTransitionDep({ gh: g4, issue: 9, stage: "triage", rehearsal: rehearsed230, admission: adm4, buildExtra: async () => ({}),
+    transitionFn: (a) => realTransition({ ...a, ...(a.to === "factory:queue" ? { skipRehearsal: true } : {}) }) }),
+    runRecord: (l) => order4.push(...l), claudeP: vi.fn(async () => { order4.push("claudeP"); return { is_error: false, result: "{}" }; }) });
+  expect(d4.admission).toBeUndefined();
+  await runStage({ stage: "triage", issue: 9, deps: d4 });
+  expect(order4.filter((l) => l === TRIAGE_RECHECK_UNWIRED)).toHaveLength(1);
+  expect(order4.indexOf(TRIAGE_RECHECK_UNWIRED)).toBeLessThan(order4.indexOf("claudeP"));
+  // and with main's own transition dep, a missing admission cannot even hop back: the blocked → queue door refuses (fail closed)
+  const g5 = await seed(WELL_FORMED_230);
+  const d5 = triageDeps230(g5, 9, { admission: null });
+  expect(d5.admission).toBeUndefined();
+  expect(await runStage({ stage: "triage", issue: 9, deps: d5 })).toBe(2);
+  expect(d5.claudeP).not.toHaveBeenCalled();
+  expect(stateOf230(g5, 9)).toBe("factory:blocked");
+  // with main's own transition dep and no admission dep on the run, the retry of an inadmissible issue still cannot reach the
+  // agent: the hop's door judges the issue's own facts itself (it does not lean on the entry re-check being wired)
+  const g6 = await seed(NO_DONE_WHEN_230);
+  const adm6 = makeStageAdmission({ gh: g6, getCharter: () => CHARTER_230, factoryLogins: logins230 });
+  const d6 = triageDeps230(g6, 9, { admission: null, transition: makeTransitionDep({ gh: g6, issue: 9, stage: "triage", rehearsal: rehearsed230, admission: adm6, buildExtra: async () => ({}) }) });
+  expect(d6.admission).toBeUndefined();
+  expect(await runStage({ stage: "triage", issue: 9, deps: d6 })).toBe(2);
+  expect(d6.claudeP).not.toHaveBeenCalled();
+  expect(stateOf230(g6, 9)).toBe("factory:blocked");
+
+  // #249 sec1 (inverted from the #247 branch, which let this hop skip the caps): the retry hop back to factory:queue passes the
+  // SAME door as any queue entry, caps included — the blocked-origin marker that authorizes it is not author-checked (ADR-040).
+  // So after one transient admission failure, an issue whose siblings sit at self_generated.open_max (#9 is a harness issue; #21
+  // queued and #22 ready are its siblings), or whose queue another issue filled to queue_max while #9 sat in blocked, stays
+  // factory:blocked (exit 2, the cap named in the run record) — the accepted cost — and nobody admitted is demoted
+  const harness9 = "<!-- factory-harness-request for=5 -->\n## harness\nadd pg";
+  const fixtures = [
+    ["siblings at open_max", [
+      { number: 5, labels: ["factory:in-progress"], body: WELL_FORMED_230 },
+      { number: 9, labels: ["factory:queue", "factory:harness"], body: harness9, author: "factory-bot" },
+      { number: 1, labels: ["factory:queue"], body: WELL_FORMED_230 },
+      { number: 21, labels: ["factory:queue", "factory:flaky"], body: "Detected while implementing #5. evidence: {}" },
+      { number: 22, labels: ["factory:ready", "factory:flaky"], body: "Detected while implementing #5. evidence: {}" },
+    ], [1, 21, 22], /self-generated open 2 ≥ 2/],
+    ["queue filled to queue_max", [
+      { number: 9, labels: ["factory:queue"], body: WELL_FORMED_230 },
+      ...[1, 2, 3].map((n) => ({ number: n, labels: ["factory:queue"], body: WELL_FORMED_230 })),
+    ], [1, 2, 3], /queue 3 ≥ 3/],
+  ];
+  for (const [name, issues, others, cap] of fixtures) {
+    const gc = store230(issues);
+    // the transient failure: the first admission read throws, the run blocks the issue (retryable, not a verdict)
+    let flaky = true;
+    const flakyGh = { ...gc, searchIssues: async (l) => { if (flaky) { flaky = false; throw new Error("HTTP 502 search"); } return gc.searchIssues(l); } };
+    const first = triageDeps230(gc, 9, { admission: makeStageAdmission({ gh: flakyGh, getCharter: () => CHARTER_230, factoryLogins: logins230 }) });
+    expect(await runStage({ stage: "triage", issue: 9, deps: first }), name).toBe(2);
+    expect(stateOf230(gc, 9), name).toBe("factory:blocked");
+    // the fixture really is capacity-bound now: the shared door, asked about the blocked #9, refuses it on a cap
+    const door = await makeQueueAdmission({ gh: gc, charter: CHARTER_230, factoryLogins: logins230 })({ issue: 9 });
+    expect(door.ok, name).toBe(false);
+    expect(door.reasons.join("; "), name).toMatch(cap);
+    // the sweeper's retry, wired exactly as main() wires it: the hop is refused by the door; nobody is demoted
+    const before = others.map((n) => [n, stateOf230(gc, n)]);
+    const retryLines = [];
+    const retry = triageDeps230(gc, 9, { lines: retryLines });
+    expect(await runStage({ stage: "triage", issue: 9, deps: retry }), name).toBe(2);
+    expect(retry.claudeP, name).not.toHaveBeenCalled();
+    expect(stateOf230(gc, 9), name).toBe("factory:blocked");
+    expect(others.map((n) => [n, stateOf230(gc, n)]), name).toEqual(before);
+    expect(retryLines, name).toContain("triage: blocked retry hop refused");
+    expect(retryLines.some((l) => l.startsWith("transition refused: queue admission refused — ") && cap.test(l)), name).toBe(true);
+    expect(gc.store.get(9).comments.some((c) => /queue admission refused/.test(c.body)), name).toBe(false);
+  }
+});
+
+test("test_230_local_entry_refuses_inadmissible_issues_before_writing_the_label", async () => {
+  const env = { FACTORY_LOCAL_ENTRY: "1" };                                     // injected, never process.env
+  const cases = [
+    ["no done_when", [{ number: 12, labels: ["backlog"], body: NO_DONE_WHEN_230 }]],
+    ["NEVER_AUTOMATE", [{ number: 12, labels: ["backlog"], body: NEVER_AUTO_230 }]],
+    ["queue at queue_max", [{ number: 12, labels: ["backlog"], body: WELL_FORMED_230 }, ...[1, 2, 3].map((n) => ({ number: n, labels: ["factory:queue"], body: WELL_FORMED_230 }))]],
+  ];
+  for (const [name, issues] of cases) {
+    const gh = store230(issues);
+    const setFactoryLabel = vi.spyOn(gh, "setFactoryLabel");
+    const comment = vi.spyOn(gh, "comment");
+    const said = [];
+    const line = await makeLocalEntry({ gh, issue: 12, stage: "triage", env, rehearsal: rehearsed230, admission: makeQueueAdmission({ gh, charter: CHARTER_230, factoryLogins: logins230 }), log: (m) => said.push(m) })();
+    // what the real transition() says for the same issue in the same repo state
+    const twin = store230(issues);
+    const t = await realTransition({ gh: twin, issue: 12, to: "factory:queue", rehearsal: rehearsed230, admission: makeQueueAdmission({ gh: twin, charter: CHARTER_230, factoryLogins: logins230 }) });
+    expect(t.ok, name).toBe(false);
+    expect(line, name).toBe(`local entry refused: ${t.reason}`);
+    expect(said, name).toEqual([line]);                                          // printed to stderr as well
+    expect(setFactoryLabel, name).not.toHaveBeenCalled();
+    expect(comment, name).not.toHaveBeenCalled();
+    expect(stateOf230(gh, 12), name).toBe("backlog");
+  }
+  // an admissible backlog issue is queued exactly as today
+  const gh = store230([{ number: 12, labels: ["backlog"], body: WELL_FORMED_230 }]);
+  const said = [];
+  const line = await makeLocalEntry({ gh, issue: 12, stage: "triage", env, rehearsal: rehearsed230, admission: makeQueueAdmission({ gh, charter: CHARTER_230, factoryLogins: logins230 }), log: (m) => said.push(m) })();
+  expect(line).toBe("local entry: backlog → factory:queue");
+  expect(stateOf230(gh, 12)).toBe("factory:queue");
+  expect(gh.store.get(12).comments.map((c) => c.body)).toEqual(["<!-- factory-transition:v1 from=backlog to=factory:queue by=local -->\nbacklog → factory:queue — claimed locally first (§4.2.5)"]);
+  expect(said).toEqual([]);
+  // without FACTORY_LOCAL_ENTRY there is no local entry at all
+  expect(await makeLocalEntry({ gh: store230([{ number: 12, labels: ["backlog"], body: NO_DONE_WHEN_230 }]), issue: 12, stage: "triage", env: {}, rehearsal: rehearsed230, admission: async () => ({ ok: false, reasons: ["x"] }) })()).toBeNull();
+  // the admission that reads gh fails closed: an unreadable read refuses, it never writes the label
+  const broken = store230([{ number: 12, labels: ["backlog"], body: WELL_FORMED_230 }]);
+  const refused = await makeLocalEntry({ gh: broken, issue: 12, stage: "triage", env, rehearsal: rehearsed230, admission: makeStageAdmission({ gh: broken, getCharter: () => undefined, factoryLogins: logins230 }), log: () => {} })();
+  expect(refused).toBe("local entry refused: queue admission refused — CHARTER not loaded — queue admission needs it");
+  expect(stateOf230(broken, 12)).toBe("backlog");
+  // an unwired admission refuses (fail closed): no label write, no comment, and the sentence is what the real transition()
+  // says for the same unwired door
+  for (const unwired of [null, false, {}]) {
+    const issues = [{ number: 12, labels: ["backlog"], body: WELL_FORMED_230 }];
+    const g = store230(issues);
+    const setFactoryLabel = vi.spyOn(g, "setFactoryLabel");
+    const comment = vi.spyOn(g, "comment");
+    const heard = [];
+    const l = await makeLocalEntry({ gh: g, issue: 12, stage: "triage", env, rehearsal: rehearsed230, admission: unwired, log: (m) => heard.push(m) })();
+    const t = await realTransition({ gh: store230(issues), issue: 12, to: "factory:queue", rehearsal: rehearsed230, admission: unwired });
+    expect(t.ok, String(unwired)).toBe(false);
+    expect(l, String(unwired)).toBe(`local entry refused: ${t.reason}`);
+    expect(heard, String(unwired)).toEqual([l]);
+    expect(setFactoryLabel, String(unwired)).not.toHaveBeenCalled();
+    expect(comment, String(unwired)).not.toHaveBeenCalled();
+    expect(stateOf230(g, 12), String(unwired)).toBe("backlog");
+  }
+  // the legacy shape — the admission key omitted — cannot carry an inadmissible issue to the agent. #247 dw3 (spec1): it no longer
+  // reaches the label at all (the branch let it through to the triage re-check, which sent it to needs-info); local entry refuses
+  // it fail-closed, so the issue never leaves backlog and the agent is never launched.
+  const legacy = store230([{ number: 12, labels: ["backlog"], body: NO_DONE_WHEN_230 }]);
+  const dl = triageDeps230(legacy, 12, { localEntry: makeLocalEntry({ gh: legacy, issue: 12, stage: "triage", env, rehearsal: rehearsed230, log: () => {} }) });
+  expect(await runStage({ stage: "triage", issue: 12, deps: dl })).toBe(0);
+  expect(dl.claudeP).not.toHaveBeenCalled();
+  expect(stateOf230(legacy, 12)).toBe("backlog");
+  expect(legacy.store.get(12).comments).toEqual([]);
+  // main() hands local entry the same admission closure
+  const src = readFileSync(new URL("../bin/run-stage.js", import.meta.url), "utf8");
+  expect(src).toMatch(/localEntry: makeLocalEntry\(\{ gh, issue, stage, env: process\.env, rehearsal, admission \}\)/);
+});
+
+// ── #247 — the #230 re-land, plus what the #247 plan pins on top: the refusal's resting state, the self-count at
+// triage re-entry, and local entry still enqueuing through the production closure in runStage's own order ──────────
+import { TRANSITIONS, ENTRY_LABELS } from "../lib/labels.js";
+import { queueAdmission } from "../lib/admission.js";
+
+const QUEUE_EXITS_247 = [...TRANSITIONS.get("factory:queue")];
+/** store230 + a log of every label write, so "at most one label write" is counted on the fake gh, not inferred. */
+const counted247 = (issues) => {
+  const gh = store230(issues);
+  const writes = [];
+  const set = gh.setFactoryLabel.bind(gh);
+  gh.setFactoryLabel = async (n, to) => { writes.push([Number(n), to]); return set(n, to); };
+  return { gh, writes };
+};
+
+test("test_247_triage_refusal_leaves_a_terminal_label_and_one_comment", async () => {
+  // reached factory:queue by a hand label (no transition() ever ran): no done_when in the body
+  const { gh, writes } = counted247([{ number: 9, labels: ["factory:queue"], body: NO_DONE_WHEN_230 }]);
+  const d = triageDeps230(gh, 9);
+  expect(await runStage({ stage: "triage", issue: 9, deps: d })).toBe(0);
+  expect(d.claudeP).not.toHaveBeenCalled();                                     // no triage work ran
+  // exactly one label write, onto a legal exit edge of factory:queue (labels.js TRANSITIONS — no new edge)
+  expect(writes).toHaveLength(1);
+  const [[n, to]] = writes;
+  expect(n).toBe(9);
+  expect(QUEUE_EXITS_247).toContain(to);
+  expect(stateOf230(gh, 9)).toBe(to);
+  // the resting state does not re-trigger triage: it is not a triage entry label, and a second triage run is a no-op
+  expect(ENTRY_LABELS.triage).not.toContain(to);
+  const again = triageDeps230(gh, 9);
+  await runStage({ stage: "triage", issue: 9, deps: again });
+  expect(again.claudeP).not.toHaveBeenCalled();
+  expect(writes).toHaveLength(1);
+  // exactly one comment, carrying transition()'s own admission sentence unchanged
+  const said = await doorReason230(NO_DONE_WHEN_230);
+  const comments = gh.store.get(9).comments.map((c) => c.body);
+  expect(comments).toHaveLength(1);
+  expect(comments[0]).toContain(said);
+});
+
+test("test_247_triage_reentry_does_not_count_itself_against_queue_max", async () => {
+  // queue_max = 3 (CHARTER_230). The pure rule first: the judged issue in the queue list is not counted against it…
+  const me = { number: 9, body: WELL_FORMED_230, author: "LeeHyeonKyu", labels: ["factory:queue"] };
+  const pure = (queued) => queueAdmission({ issue: me, charter: CHARTER_230, queued: queued.map((number) => ({ number })), openSelfGenerated: [], byNumber: () => null, factoryLogins: ["factory-bot"] });
+  expect(pure([9, 1, 2])).toMatchObject({ ok: true });
+  expect(pure([9, 1, 2, 3]).ok).toBe(false);
+  expect(pure([9, 1, 2, 3]).reasons.join("; ")).toMatch(/back_pressure\.queue_max/);
+  // …and a backlog issue (not in the list) is judged exactly as before: three others fill a queue_max of 3
+  expect(pure([1, 2, 3]).ok).toBe(false);
+  expect(pure([1, 2]).ok).toBe(true);
+
+  // N of N, the target included: triage entry admits it — no refusal, no label change, the agent runs
+  const atN = counted247([9, 1, 2].map((number) => ({ number, labels: ["factory:queue"], body: WELL_FORMED_230 })));
+  const dN = triageDeps230(atN.gh, 9, { transition: vi.fn(async ({ to }) => ({ ok: true, to })) });
+  await runStage({ stage: "triage", issue: 9, deps: dN });
+  expect(dN.claudeP).toHaveBeenCalledTimes(1);
+  expect(atN.writes).toEqual([]);
+  expect(atN.gh.store.get(9).comments).toEqual([]);
+  expect(dN.transition.mock.calls.map(([a]) => a.to)).not.toContain("factory:needs-human");
+
+  // N+1 of N, the target included: refused before any triage work, the reason names back_pressure.queue_max
+  const over = counted247([9, 1, 2, 3].map((number) => ({ number, labels: ["factory:queue"], body: WELL_FORMED_230 })));
+  const dO = triageDeps230(over.gh, 9);
+  expect(await runStage({ stage: "triage", issue: 9, deps: dO })).toBe(0);
+  expect(dO.claudeP).not.toHaveBeenCalled();
+  expect(over.writes).toHaveLength(1);
+  expect(QUEUE_EXITS_247).toContain(over.writes[0][1]);
+  expect(ENTRY_LABELS.triage).not.toContain(over.writes[0][1]);
+  const c = over.gh.store.get(9).comments.map((x) => x.body);
+  expect(c).toHaveLength(1);
+  expect(c[0]).toMatch(/queue admission refused — queue 3 ≥ 3 \(back_pressure\.queue_max\)/);
+  // the others are untouched — one over-cap issue leaves, the members stay
+  for (const k of [1, 2, 3]) expect(stateOf230(over.gh, k)).toBe("factory:queue");
+});
+
+test("test_247_local_entry_receives_production_admission_closure", async () => {
+  // production shape: main() builds one admission closure (makeStageAdmission) whose CHARTER is filled in by charterReady
+  // later, and hands it to makeLocalEntry. Before charterReady it refuses ("CHARTER not loaded") — so this only enqueues if
+  // runStage really runs charterReady before localEntry.
+  const gh = store230([{ number: 12, labels: ["backlog"], body: WELL_FORMED_230 }]);
+  let charter;
+  const admission = makeStageAdmission({ gh, getCharter: () => charter, factoryLogins: logins230 });
+  expect((await admission({ issue: 12 })).ok).toBe(false);                     // the closure really does refuse before CHARTER
+  const said = [];
+  const d = triageDeps230(gh, 12, {
+    admission,
+    charterReady: async () => { charter = CHARTER_230; return true; },
+    localEntry: makeLocalEntry({ gh, issue: 12, stage: "triage", env: { FACTORY_LOCAL_ENTRY: "1" }, rehearsal: rehearsed230, admission, log: (m) => said.push(m) }),
+  });
+  await runStage({ stage: "triage", issue: 12, deps: d });
+  expect(said).toEqual([]);                                                     // no refusal line
+  expect(gh.store.get(12).comments.map((x) => x.body)).toEqual(["<!-- factory-transition:v1 from=backlog to=factory:queue by=local -->\nbacklog → factory:queue — claimed locally first (§4.2.5)"]);
+  expect(d.claudeP).toHaveBeenCalledTimes(1);                                   // enqueued, re-checked, and on to the agent
+  expect(stateOf230(gh, 12)).toBe("factory:queue");
+});
+
+test("test_247_local_entry_without_admission_dep_writes_no_label", async () => {
+  // dw3 / spec1 — the admission key is OMITTED (not passed as undefined) and the rehearsal says ok:true, so a refusal here can only
+  // come from the missing dep. The issue is admissible on its own (well-formed body, empty queue): an admission, had one been wired,
+  // would let it in — so "refused" is the fail-closed rule, not a verdict on the issue.
+  const gh = store230([{ number: 12, labels: ["backlog"], body: WELL_FORMED_230 }]);
+  const setFactoryLabel = vi.spyOn(gh, "setFactoryLabel");
+  const comment = vi.spyOn(gh, "comment");
+  const rehearsal = vi.fn(async () => ({ ok: true }));
+  const heard = [];
+  const deps = { gh, issue: 12, stage: "triage", env: { FACTORY_LOCAL_ENTRY: "1" }, rehearsal, log: (m) => heard.push(m) };
+  expect("admission" in deps).toBe(false);
+  const line = await makeLocalEntry(deps)();
+  expect(rehearsal).toHaveBeenCalledTimes(1);                                   // the rehearsal ran and passed — it is not the refuser
+  expect(setFactoryLabel).toHaveBeenCalledTimes(0);
+  expect(comment).toHaveBeenCalledTimes(0);
+  expect(stateOf230(gh, 12)).toBe("backlog");
+  expect(gh.store.get(12).comments).toEqual([]);
+  // the sentence is the one the real transition() gives for the same unwired door (its own ADMISSION_UNWIRED), not a new one
+  const t = await realTransition({ gh: store230([{ number: 12, labels: ["backlog"], body: WELL_FORMED_230 }]), issue: 12, to: "factory:queue", rehearsal: rehearsed230 });
+  expect(t.ok).toBe(false);
+  expect(line).toBe(`local entry refused: ${t.reason}`);
+  expect(heard).toEqual([line]);                                                // and the operator hears it
+  // the same issue with the production admission wired is queued exactly as today — the refusal above is the missing dep alone
+  const ok = store230([{ number: 12, labels: ["backlog"], body: WELL_FORMED_230 }]);
+  const queued = await makeLocalEntry({ ...deps, gh: ok, admission: makeStageAdmission({ gh: ok, getCharter: () => CHARTER_230, factoryLogins: logins230 }) })();
+  expect(queued).toBe("local entry: backlog → factory:queue");
+  expect(stateOf230(ok, 12)).toBe("factory:queue");
+});
+
+test("test_247_full_queue_triage_never_evicts_its_first_n_members", async () => {
+  // skeptic — queue_max 3 (CHARTER_230) and four well-formed members (#9 listed first, as a hop-restored seat would be): the
+  // fresh triage entry of EVERY member is run, each on its own copy of the same repo state. Only the member ranked after the
+  // first three (#9) is refused; #1, #2 and #3 reach the agent. A guard that refused any member while the queue holds more than
+  // N — or that counted every sibling — would refuse #1, #2 and #3 too, and the full queue would drain to needs-human.
+  const seen = {};
+  for (const k of [9, 1, 2, 3]) {
+    const { gh, writes } = counted247([9, 1, 2, 3].map((number) => ({ number, labels: ["factory:queue"], body: WELL_FORMED_230 })));
+    const d = triageDeps230(gh, k, { transition: vi.fn(async ({ to }) => ({ ok: true, to })) });
+    await runStage({ stage: "triage", issue: k, deps: d });
+    const refused = d.transition.mock.calls.map(([a]) => a).filter((a) => a.to === "factory:needs-human");
+    seen[k] = { agent: d.claudeP.mock.calls.length, refused: refused.map((a) => a.reason), writes };
+  }
+  for (const k of [1, 2, 3]) expect(seen[k], `#${k}`).toEqual({ agent: 1, refused: [], writes: [] });
+  expect(seen[9]).toEqual({ agent: 0, refused: ["queue admission refused — queue 3 ≥ 3 (back_pressure.queue_max)"], writes: [] });
+});
+
+test("test_247_triage_recheck_unwired_is_admission_unwired_itself", async () => {
+  // dw5 — "no second unwired constant beyond ADMISSION_UNWIRED": the name the branch's test_230 tests import is that constant,
+  // not a sentence of its own, and a triage run with no admission dep records exactly that sentence once, before the agent.
+  const { ADMISSION_UNWIRED } = await import("../lib/transition.js");
+  expect(TRIAGE_RECHECK_UNWIRED).toBe(ADMISSION_UNWIRED);
+  const gh = store230([{ number: 9, labels: ["factory:queue"], body: WELL_FORMED_230 }]);
+  const lines = [];
+  const d = triageDeps230(gh, 9, { admission: null, lines, transition: vi.fn(async ({ to }) => ({ ok: true, to })) });
+  expect("admission" in d).toBe(false);
+  await runStage({ stage: "triage", issue: 9, deps: d });
+  expect(lines.filter((l) => l === ADMISSION_UNWIRED)).toHaveLength(1);
+  expect(lines.filter((l) => /unwired|not wired|re-check skipped/i.test(l) && l !== ADMISSION_UNWIRED)).toEqual([]);
+});
+
+// ── #249 dw3 — the PRODUCTION local-entry call still queues an admissible issue ─────────────────────────────────────
+// Every other local-entry test injects its own `admission`, so they all stay green if main()'s own
+// `localEntry: makeLocalEntry({ … })` call loses the key — and then, because local entry now fails closed (#247 dw3), every real
+// `factory run triage <n>` is refused. main() is not exported and does git/gh I/O inline (no refactor here — plan non_goal), so
+// the call is read from main()'s source the way breaker.test.js / qa-evidence.test.js pin main()'s wiring — and then RUN:
+// each argument main() passes is bound to the value main() binds under that name (`admission` = the one makeStageAdmission
+// closure, whose CHARTER charterReady fills in later), and runStage drives it. If the call drops `admission`, passes something
+// else under that key, or main() stops binding `admission` to makeStageAdmission, the issue stays in backlog and this fails.
+test("test_249_local_entry_production_wiring_passes_admission", async () => {
+  const src = readFileSync(new URL("../bin/run-stage.js", import.meta.url), "utf8");
+  const mainSrc = src.slice(src.indexOf("\nasync function main() {"));
+  expect(mainSrc.length).toBeLessThan(src.length);
+  // the one closure main() binds to `admission` — no second makeQueueAdmission instance, never reassigned
+  expect(mainSrc.match(/\bconst admission = makeStageAdmission\(\{ gh, getCharter: \(\) => charter, /g)).toHaveLength(1);
+  expect(mainSrc).not.toMatch(/\bmakeQueueAdmission\(/);
+  expect(mainSrc.replace(/\bconst admission = makeStageAdmission\(/, "")).not.toMatch(/(^|[^.\w])admission\s*=(?![=>])/);
+  // …and no second checker anywhere else in main(): exactly ONE makeStageAdmission( call (a second one — e.g. one built without
+  // factoryLogins and handed straight to makeTransitionDep — is a second checker on the queue door), and no `admission:` key
+  // with a value of its own: every consumer receives the one `admission` binding by shorthand.
+  expect(mainSrc.match(/\bmakeStageAdmission\(/g)).toHaveLength(1);
+  expect(mainSrc).not.toMatch(/\badmission\s*:/);
+  for (const consumer of ["makeTransitionDep", "makeHarnessIssueDep", "makeLocalEntry"]) {
+    const callArgs = [...mainSrc.matchAll(new RegExp(`\\b${consumer}\\(\\{([^}]*?)(?:buildExtra|\\}\\))`, "g"))];
+    expect(callArgs, consumer).toHaveLength(1);
+    expect(callArgs[0][1].split(",").map((s) => s.trim()), `${consumer} gets main()'s one admission`).toContain("admission");
+  }
+  // the one production local-entry call, and the arguments it really passes
+  const calls = [...mainSrc.matchAll(/localEntry: makeLocalEntry\(\{([^}]*)\}\)/g)];
+  expect(calls).toHaveLength(1);
+  const items = calls[0][1].split(",").map((s) => s.trim()).filter(Boolean);
+
+  const gh = store230([{ number: 12, labels: ["backlog"], body: WELL_FORMED_230 }]);
+  let charter;                                                                   // filled by charterReady, as in main()
+  const scope = {
+    gh, issue: 12, stage: "triage", rehearsal: rehearsed230,
+    admission: makeStageAdmission({ gh, getCharter: () => charter, factoryLogins: logins230 }),
+  };
+  const env = { FACTORY_LOCAL_ENTRY: "1" };                                      // injected for main()'s `env: process.env`
+  const args = Object.fromEntries(items.map((item) => {
+    const [k, e] = item.includes(":") ? item.split(":").map((s) => s.trim()) : [item, item];
+    if (k === "env" && e === "process.env") return [k, env];
+    expect(Object.keys(scope), `main() passes ${k}: ${e}`).toContain(e);       // only main()'s own bindings, by name
+    return [k, scope[e]];
+  }));
+  const said = [];
+  const lines = [];
+  const d = triageDeps230(gh, 12, {
+    lines,
+    admission: scope.admission,
+    charterReady: async () => { charter = CHARTER_230; return true; },
+    localEntry: makeLocalEntry({ ...args, log: (m) => said.push(m) }),
+  });
+  await runStage({ stage: "triage", issue: 12, deps: d });
+  expect(said).toEqual([]);                                                      // no refusal line
+  expect(lines).toContain("local entry: backlog → factory:queue");               // the record line, as before
+  expect(lines.some((l) => l.includes(ADMISSION_UNWIRED_249))).toBe(false);
+  expect(stateOf230(gh, 12)).toBe("factory:queue");
+  expect(gh.store.get(12).comments.map((x) => x.body)).toEqual(["<!-- factory-transition:v1 from=backlog to=factory:queue by=local -->\nbacklog → factory:queue — claimed locally first (§4.2.5)"]);
+  expect(d.claudeP).toHaveBeenCalledTimes(1);                                    // on to the agent
+
+  // …and what that call hands over under `admission` really judges: the same production-shaped call refuses an inadmissible
+  // issue with transition()'s own sentence (an argument that merely says ok — the rehearsal, a stub — would queue it)
+  const bad = store230([{ number: 12, labels: ["backlog"], body: NO_DONE_WHEN_230 }]);
+  const badScope = { ...scope, gh: bad, admission: makeStageAdmission({ gh: bad, getCharter: () => CHARTER_230, factoryLogins: logins230 }) };
+  const badArgs = Object.fromEntries(items.map((item) => {
+    const [k, e] = item.includes(":") ? item.split(":").map((s) => s.trim()) : [item, item];
+    return [k, k === "env" && e === "process.env" ? env : badScope[e]];
+  }));
+  const refusedLine = await makeLocalEntry({ ...badArgs, log: () => {} })();
+  expect(refusedLine).toBe(`local entry refused: ${await doorReason230(NO_DONE_WHEN_230)}`);
+  expect(stateOf230(bad, 12)).toBe("backlog");
+  expect(bad.store.get(12).comments).toEqual([]);
+
+  // …and that one production checker still carries the factory logins (#261, App mode). main()'s `admission` binding is read
+  // out of its source — exactly one `factoryLogins:` argument, and it is the real resolver over main()'s env — then rebuilt with
+  // the real `resolveFactoryLogins` and an injected App-mode env (FACTORY_BOT_LOGIN, outside Actions: no viewer read).
+  const bindingArgs = /\bconst admission = makeStageAdmission\(\{ gh, getCharter: \(\) => charter, (.*)\}\);/.exec(mainSrc)?.[1] ?? "";
+  expect(bindingArgs.trim()).toBe("factoryLogins: () => resolveFactoryLogins({ gh, env: process.env })");
+  const APP_ENV_249 = { FACTORY_BOT_LOGIN: "ktb-factory[bot]" };
+  const appEntry = (issues, n) => {
+    const g = store230(issues);
+    const a = makeStageAdmission({ gh: g, getCharter: () => CHARTER_230, factoryLogins: () => resolveFactoryLogins195({ gh: g, env: APP_ENV_249 }) });
+    return { g, admit: a, run: makeLocalEntry({ ...args, gh: g, issue: n, admission: a, log: () => {} }) };
+  };
+  // (1) a marker-only issue the App opened (no done_when, no factory label): admitted, and counted as self-generated —
+  //     never the "factory logins could not be resolved" refusal a checker built without logins gives
+  const marker = appEntry([
+    { number: 4, labels: ["factory:in-progress"], body: WELL_FORMED_230 },
+    { number: 12, labels: ["backlog"], body: "Detected while implementing #4. evidence: {}", author: "ktb-factory[bot]" },
+  ], 12);
+  expect(await marker.admit({ issue: 12 })).toEqual({ ok: true, reasons: [], self_generated: true });
+  expect(await marker.run()).toBe("local entry: backlog → factory:queue");
+  expect(stateOf230(marker.g, 12)).toBe("factory:queue");
+  // (2) an issue whose ONLY self-generation signal is the App author (done_when, no marker, no factory label) counts against
+  //     self_generated.open_max: two open factory issues fill it, so local entry refuses it on that cap and writes nothing
+  const authorOnly = appEntry([
+    ...[21, 22].map((number) => ({ number, labels: ["factory:in-progress", "factory:flaky"], body: "Detected while implementing #4. evidence: {}", author: "ktb-factory[bot]" })),
+    { number: 13, labels: ["backlog"], body: WELL_FORMED_230, author: "ktb-factory[bot]" },
+  ], 13);
+  const capped = await authorOnly.admit({ issue: 13 });
+  expect(capped).toMatchObject({ ok: false, self_generated: true });
+  expect(capped.reasons).toEqual(["self-generated open 2 ≥ 2 (self_generated.open_max)"]);
+  expect(await authorOnly.run()).toBe("local entry refused: queue admission refused — self-generated open 2 ≥ 2 (self_generated.open_max)");
+  expect(stateOf230(authorOnly.g, 13)).toBe("backlog");
+  expect(authorOnly.g.store.get(13).comments).toEqual([]);
+});
+import { ADMISSION_UNWIRED as ADMISSION_UNWIRED_249 } from "../lib/transition.js";
+
+// ── #249 sec1 — the triage blocked→queue retry hop passes the SAME door as every other queue entry ──────────────────
+// The hop is authorized by a `factory-blocked-origin` marker whose author nobody checks (issue-comments.js blockedOrigin —
+// trusting it is the follow-up named in ADR-040). So the hop must not carry its own cap exemption: the real admission
+// (makeStageAdmission → makeQueueAdmission over this stateful fake gh) judges it exactly as it judges a backlog newcomer, and
+// the entry re-check after it enforces queue_max like any other queued issue. The marker below is written by a NON-factory
+// author on purpose — who wrote it is not what these tests vary.
+// dw1 is a REGRESSION GUARD, not a test of new code: main's hop (runStage → makeTransitionDep → transition()) already runs the
+// whole door, caps included, whatever `prerequisite` says, and this PR leaves that path's code as it is. What the guard proves is
+// that a cap exemption on the hop cannot come back silently. Two mutations were run against it (#249 self-critique), and each turns
+// it red on behaviour (exit 0 instead of 2, #9 written to factory:queue), not on a missing symbol:
+//   (a) makeTransitionDep hands transition() an admission that passes when `entryRecheck` passes (caps ignored) on prerequisite hops;
+//   (b) runStage writes the hop label directly instead of calling d.transition.
+// The with-room control below stays green under (a), so under that mutation the refusal cannot come from disabling the hop.
+const FORGED_ORIGIN_249 = { body: "<!-- factory-blocked-origin from=factory:queue stage=triage cause=api-error -->", author: { login: "mallory" } };
+const blocked249 = (issues) => {
+  const { gh, writes } = counted247(issues);
+  gh.store.get(9).comments.push({ ...FORGED_ORIGIN_249 });
+  return { gh, writes };
+};
+const queueCount249 = async (gh) => (await gh.searchIssues("factory:queue")).length;
+
+test("test_249_blocked_retry_hop_is_refused_by_queue_caps", async () => {
+  const flaky5 = { number: 5, labels: ["factory:in-progress", "factory:flaky"], body: "Detected while implementing #4. evidence: {}", author: "factory-bot" };
+  const cases = [
+    ["queue at back_pressure.queue_max", [
+      { number: 9, labels: ["factory:blocked"], body: WELL_FORMED_230 },
+      ...[1, 2, 3].map((n) => ({ number: n, labels: ["factory:queue"], body: WELL_FORMED_230 })),
+    ], [1, 2, 3], /\(back_pressure\.queue_max\)/],
+    // a flaky the factory harvested from a flaky the factory harvested: generation 2 > depth_max 1; the queue has room
+    ["self-generated past self_generated.depth_max", [
+      { number: 4, labels: ["factory:in-progress"], body: WELL_FORMED_230 },
+      flaky5,
+      { number: 9, labels: ["factory:blocked", "factory:flaky"], body: "Detected while implementing #5. evidence: {}", author: "factory-bot" },
+      { number: 1, labels: ["factory:queue"], body: WELL_FORMED_230 },
+    ], [1], /\(self_generated\.depth_max\)/],
+  ];
+  for (const [name, issues, members, cap] of cases) {
+    const { gh, writes } = blocked249(issues);
+    // the real door, asked about the blocked #9 in this very repo state, refuses it on that cap (and only on caps)
+    const door = await makeQueueAdmission({ gh, charter: CHARTER_230, factoryLogins: logins230 })({ issue: 9 });
+    expect(door.ok, name).toBe(false);
+    expect(door.reasons.join("; "), name).toMatch(cap);
+    const sentence = `queue admission refused — ${door.reasons.join("; ")}`;
+    const countBefore = await queueCount249(gh);
+    const commentsBefore = gh.store.get(9).comments.length;
+    const lines = [];
+    const d = triageDeps230(gh, 9, { lines });
+    expect(await runStage({ stage: "triage", issue: 9, deps: d }), name).toBe(2);
+    expect(d.claudeP, name).not.toHaveBeenCalled();                              // no agent money spent
+    expect(writes, name).toEqual([]);                                            // no factory:queue (or needs-human) label written
+    expect(stateOf230(gh, 9), name).toBe("factory:blocked");
+    expect(gh.store.get(9).comments.length, name).toBe(commentsBefore);          // nothing said on the issue in this run
+    const at = lines.indexOf("triage: blocked retry hop refused");
+    expect(at, name).toBeGreaterThan(-1);
+    expect(lines[at + 1], name).toBe(`transition refused: ${sentence}`);         // the real admission's sentence, cap named
+    expect(lines[at + 1], name).toMatch(cap);
+    expect(lines.some((l) => /hopped back to factory:queue/.test(l)), name).toBe(false);
+    for (const k of members) expect(stateOf230(gh, k), `${name} #${k}`).toBe("factory:queue");   // nobody admitted is evicted
+    expect(await queueCount249(gh), name).toBe(countBefore);
+  }
+});
+
+test("test_249_blocked_retry_hop_with_room_still_reaches_triage", async () => {
+  // same forged-author marker, but the queue is below queue_max (2 of 3) and #9 is no self-generated issue: the door admits it
+  const { gh, writes } = blocked249([
+    { number: 9, labels: ["factory:blocked"], body: WELL_FORMED_230 },
+    ...[1, 2].map((n) => ({ number: n, labels: ["factory:queue"], body: WELL_FORMED_230 })),
+  ]);
+  const lines = [];
+  const atLaunch = [];
+  const d = triageDeps230(gh, 9, { lines, claudeP: vi.fn(async () => { atLaunch.push(...[9, 1, 2].map((n) => [n, stateOf230(gh, n)])); return { is_error: false, result: "{}" }; }) });
+  await runStage({ stage: "triage", issue: 9, deps: d });
+  expect(lines).toContain("triage: blocked retry — hopped back to factory:queue");
+  expect(writes[0]).toEqual([9, "factory:queue"]);                               // the hop wrote the label through the door
+  expect(lines.some((l) => l.startsWith("triage entry:"))).toBe(false);          // the entry re-check passed (queue_max enforced, 2 ahead < 3)
+  expect(d.claudeP).toHaveBeenCalledTimes(1);
+  expect(atLaunch).toEqual([[9, "factory:queue"], [1, "factory:queue"], [2, "factory:queue"]]);
+});
+
+test("test_249_hop_restored_entry_recheck_enforces_queue_max", async () => {
+  // the hop lands while lower-numbered siblings already fill queue_max (here the hop's door is switched off — test-only
+  // `skipRehearsal` — to stand for the count-then-write race the door cannot close). The entry re-check is the second,
+  // independent lock: a hop-restored issue is judged under queue_max exactly like any other queued issue.
+  const { gh } = blocked249([
+    { number: 9, labels: ["factory:blocked"], body: WELL_FORMED_230 },
+    ...[1, 2, 3].map((n) => ({ number: n, labels: ["factory:queue"], body: WELL_FORMED_230 })),
+  ]);
+  const adm = makeStageAdmission({ gh, getCharter: () => CHARTER_230, factoryLogins: logins230 });
+  const lines = [];
+  const d = triageDeps230(gh, 9, { lines, admission: adm, transition: makeTransitionDep({ gh, issue: 9, stage: "triage", rehearsal: rehearsed230, admission: adm, buildExtra: async () => ({}),
+    transitionFn: (a) => realTransition({ ...a, ...(a.to === "factory:queue" ? { skipRehearsal: true } : {}) }) }) });
+  expect(await runStage({ stage: "triage", issue: 9, deps: d })).toBe(0);
+  expect(lines).toContain("triage: blocked retry — hopped back to factory:queue");   // it really was restored by the hop
+  expect(d.claudeP).not.toHaveBeenCalled();
+  // the sentence the real transition() gives for a queue entry of #9 against the same three siblings
+  const twin = store230([{ number: 9, labels: ["backlog"], body: WELL_FORMED_230 }, ...[1, 2, 3].map((n) => ({ number: n, labels: ["factory:queue"], body: WELL_FORMED_230 }))]);
+  const t = await realTransition({ gh: twin, issue: 9, to: "factory:queue", rehearsal: rehearsed230, admission: makeQueueAdmission({ gh: twin, charter: CHARTER_230, factoryLogins: logins230 }) });
+  expect(t.ok).toBe(false);
+  expect(t.reason).toMatch(/\(back_pressure\.queue_max\)/);
+  expect(lines).toContain(`triage entry: ${t.reason} → factory:needs-human`);
+  expect(stateOf230(gh, 9)).toBe("factory:needs-human");
+  expect(gh.store.get(9).comments.at(-1).body.split("\n")[1]).toBe(`factory:queue → factory:needs-human — ${t.reason}`);
+  for (const k of [1, 2, 3]) expect(stateOf230(gh, k)).toBe("factory:queue");
+});
+
+// ── #207 — 워크플로의 fail-closed 반환(디스패처 전달 고장)은 산출물 결함이 아니라 판정 불가다 ─────────────────────────────
+// 2026-10-03 #195 rework 라운드 2(run 37140542370): 디스패처가 6,604바이트 args를 JSON 문자열로 넘기다 잘랐고, 워크플로는
+// `{"issue":0,"error":"context payload missing",…}`을 돌려줬으며, 스테이지는 그것을 needs-human("stage artifact missing or invalid")으로
+// 세웠다. 픽스처는 실제 생산자다: fail-closed 반환은 진짜 워크플로 템플릿을 runWorkflow로 돌려 얻고, 검증은 진짜 verifyStage,
+// 전이는 진짜 transition(), 에스컬레이션은 진짜 sweep(), 기록은 진짜 appendRunRecord와 lifetimeCostOf다.
+import { runWorkflow as runWorkflow207 } from "./helpers/run-workflow.js";
+import { dispatcherPayloadErrorOf, makeBuildContextDep } from "../bin/run-stage.js";
+import { sweep as sweep207, engineCausedNeedsHuman as engineCausedNeedsHuman207, BLOCKED_ESCALATION_REASON as ESCALATION207 } from "../lib/sweeper.js";
+import { blockedOrigin as blockedOrigin207 } from "../lib/retro/issue-comments.js";
+import { lifetimeCostOf as lifetimeCostOf207 } from "../lib/budget.js";
+import { buildContext as buildContext207 } from "../lib/context.js";
+
+const WF207 = (name) => new URL(`../../templates/factory/claude/workflows/factory-${name}.js`, import.meta.url).pathname;
+/** run 37140542370의 모양: args 전체가 JSON 문자열로 오다 잘렸다(닫는 괄호 누락) → issue 0, context payload missing. */
+async function truncatedArgsReturn207(name = "implement") {
+  const args = JSON.stringify({ raw: "207", loaded: { issue: 207, must_fix: [{ id: "cf1", claim: "x".repeat(4000) }] } });
+  return (await runWorkflow207(WF207(name), { agent: async () => null, args: args.slice(0, Math.floor(args.length * 0.9)) })).result;
+}
+/** 디스패처가 다른 이슈의 payload를 넘겼다 → context issue mismatch. */
+async function mismatchReturn207(name = "review") {
+  return (await runWorkflow207(WF207(name), { agent: async () => null, args: { issue: 42, loaded: { issue: 7 } } })).result;
+}
+const fenced207 = (o) => "Workflow finished.\n```json\n" + JSON.stringify(o, null, 2) + "\n```";
+const RED207 = { schema: "factory.gates.v1", level: "full", status: "RED", failing: ["unit"], passed: 3, failed: 1, skipped: [], misconfigured: [], gates: { unit: { status: "RED", failing_ids: ["t::x"] } }, tests: { failing: [{ id: "t::x" }], excluded: [] }, head_sha: "a".repeat(40) };
+const ctx207 = { roster: [], orchestration: "workflow", limits: { K: 3 }, tier: "standard", loaded_json: { path: ".factory/out/loaded.json", bytes: 6604, limit: 4096, truncated_to: 100, over: true } };
+
+test("test_207_workflow_payload_error_is_undecidable_not_needs_human", async () => {
+  const missing = await truncatedArgsReturn207("implement");
+  expect(missing).toEqual({ issue: 0, error: "context payload missing", orchestration: "workflow", guarantee: "structural" });   // 사건의 반환 그대로
+  const mismatch = await mismatchReturn207("review");
+  expect(mismatch.error).toMatch(/^context issue mismatch/);
+
+  // implement + 게이트 RED: selfGateRetry도 planned 재시도도 없이 blocked/undecidable, 사유에 에러와 loaded.json 바이트 수.
+  const lines = [];
+  const selfGateRetry = vi.fn(async () => ({ attempt: 1, total: 0 }));
+  const d = implDeps({ buildContext: async () => ctx207, claudeP: async () => ({ is_error: false, result: fenced207(missing) }), gates: async () => RED207, selfGateRetry, runRecord: (l) => lines.push(...l) });
+  expect(await runStage({ stage: "implement", issue: 207, deps: d, runnerId: "r" })).toBe(2);
+  expect(selfGateRetry).not.toHaveBeenCalled();
+  const last = d.transition.mock.calls.at(-1)[0];
+  expect(last.to).toBe("factory:blocked");
+  expect(last.cause).toBe("undecidable");
+  expect(last.reason.startsWith("dispatcher payload: context payload missing")).toBe(true);
+  expect(last.reason).toContain("loaded.json 6604 bytes");
+  expect(last.reason).not.toMatch(/args len/);                                            // 엔진이 보지 못하는 수를 말하지 않는다
+  expect(lines.some((l) => /^engine-crash:/.test(l))).toBe(false);                        // 두 번째 engine-crash 생산자가 아니다
+  expect(d.transition).not.toHaveBeenCalledWith(expect.objectContaining({ to: "factory:needs-human" }));
+  expect(d.transition).not.toHaveBeenCalledWith(expect.objectContaining({ to: "factory:planned" }));
+
+  // 게이트가 어떤 상태든 같은 자리다: 빌더가 돌지 않은 브랜치 head를 잰 게이트는 BLOCKED이거나, 실패 테스트 없는 RED(`reason`)이거나,
+  // merge-base를 못 구해 던질 수 있다 — 그 어느 쪽도 이 런의 원인이 아니다. 원인 없는 blocked·`gates-unhandled`로 라벨되지 않는다.
+  const gateStates = [
+    ["GREEN", async () => ({ ...RED207, status: "GREEN", failing: [], failed: 0, gates: { unit: { status: "GREEN" } }, tests: { failing: [], excluded: [] } })],
+    ["BLOCKED", async () => ({ schema: "factory.gates.v1", status: "BLOCKED", blocked_reason: "test env did not come up", head_sha: "a".repeat(40) })],
+    ["RED with reason", async () => ({ ...RED207, gates: { unit: { status: "RED", reason: "RED with no failing test: worker stderr EPIPE" } } })],
+    ["merge-base throws", async () => { throw new MergeBaseError("origin/main: exit 128"); }],
+  ];
+  for (const [name, gates] of gateStates) {
+    const gl = [];
+    const gd = implDeps({ buildContext: async () => ctx207, claudeP: async () => ({ is_error: false, result: fenced207(missing) }), gates, selfGateRetry, runRecord: (l) => gl.push(...l) });
+    expect(await runStage({ stage: "implement", issue: 207, deps: gd, runnerId: "r" }), name).toBe(2);
+    expect(gd.transition.mock.calls.map(([t]) => t.to), name).not.toContain("factory:needs-human");
+    const t = gd.transition.mock.calls.at(-1)[0];
+    expect([t.to, t.cause], name).toEqual(["factory:blocked", "undecidable"]);
+    expect(t.reason, name).toBe("dispatcher payload: context payload missing (loaded.json 6604 bytes)");
+    expect(gl.some((l) => /not an agent artifact defect/.test(l)), name).toBe(true);
+  }
+  expect(selfGateRetry).not.toHaveBeenCalled();
+
+  // review + context issue mismatch: 같은 자리.
+  const rv = baseDeps({ buildContext: async () => ctx207, claudeP: async () => ({ is_error: false, result: fenced207(mismatch) }), verifyStage: ({ stage, out, gates }) => verifyStage({ stage, out, roster: [], orchestration: "workflow", gates }), transition: vi.fn(async ({ to }) => ({ ok: true, to })), gates: async () => null });
+  expect(await runStage({ stage: "review", issue: 42, deps: rv })).toBe(2);
+  expect(rv.transition).toHaveBeenCalledWith(expect.objectContaining({ to: "factory:blocked", cause: "undecidable", reason: expect.stringMatching(/^dispatcher payload: context issue mismatch: .*\(loaded\.json 6604 bytes\)$/) }));
+  expect(rv.transition).not.toHaveBeenCalledWith(expect.objectContaining({ to: "factory:needs-human" }));
+
+  // plan: 리페어 턴을 띄우지 않는다(claudeP 한 번).
+  const plan = await truncatedArgsReturn207("plan");
+  const claudeP = vi.fn(async () => ({ is_error: false, result: fenced207(plan) }));
+  const pd = baseDeps({ buildContext: async () => ctx207, claudeP, verifyStage: ({ stage, out }) => verifyStage({ stage, out, roster: [], orchestration: "workflow" }), transition: vi.fn(async ({ to }) => ({ ok: true, to })) });
+  expect(await runStage({ stage: "plan", issue: 207, deps: pd })).toBe(2);
+  expect(claudeP).toHaveBeenCalledTimes(1);
+  expect(pd.transition).toHaveBeenCalledWith(expect.objectContaining({ to: "factory:blocked", cause: "undecidable" }));
+
+  // 워크플로 반환이 도착하는 실제 자리(트랜스크립트의 task-notification)에서도 읽는다 — 디스패처의 마지막 말이 산문이어도.
+  const note = JSON.stringify({ type: "user", message: { content: [{ type: "text", text: `<task-notification><status>completed</status><result>${JSON.stringify(missing)}</result></task-notification>` }] } });
+  expect(dispatcherPayloadErrorOf({ out: { is_error: false, result: "The workflow returned an error." }, transcriptText: note })).toBe("context payload missing");
+  expect(dispatcherPayloadErrorOf({ out: { is_error: false, result: "The workflow returned an error." }, transcriptText: "" })).toBeNull();
+
+  // rework cf1/spec2 — 실제 디스패처는 **먼저 loaded.json을 Read한다**(factory-*.md step 1). 그 내용은 진짜 생산자(buildContext)가
+  // 디스크에 쓴 그대로다: `issue` 키와 `orchestration: "workflow"`를 가졌지만 워크플로 반환이 아니다 — 그것이 fail-closed 반환을 가려선 안 된다.
+  const lr = mkdtempSync(join(tmpdir(), "rs207-"));
+  mkdirSync(join(lr, ".factory"), { recursive: true }); mkdirSync(join(lr, "docs/factory"), { recursive: true });
+  writeFileSync(join(lr, ".factory/harness.toml"), `schema = 1\n[harness]\nmaturity = "M0"\n[factory]\norchestration = "workflow"\n[commands]\nunit = "npm test"\n[gates]\nrequired = ["unit"]\nfast = ["unit"]\nfull = ["unit"]\ndeep = ["unit"]\n`);
+  writeFileSync(join(lr, "docs/factory/CHARTER.md"), `---\nschema: factory.charter.v1\nstatus: ready\ntier_default: standard\nroster:\n  docs: [correctness]\n  standard: [correctness, qa, spec-conformance]\nplan_roles:\n  docs: [architect, skeptic]\n  default: [architect, skeptic, operator]\nplan_rounds: { docs: 2, default: 3 }\n---\n`);
+  writeFileSync(join(lr, ".factory/roles.toml"), `[triage]\nagent = "t.md"\nmodel = "sonnet"\n[implement.builder]\nagent = "b.md"\nmodel = "opus"\n[implement.verifier]\nagent = "v.md"\nmodel = "opus"\ncold_read = true\n`);
+  await buildContext207({ root: lr, gh: { issue: async () => ({ number: 207, title: "T", body: "", labels: ["factory:in-progress"] }), comments: async () => [] }, issue: 207, stage: "implement" });
+  const loadedText = readFileSync(join(lr, ".factory/out/loaded.json"), "utf8");
+  expect(JSON.parse(loadedText)).toMatchObject({ issue: 207, orchestration: "workflow" });    // 가리는 쪽의 모양이 정말 그렇다
+  const numbered = loadedText.split("\n").map((l, i) => `${String(i + 1).padStart(6)}\t${l}`).join("\n");
+  const readLoaded = [
+    JSON.stringify({ type: "assistant", message: { content: [{ type: "tool_use", name: "Read", id: "r1", input: { file_path: `${lr}/.factory/out/loaded.json` } }] } }),
+    JSON.stringify({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: "r1", content: numbered }] } }),
+  ];
+  const wfReturn = [
+    JSON.stringify({ type: "assistant", message: { content: [{ type: "tool_use", name: "Workflow", id: "w1", input: {} }] } }),
+    JSON.stringify({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: "w1", content: JSON.stringify(missing) }] } }),
+  ];
+  const prose = { is_error: false, result: "The workflow returned an error." };
+  // (a) 전경 Workflow tool_result — 마지막 말은 산문.
+  expect(dispatcherPayloadErrorOf({ out: prose, transcriptText: [...readLoaded, ...wfReturn].join("\n") })).toBe("context payload missing");
+  // (b) 디스패처의 마지막 말(완료 알림 없음).
+  expect(dispatcherPayloadErrorOf({ out: { is_error: false, result: fenced207(missing) }, transcriptText: readLoaded.join("\n") })).toBe("context payload missing");
+  // (c) 완료 알림 — 예전에도 되던 자리, 계속 된다.
+  expect(dispatcherPayloadErrorOf({ out: prose, transcriptText: [...readLoaded, note].join("\n") })).toBe("context payload missing");
+  // 그리고 loaded.json Read만 있으면(워크플로 반환이 없으면) 여전히 답이 없다.
+  expect(dispatcherPayloadErrorOf({ out: prose, transcriptText: readLoaded.join("\n") })).toBeNull();
+  // runStage 끝까지: 진짜 트랜스크립트 모양(Read → 전경 Workflow 반환)에서 needs-human이 아니라 blocked/undecidable.
+  const fg = implDeps({ buildContext: async () => ctx207, claudeP: async () => prose, gates: async () => RED207, selfGateRetry, dispatcherPayloadError: (out) => dispatcherPayloadErrorOf({ out, transcriptText: [...readLoaded, ...wfReturn].join("\n") }) });
+  expect(await runStage({ stage: "implement", issue: 207, deps: fg, runnerId: "r" })).toBe(2);
+  expect(fg.transition).not.toHaveBeenCalledWith(expect.objectContaining({ to: "factory:needs-human" }));
+  expect(fg.transition.mock.calls.at(-1)[0]).toMatchObject({ to: "factory:blocked", cause: "undecidable", reason: "dispatcher payload: context payload missing (loaded.json 6604 bytes)" });
+  // Scope change (#226): b881484의 이 테스트에 더한 단언 — dw3 rubric("asserts the transition's `to` label … on each of the three channels")을
+  // b881484는 완료 알림 채널에서 runStage 전이로 재지 않았다. 이름·기존 단언은 그대로다(non_goal "Renaming or duplicating the test_207_* tests").
+  // 세 번째 채널(백그라운드 완료 알림)도 runStage를 끝까지 지나 전이의 `to` 라벨까지 잰다: Read → 완료 알림, 마지막 말은 산문.
+  // 위의 직접 호출(문자열 반환)만으로는 그 채널이 전이로 이어지는지 보이지 않는다.
+  const bg = implDeps({ buildContext: async () => ctx207, claudeP: async () => prose, gates: async () => RED207, selfGateRetry, dispatcherPayloadError: (out) => dispatcherPayloadErrorOf({ out, transcriptText: [...readLoaded, note].join("\n") }) });
+  expect(await runStage({ stage: "implement", issue: 207, deps: bg, runnerId: "r" })).toBe(2);
+  expect(bg.transition).not.toHaveBeenCalledWith(expect.objectContaining({ to: "factory:needs-human" }));
+  expect(bg.transition.mock.calls.at(-1)[0]).toMatchObject({ to: "factory:blocked", cause: "undecidable", reason: "dispatcher payload: context payload missing (loaded.json 6604 bytes)" });
+  // 대조: 같은 산문, 같은 Read인데 완료 알림이 없으면 blocked/undecidable이 아니다 — 위의 blocked는 알림이 만든 것이다.
+  const noBg = implDeps({ buildContext: async () => ctx207, claudeP: async () => prose, gates: async () => RED207, selfGateRetry, dispatcherPayloadError: (out) => dispatcherPayloadErrorOf({ out, transcriptText: readLoaded.join("\n") }) });
+  await runStage({ stage: "implement", issue: 207, deps: noBg, runnerId: "r" });
+  expect(noBg.transition).not.toHaveBeenCalledWith(expect.objectContaining({ to: "factory:blocked", cause: "undecidable" }));
+  // 사유의 바이트 수는 **측정값**이다: 진짜 buildContext(makeBuildContextDep 배선)가 이 런에 쓴 loaded.json의 디스크 위 크기와 같다.
+  const measured = implDeps({
+    buildContext: makeBuildContextDep({ root: lr, gh: { issue: async () => ({ number: 207, title: "T", body: "", labels: ["factory:in-progress"] }), comments: async () => [] }, issue: 207, stage: "implement", run: null, mergeBase: async () => null, recordLine: () => {} }),
+    claudeP: async () => ({ is_error: false, result: fenced207(missing) }), gates: async () => RED207, selfGateRetry,
+  });
+  expect(await runStage({ stage: "implement", issue: 207, deps: measured, runnerId: "r" })).toBe(2);
+  expect(measured.transition.mock.calls.at(-1)[0]).toMatchObject({ to: "factory:blocked", cause: "undecidable", reason: `dispatcher payload: context payload missing (loaded.json ${statSync(join(lr, ".factory/out/loaded.json")).size} bytes)` });
+
+  // 에스컬레이션 뒤에도 엔진 원인이다: 진짜 transition()으로 in-progress → blocked, 진짜 sweep()이 한 번 재시도하고 같은 자리에서
+  // 또 멈추면 사람에게 올린다 — 그 needs-human을 engineCausedNeedsHuman이 엔진 원인으로 읽는다.
+  const gh = realTransitionGh();
+  const ctxCache = { roster: [], orchestration: "workflow", limits: { K: 3 }, handoffs: { plan: planHandoff } };
+  const real = implDeps({ buildContext: async () => ctx207, claudeP: async () => ({ is_error: false, result: fenced207(missing) }), gates: async () => RED207, selfGateRetry, transition: realTransitionDep(gh, ctxCache) });
+  await runStage({ stage: "implement", issue: 42, deps: real, runnerId: "r" });
+  expect(gh.label).toBe("factory:blocked");
+  expect(blockedOrigin207(await gh.comments())).toMatchObject({ from: "factory:in-progress", stage: "implement", cause: "undecidable" });
+  const dispatchStage = vi.fn(async () => {});
+  const sweepOnce = () => sweep207({
+    gh: { ...gh, searchIssues: async (label) => (gh.label === label ? [{ number: 42 }] : []), issueList: async () => [], patchComment: async () => {} },
+    charter: { limits: { K: 3, M: 3, R: 2 }, back_pressure: { awaiting_review_max: 2 } }, thresholds: { quarantine_max: 5, quarantine_ttl_days: 28, quarantine_return_after: 30 },
+    now: new Date().toISOString(), staleMinutes: 30, release: vi.fn(), quarantine: { quarantined: [] }, saveQuarantine: () => {},
+    transition: (args) => transition({ gh, env: {}, skipRehearsal: true, ...args }), dispatchStage,
+    factoryLogins: async () => ({ ok: true, logins: [] }), installedVersion: async () => "1.4.60",
+  });
+  await sweepOnce();                                                                       // 한 번 다시 민다
+  expect(gh.label).toBe("factory:blocked");                                                // 재시도는 라벨이 아니라 dispatch다
+  expect(dispatchStage).toHaveBeenCalledTimes(1);
+  // 그 재시도된 런도 진짜 runStage가 돈다(같은 디스패처 고장): blocked에서 origin을 확인하고 되돌아간 뒤 다시 멈춘다 —
+  // 두 번째 blocked 마커와 사유는 테스트가 손으로 쓴 것이 아니라 이 브랜치가 쓴 것이다.
+  const before = (await gh.comments()).length;
+  const again = implDeps({
+    issueLabels: async () => [gh.label], blockedOrigin: async () => blockedOrigin207(await gh.comments()),
+    buildContext: async () => ctx207, claudeP: async () => ({ is_error: false, result: fenced207(missing) }), gates: async () => RED207, selfGateRetry, transition: realTransitionDep(gh, ctxCache),
+  });
+  expect(await runStage({ stage: "implement", issue: 42, deps: again, runnerId: "r" })).toBe(2);
+  expect(gh.label).toBe("factory:blocked");
+  const second = (await gh.comments()).slice(before);
+  expect(blockedOrigin207(second)).toMatchObject({ from: "factory:in-progress", stage: "implement", cause: "undecidable" });
+  expect(second.map((c) => c.body).join("\n")).toContain("dispatcher payload: context payload missing (loaded.json 6604 bytes)");
+  await sweepOnce();                                                                       // 같은 자리 → 사람에게
+  expect(gh.label).toBe("factory:needs-human");
+  const comments = await gh.comments();
+  expect(comments.filter((c) => /to=factory:needs-human/.test(c.body)).at(-1).body).toContain(ESCALATION207.undecidable);
+  expect(engineCausedNeedsHuman207(comments)).not.toBeNull();
+});
+
+test("test_207_ordinary_artifact_defect_stays_needs_human", async () => {
+  const missing = await truncatedArgsReturn207("implement");
+  const viaRealVerify = (result, over = {}) => baseDeps({
+    buildContext: async () => ctx207, claudeP: async () => ({ is_error: false, result }),
+    verifyStage: ({ stage, out, gates }) => verifyStage({ stage, out, roster: [], orchestration: "workflow", gates }),
+    transition: vi.fn(async ({ to }) => ({ ok: true, to })), ...over,
+  });
+  const needsHuman = async (result, over) => {
+    const d = viaRealVerify(result, over);
+    expect(await runStage({ stage: "review", issue: 42, deps: d })).toBe(2);
+    expect(d.transition).toHaveBeenCalledWith(expect.objectContaining({ to: "factory:needs-human", reason: expect.stringMatching(/^stage artifact missing or invalid: /) }));
+    expect(d.transition).not.toHaveBeenCalledWith(expect.objectContaining({ reason: expect.stringContaining("dispatcher payload") }));
+  };
+  await needsHuman(fenced207({ issue: 0, orchestration: "workflow", guarantee: "structural" }));                                  // issue: 0, 에러 문구 없음
+  await needsHuman(fenced207({ issue: 0, error: "reviewer crashed", orchestration: "workflow", guarantee: "structural" }));      // fail-closed 문구가 아닌 에러
+  await needsHuman(fenced207({ error: "context payload missing" }));                                                             // error 키 하나뿐(워크플로의 모양이 아니다)
+  await needsHuman(fenced207({ schema: "factory.review.v1", issue: 42, verdicts: "nope" }));                                     // 보통의 스키마 불일치
+  // fail-closed 문구가 **최상위 `error`가 아닌 자리**에만 있다 — 중첩된 객체, 리뷰 산출물의 자유 텍스트, 디스패처의 산문. 모두 산출물 결함이다.
+  const nestedOrProse = [
+    ["nested error", { issue: 0, orchestration: "workflow", guarantee: "structural", result: { error: "context payload missing" } }],
+    ["nested fail-closed object", { schema: "factory.review.v1", issue: 42, orchestration: "workflow", guarantee: "structural", verdicts: "nope", prior: { issue: 0, error: "context payload missing", orchestration: "workflow", guarantee: "structural" } }],
+    ["free-text field", { schema: "factory.review.v1", issue: 42, orchestration: "workflow", guarantee: "structural", summary: "context payload missing", verdicts: [{ role: "correctness", verdict: "reject", must_fix: [{ id: "cf1", claim: "context payload missing", evidence: "context issue mismatch: 1 vs 2" }] }] }],
+  ];
+  for (const [name, o] of nestedOrProse) {
+    expect(dispatcherPayloadErrorOf({ out: { result: fenced207(o) } }), name).toBeNull();
+    await needsHuman(fenced207(o));
+  }
+  await needsHuman("The workflow said: context payload missing. I could not continue.");                                       // 산문뿐, 산출물 없음
+  expect(dispatcherPayloadErrorOf({ out: { result: fenced207({ error: "context payload missing" }) } })).toBeNull();
+  expect(dispatcherPayloadErrorOf({ out: { result: fenced207({ issue: 0 }) } })).toBeNull();
+  // 네 템플릿의 모양에서 한 군데만 어긋나도 fail-closed가 아니다 — 에러 문구를 흉내 낸 산출물이 needs-human을 빠져나가지 못한다.
+  const near = [
+    ["no guarantee", { issue: 0, error: "context payload missing", orchestration: "workflow" }],
+    ["guarantee verified", { issue: 0, error: "context payload missing", orchestration: "workflow", guarantee: "verified" }],
+    ["string issue", { issue: "207", error: "context payload missing", orchestration: "workflow", guarantee: "structural" }],
+    ["no issue key", { error: "context payload missing", orchestration: "workflow", guarantee: "structural" }],
+    ["no orchestration", { issue: 0, error: "context payload missing", guarantee: "structural" }],
+    ["orchestration subagents", { issue: 0, error: "context payload missing", orchestration: "subagents", guarantee: "structural" }],
+    ["error not exact", { issue: 0, error: "context payload missing!", orchestration: "workflow", guarantee: "structural" }],
+    ["mismatch not a prefix", { issue: 0, error: "the context issue mismatch", orchestration: "workflow", guarantee: "structural" }],
+  ];
+  for (const [name, o] of near) {
+    expect(dispatcherPayloadErrorOf({ out: { result: fenced207(o) } }), name).toBeNull();
+    await needsHuman(fenced207(o));
+  }
+  // 그 대조: 정확한 모양이면 issue가 null(triage/plan/review의 Number(undefined))이어도, mismatch 접두여도 잡힌다.
+  expect(dispatcherPayloadErrorOf({ out: { result: fenced207({ issue: null, error: "context payload missing", orchestration: "workflow", guarantee: "structural" }) } })).toBe("context payload missing");
+  expect(dispatcherPayloadErrorOf({ out: { result: fenced207({ issue: 42, error: "context issue mismatch: args 42 vs loaded 7", orchestration: "workflow", guarantee: "structural" }) } })).toBe("context issue mismatch: args 42 vs loaded 7");
+  // 게이트가 BLOCKED이거나 실패 테스트 없는 RED여도, 보통의 산출물이면 예전 자리 그대로다(원인 없는 blocked / gates-unhandled).
+  const gb = viaRealVerify(fenced207({ issue: 0, orchestration: "workflow", guarantee: "structural" }), { gates: async () => ({ schema: "factory.gates.v1", status: "BLOCKED", blocked_reason: "env down" }) });
+  expect(await runStage({ stage: "review", issue: 42, deps: gb })).toBe(2);
+  expect(gb.transition.mock.calls.at(-1)[0]).toEqual({ to: "factory:blocked", reason: "env down" });
+  const gu = viaRealVerify(fenced207({ issue: 0, orchestration: "workflow", guarantee: "structural" }), { gates: async () => ({ ...RED207, gates: { unit: { status: "RED", reason: "EPIPE" } } }) });
+  expect(await runStage({ stage: "review", issue: 42, deps: gu })).toBe(2);
+  expect(gu.transition.mock.calls.at(-1)[0]).toEqual({ to: "factory:blocked", reason: "EPIPE", cause: "gates-unhandled" });
+  // 턴 한도·API 오류는 게이트가 막힌 자리에서도 먼저다: fail-closed 반환이 트랜스크립트에 있어도 디스패처 사유로 바꿔 달지 않는다.
+  for (const [name, cut] of [
+    ["max turns", { is_error: true, subtype: "error_max_turns", terminal_reason: "max_turns", num_turns: 80, result: fenced207(missing) }],
+    ["api error", { is_error: true, terminal_reason: "api_error", api_error_status: 529, result: `Overloaded\n${fenced207(missing)}` }],
+  ]) {
+    for (const [g, want] of [
+      [{ schema: "factory.gates.v1", status: "BLOCKED", blocked_reason: "env down" }, { to: "factory:blocked", reason: "env down" }],
+      [{ ...RED207, gates: { unit: { status: "RED", reason: "EPIPE" } } }, { to: "factory:blocked", reason: "EPIPE", cause: "gates-unhandled" }],
+    ]) {
+      const dd = viaRealVerify(fenced207(missing), { claudeP: async () => cut, gates: async () => g });
+      expect(await runStage({ stage: "review", issue: 42, deps: dd }), name).toBe(2);
+      expect(dd.transition.mock.calls.at(-1)[0], `${name} / ${g.status}`).toEqual(want);
+    }
+  }
+  // 디스패처가 fail-closed 뒤에 워크플로를 다시 돌려 스키마가 틀린 산출물을 냈다 — 가장 최근 반환이 이긴다: 산출물 결함(needs-human).
+  const notify = (o) => JSON.stringify({ type: "user", message: { content: [{ type: "text", text: `<task-notification><status>completed</status><result>${JSON.stringify(o)}</result></task-notification>` }] } });
+  const retried = [notify(missing), notify({ schema: "factory.implement.v1", issue: 207, orchestration: "workflow", guarantee: "structural", head_sha: "nope" })].join("\n");
+  expect(dispatcherPayloadErrorOf({ out: { result: "done" }, transcriptText: retried })).toBeNull();
+  expect(dispatcherPayloadErrorOf({ out: { result: "done" }, transcriptText: [notify({ schema: "factory.implement.v1", issue: 207, orchestration: "workflow", head_sha: "nope" }), notify(missing)].join("\n") })).toBe("context payload missing");
+
+  // 기존 실패 등급은 제자리: 턴 한도 → blocked "stage did not finish", 비일시적 API 오류 → needs-human, qa 증거 경로 → blocked/undecidable "qa evidence path".
+  const mt = viaRealVerify(fenced207(missing), { claudeP: async () => ({ is_error: true, subtype: "error_max_turns", terminal_reason: "max_turns", num_turns: 80, result: fenced207(missing) }) });
+  expect(await runStage({ stage: "review", issue: 42, deps: mt })).toBe(2);
+  expect(mt.transition).toHaveBeenCalledWith(expect.objectContaining({ to: "factory:blocked", reason: expect.stringMatching(/^stage did not finish: /) }));
+  const api = viaRealVerify("", { claudeP: async () => ({ is_error: true, terminal_reason: "api_error", api_error_status: 401, result: `Invalid API key\n${fenced207(missing)}` }) });
+  expect(await runStage({ stage: "review", issue: 42, deps: api })).toBe(2);
+  expect(api.transition).toHaveBeenCalledWith(expect.objectContaining({ to: "factory:needs-human", reason: expect.stringMatching(/^api error needs human/) }));
+  const qa = viaRealVerify(fenced207(missing), { verifyStage: () => ({ ok: false, reasons: ["qa evidence manifest unusable: missing"], data: null }) });
+  expect(await runStage({ stage: "review", issue: 42, deps: qa })).toBe(2);
+  expect(qa.transition).toHaveBeenCalledWith(expect.objectContaining({ to: "factory:blocked", cause: "undecidable", reason: expect.stringMatching(/^qa evidence path: /) }));
+});
+
+test("test_207_dispatcher_payload_block_adds_no_marker_field_and_no_budget_exclusion", async () => {
+  const missing = await truncatedArgsReturn207("implement");
+  const usage = { input_tokens: 10, output_tokens: 5 };
+  const runOnce = async ({ out }) => {
+    const root = mkdtempSync(join(tmpdir(), "rs207-"));
+    const gh = realTransitionGh();
+    const ctxCache = { roster: [], orchestration: "workflow", limits: { K: 3 }, handoffs: { plan: planHandoff } };
+    const spy = vi.fn(realTransitionDep(gh, ctxCache));
+    const d = implDeps({
+      buildContext: async () => ctx207, claudeP: async () => out, gates: async () => RED207, transition: spy,
+      selfGateRetry: async () => ({ attempt: 1, total: 0 }),
+      runRecord: (lines) => appendRunRecord({ root, issue: 42, stage: "implement", runnerId: "gha-207", lines }),
+    });
+    expect(await runStage({ stage: "implement", issue: 42, deps: d, runnerId: "gha-207", runId: "207" })).toBe(2);
+    return { gh, spy, rec: readFileSync(join(root, "docs/factory/runs/42.md"), "utf8") };
+  };
+  const payload = await runOnce({ out: { is_error: false, result: fenced207(missing), usage, total_cost_usd: 0.12, num_turns: 3, terminal_reason: "end_turn" } });
+  expect(payload.gh.label).toBe("factory:blocked");
+  expect(payload.spy).toHaveBeenCalledWith(expect.objectContaining({ to: "factory:blocked", cause: "undecidable" }));
+  expect(payload.spy).not.toHaveBeenCalledWith(expect.objectContaining({ cause: "engine-crash" }));
+  expect(payload.rec).not.toMatch(/^engine-crash:/m);
+  const bodies = (await payload.gh.comments()).map((c) => c.body).join("\n");
+  expect(bodies).toContain("dispatcher payload: context payload missing");
+  expect(bodies).not.toMatch(/engine=|retry-kind=/);
+  expect(bodies).toMatch(/<!-- factory-blocked-origin from=factory:in-progress stage=implement cause=undecidable -->/);
+
+  // 대조군: 같은 비용의 보통 blocked 런(턴 한도). 예산 합계가 같다 — 이 런은 다른 런처럼 센다.
+  const ordinary = await runOnce({ out: { is_error: true, subtype: "error_max_turns", terminal_reason: "max_turns", result: "", usage, total_cost_usd: 0.12, num_turns: 80 } });
+  expect(ordinary.gh.label).toBe("factory:blocked");
+  expect(lifetimeCostOf207(payload.rec)).toEqual(lifetimeCostOf207(ordinary.rec));
+  const cost = lifetimeCostOf207(payload.rec);
+  expect(cost).toMatchObject({ usd: 0.12, priced: 1 });                                   // 이 런의 돈이 합계에 들어간다
+  expect(cost).not.toHaveProperty("engineUsd");                                           // engine-crash 면제로 빠지지 않는다
+  expect(cost).not.toHaveProperty("crashCountedUsd");
+});
+
+// skeptic (#207) — KTB-51 plan 리페어 턴의 두 번째 buildContext가 loaded.json을 **다시 쓴다**(`plan_repair`가 붙어 커진다). 디스패처가
+// 옮겨 쓴 것은 그 파일이므로 기록에 그 크기 줄이 하나 더 서고, 리페어 턴이 fail-closed로 끝나면 사유의 바이트 수도 그 파일의 것이다.
+test("test_207_plan_repair_fail_closed_reports_the_repaired_loaded_json_size", async () => {
+  const plan = await truncatedArgsReturn207("plan");
+  const first = { ...ctx207, loaded_json: { path: ".factory/out/loaded.json", bytes: 3000, limit: 4096, truncated_to: null, over: false } };
+  const repaired = { ...ctx207, plan_repair: R1_REASONS, loaded_json: { path: ".factory/out/loaded.json", bytes: 5123, limit: 4096, truncated_to: null, over: true } };
+  const lines = [];
+  // 실제 배선: makeBuildContextDep가 매 buildContext 뒤에 그 런의 loaded.json 크기를 기록한다(produce만 주입).
+  const produce = vi.fn(async ({ planRepair = null } = {}) => (planRepair ? repaired : first));
+  const buildContext = makeBuildContextDep({ root: "/nonexistent", gh: null, issue: 207, stage: "plan", run: null, mergeBase: async () => null, recordLine: (l) => lines.push(l), produce });
+  const claudeP = vi.fn()
+    .mockResolvedValueOnce({ is_error: false, result: "{}" })
+    .mockResolvedValueOnce({ is_error: false, result: fenced207(plan) });
+  const vs = vi.fn()
+    .mockReturnValueOnce({ ok: false, reasons: [...R1_REASONS], planRepair: [...R1_REASONS], data: { rounds: 2 } })
+    .mockImplementation(({ stage, out }) => verifyStage({ stage, out, roster: [], orchestration: "workflow" }));
+  const transition = vi.fn(async ({ to }) => ({ ok: true, to }));
+  const deps = planRepairDeps({ buildContext, claudeP, verifyStage: vs, transition, runRecord: (l) => lines.push(...l) });
+  expect(await runStage({ stage: "plan", issue: 207, deps, runnerId: "r" })).toBe(2);
+  expect(claudeP).toHaveBeenCalledTimes(2);
+  expect(transition).not.toHaveBeenCalledWith(expect.objectContaining({ to: "factory:needs-human" }));
+  expect(transition.mock.calls.at(-1)[0]).toMatchObject({ to: "factory:blocked", cause: "undecidable", reason: "dispatcher payload: context payload missing (loaded.json 5123 bytes)" });
+  expect(lines.filter((l) => /^loaded\.json: \d+ bytes/.test(l))).toEqual(["loaded.json: 3000 bytes", "loaded.json: 5123 bytes — over the 4096-byte limit"]);
+});
+
+// ── #226 (dw4) — cf1의 판별자를 반대쪽에서 잰다: **성공한** 워크플로 반환도 `orchestration: "workflow"`·`guarantee: "structural"`을
+// 싣는다(실제 triage·plan 핸드오프가 그렇다). `guarantee`만 보는 판별자는 그것을 fail-closed로 오인해 멀쩡한 런을 blocked/undecidable로
+// 세운다 — 세 채널(최종 메시지·전경 Workflow tool_result·완료 알림) 어디서 와도 페이로드 오류가 아니고, 런은 제 자리로 간다.
+test("test_226_structural_success_result_is_not_a_payload_error", async () => {
+  const missing = await truncatedArgsReturn207("plan");
+  const plan = { ...planHandoff, issue: 226, done_when: [{ id: "dw1", text: "x", level: "unit", check: { kind: "test", ref: "test_226_x" }, rubric: "r" }], orchestration: "workflow", guarantee: "structural" };
+  const triage = { schema: "factory.triage.v1", issue: 226, disposition: "ready", tier: "load-bearing", impact_paths: ["factory/bin/run-stage.js"], reason: "r", summary: "s", orchestration: "workflow", guarantee: "structural" };
+  const prose = { is_error: false, result: "The workflow finished." };
+  const foreground = (o) => [
+    JSON.stringify({ type: "assistant", message: { content: [{ type: "tool_use", name: "Workflow", id: "w226", input: {} }] } }),
+    JSON.stringify({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: "w226", content: JSON.stringify(o) }] } }),
+  ].join("\n");
+  const notification = (o) => JSON.stringify({ type: "user", message: { content: [{ type: "text", text: `<task-notification><status>completed</status><result>${JSON.stringify(o)}</result></task-notification>` }] } });
+  const channels = {
+    "final message": (o) => ({ out: { is_error: false, result: fenced207(o) }, transcriptText: "" }),
+    "foreground Workflow tool_result": (o) => ({ out: prose, transcriptText: foreground(o) }),
+    "task-notification": (o) => ({ out: prose, transcriptText: notification(o) }),
+  };
+  for (const [channel, via] of Object.entries(channels)) {
+    // 대조: 같은 채널에 fail-closed 반환이면 답이 있다 — 채널을 정말 읽고 있다는 증거.
+    expect(dispatcherPayloadErrorOf(via(missing)), channel).toBe("context payload missing");
+    for (const [name, ok] of [["plan", plan], ["triage", triage]]) {
+      expect(dispatcherPayloadErrorOf(via(ok)), `${channel} / ${name}`).toBeNull();
+    }
+  }
+
+  // runStage 끝까지(진짜 verifyStage): 성공한 plan 반환은 planned로 간다 — blocked/undecidable이 아니다.
+  const transition = vi.fn(async ({ to }) => ({ ok: true, to }));
+  const writeHandoff = vi.fn(async () => {});
+  // #226 skeptic — 성공 경로는 판별자를 **부르지 않는다**(run-stage.js §payloadError: "성공할 런을 막지 않는다"). 그 성질을 스파이로 고정한다:
+  // 페이로드 검사를 verify 앞으로 옮기는 회귀는 어떤 판별자로도 성공한 런을 판별자에 맡기게 되고, 여기서 실패한다. 판별자 자체의 정답
+  // (성공 반환 → null)은 위의 직접 호출과 아래 BLOCKED/RED·reworkFail 루프가 잡는다 — 이 구간은 그 둘을 대신하지 않는다.
+  const discriminator = vi.fn((o) => dispatcherPayloadErrorOf({ out: o }));
+  const pd = baseDeps({ buildContext: async () => ctx207, claudeP: async () => ({ is_error: false, result: fenced207(plan) }), verifyStage: ({ stage, out }) => verifyStage({ stage, out, roster: [], orchestration: "workflow" }), transition, writeHandoff, dispatcherPayloadError: discriminator });
+  expect(await runStage({ stage: "plan", issue: 226, deps: pd })).toBe(0);
+  expect(transition.mock.calls.map(([t]) => t.to)).toEqual(["factory:planned"]);
+  expect(transition).not.toHaveBeenCalledWith(expect.objectContaining({ cause: "undecidable" }));
+  expect(writeHandoff).toHaveBeenCalled();
+  expect(discriminator).not.toHaveBeenCalled();
+
+  // 게이트가 판정 불가(BLOCKED)·실패 테스트 없는 RED인 자리는 페이로드 검사를 실제로 부르는 자리다 — 성공 반환이면 그 자리의 원래 전이
+  // 그대로다(원인 없는 blocked / gates-unhandled). 성공 반환에는 `error`가 없으므로, guarantee만 보는 판별자가 여기서 내는 것은
+  // `undefined`이고 그것은 payloadError()에서 null이 된다 — 이 루프는 판별자가 성공 반환에 **문자열**을 지어내는 회귀(예: 고정 사유)를
+  // 막는다. guarantee만 보는 판별자 자체는 위의 직접 호출(`toBeNull`)과, 아래 `error` 문자열을 가진 진짜 비-fail-closed 반환이 잡는다.
+  for (const [g, want] of [
+    [{ schema: "factory.gates.v1", status: "BLOCKED", blocked_reason: "env down" }, { to: "factory:blocked", reason: "env down" }],
+    [{ ...RED207, gates: { unit: { status: "RED", reason: "EPIPE" } } }, { to: "factory:blocked", reason: "EPIPE", cause: "gates-unhandled" }],
+  ]) {
+    for (const [channel, via] of Object.entries(channels)) {
+      const { out, transcriptText } = via(plan);
+      const d = baseDeps({ buildContext: async () => ctx207, claudeP: async () => out, gates: async () => g, transition: vi.fn(async ({ to }) => ({ ok: true, to })), dispatcherPayloadError: (o) => dispatcherPayloadErrorOf({ out: o, transcriptText }) });
+      expect(await runStage({ stage: "review", issue: 226, deps: d }), `${channel} / ${g.status}`).toBe(2);
+      expect(d.transition.mock.calls.map(([t]) => t), `${channel} / ${g.status}`).toEqual([want]);
+    }
+  }
+
+  // #226 skeptic — guarantee만 보는(또는 guarantee + 아무 `error` 문자열을 보는) 판별자를 **전이에서** 잡는 픽스처: 진짜 implement 워크플로가
+  // rework 응답이 끝내 비었을 때 돌려주는 반환(`reworkFailure`). `issue`·`orchestration: "workflow"`·`guarantee: "structural"`에 비어 있지 않은
+  // `error`까지 싣지만 디스패처 전달 고장이 아니라 산출물 결함이다 — 그런 판별자는 이 문자열을 돌려주고 런은 blocked/undecidable로 샌다.
+  const reworkLoaded = { issue: 226, stage: "implement", tier: "standard", roster: [], orchestration: "workflow", pr: 31, must_fix: [{ id: "cf1", where: "factory/bin/run-stage.js:2066", claim: "c", evidence: "e" }] };
+  const reworkFail = (await runWorkflow207(WF207("implement"), {
+    agent: async (_p, opts) => (opts.agentType === "factory-builder" ? { head_sha: "a".repeat(40), pr: 31, branch: "claude/fq-226", summary: "s", tests_added: [], commits: ["a".repeat(40)] } : null),
+    args: { raw: "226", loaded: reworkLoaded },
+  })).result;
+  expect(reworkFail).toMatchObject({ issue: 226, error: "rework response incomplete: cf1", orchestration: "workflow", guarantee: "structural" });   // 생산자가 정말 그렇게 낸다
+  for (const [channel, via] of Object.entries(channels)) {
+    expect(dispatcherPayloadErrorOf(via(reworkFail)), channel).toBeNull();
+    for (const [g, want] of [
+      [{ schema: "factory.gates.v1", status: "BLOCKED", blocked_reason: "env down" }, { to: "factory:blocked", reason: "env down" }],
+      [{ ...RED207, gates: { unit: { status: "RED", reason: "EPIPE" } } }, { to: "factory:blocked", reason: "EPIPE", cause: "gates-unhandled" }],
+    ]) {
+      const { out, transcriptText } = via(reworkFail);
+      const d = implDeps({ buildContext: async () => ctx207, claudeP: async () => out, gates: async () => g, dispatcherPayloadError: (o) => dispatcherPayloadErrorOf({ out: o, transcriptText }) });
+      expect(await runStage({ stage: "implement", issue: 226, deps: d, runnerId: "r" }), `${channel} / ${g.status}`).toBe(2);
+      // implement는 먼저 in-progress를 잡는다(claim) — 그 뒤의 전이가 그 자리의 원래 전이 하나뿐이다.
+      expect(d.transition.mock.calls.map(([t]) => t).filter((t) => t.to !== "factory:in-progress"), `rework failure / ${channel} / ${g.status}`).toEqual([want]);
+    }
+  }
+});
+
+// ── #249 dw5 — main's #278 merge git auth survives the re-land's base merge ─────────────────────────────────────────
+// Nothing else pins that main() APPLIES mergeGitAuth (the #278 assertions above test the function, not its call). The one
+// statement is read out of main()'s source, checked to sit at main()'s top level after `stage` is bound and before the first
+// git/gh call, and then EXECUTED as written over an injected env: for merge with GH_TOKEN it must leave gitAuthEnv's
+// extraheader config in that env, for every other stage it must add nothing. Dropping the line, moving it below the first
+// git/gh call, or changing what it passes (another stage, another env) fails here.
+test("test_249_merge_git_auth_survives_the_base_merge", () => {
+  const src = readFileSync(new URL("../bin/run-stage.js", import.meta.url), "utf8");
+  const start = src.indexOf("\nasync function main() {");
+  expect(start).toBeGreaterThan(-1);
+  const mainSrc = src.slice(start);
+  const lines = [...mainSrc.matchAll(/^ {2}(Object\.assign\(process\.env, mergeGitAuth\([^\n]*?\);)/gm)];
+  expect(lines).toHaveLength(1);                                                 // exactly one, at main()'s top level
+  expect(src.match(/mergeGitAuth\(\{/g)).toHaveLength(2);                         // its definition + that one call
+  const at = lines[0].index;
+  expect(at).toBeGreaterThan(mainSrc.indexOf("const [stage, issueArg] = argv;")); // `stage` is bound first
+  expect(mainSrc.indexOf("const [stage, issueArg] = argv;")).toBeGreaterThan(-1);
+  for (const firstCall of ['run("git"', 'run("gh"', "makeStageGh(", "abortStage(", "process.exit("]) {
+    const i = mainSrc.indexOf(firstCall);
+    expect(i, firstCall).toBeGreaterThan(at);                                    // before any git or gh call (or exit)
+  }
+
+  // run the statement exactly as main() has it, with `process.env` bound to an injected env
+  const apply = (stage, env) => {
+    const fakeProcess = { env: { ...env } };
+    new Function("process", "mergeGitAuth", "stage", lines[0][1])(fakeProcess, mergeGitAuth, stage);
+    return fakeProcess.env;
+  };
+  const token = "test-token-249";
+  const merged = apply("merge", { GH_TOKEN: token });
+  expect(merged).toEqual({ GH_TOKEN: token, ...gitAuthEnv({ token }) });
+  expect(merged.GIT_CONFIG_KEY_1).toBe("http.https://github.com/.extraheader");
+  expect(merged.GIT_CONFIG_VALUE_1).toBe(`AUTHORIZATION: basic ${Buffer.from(`x-access-token:${token}`, "utf8").toString("base64")}`);
+  expect(apply("merge", { GH_TOKEN: token, GITHUB_SERVER_URL: "https://ghe.example.com" }).GIT_CONFIG_KEY_0).toBe("http.https://ghe.example.com/.extraheader");
+  expect(apply("merge", {})).toEqual({});                                        // no token → nothing added, no throw
+  for (const stage of ["triage", "plan", "implement", "review"]) {
+    expect(apply(stage, { GH_TOKEN: token }), stage).toEqual({ GH_TOKEN: token });
+  }
+});
+
+// ── #212 (ADR-041) — the #196 incident flow, end to end in one run-stage sequence ───────────────────────────────────────────────
+// approve handoff → the REAL runMergeStage on a CONFLICTING PR (real transition() comments) → the implement round: the runner's base
+// merge on a real git repository, the real buildContext (conflict_only), the builder resolving the conflict, the runner mirror commit,
+// the production self-gate dep (conflict-scope on the real merge commit) → the usage record → the real budget check and the real K rule.
+import { buildContext as buildContext212 } from "../lib/context.js";
+import { runMergeStage as runMergeStage212 } from "../lib/merge-stage.js";
+import { makeKRestartDeps as makeKRestartDeps212, makeSelfGateDep as makeSelfGateDep212 } from "../bin/run-stage.js";
+import { budgetCheck as budgetCheck212 } from "../lib/budget.js";
+import { run as realRun212 } from "../lib/exec.js";
+
+const C212 = "factory/lib/conflicted.js";
+const lines212 = (tag) => Array.from({ length: 30 }, (_, i) => `export const ${tag}${i} = ${i};`);
+const approve212 = (role) => ({ role, verdict: "approve", confidence: "high", must_fix: [], should_fix: [], verified: [] });
+const reject212 = (role) => ({ role, verdict: "reject", confidence: "high", must_fix: [{ id: "cf1", where: `${C212}:1`, claim: "c", evidence: "e" }], should_fix: [], verified: [] });
+
+function ctxRoot212() {
+  const r = mkdtempSync(join(tmpdir(), "ctx212-"));
+  mkdirSync(join(r, ".factory"), { recursive: true }); mkdirSync(join(r, "docs/factory"), { recursive: true });
+  writeFileSync(join(r, ".factory/harness.toml"), `schema = 1\n[harness]\nmaturity = "M0"\n[factory]\norchestration = "workflow"\n[commands]\nunit = "npm test"\n[gates]\nrequired = ["unit"]\nfast = ["unit"]\nfull = ["unit"]\ndeep = ["unit"]\n`);
+  writeFileSync(join(r, "docs/factory/CHARTER.md"), `---\nschema: factory.charter.v1\nstatus: ready\ntier_default: standard\nroster:\n  docs: [correctness]\n  standard: [correctness, qa]\nplan_roles:\n  default: [architect]\nplan_rounds: { default: 1 }\n---\n`);
+  writeFileSync(join(r, ".factory/roles.toml"), `[review.correctness]\nagent = "c.md"\nmodel = "opus"\n[review.qa]\nagent = "q.md"\nmodel = "opus"\n[plan.architect]\nagent = "a.md"\nmodel = "opus"\n`);
+  return r;
+}
+function issue212() {
+  const comments = [];
+  let tick = 0;
+  const gh = {
+    label: "factory:awaiting-review",
+    issue: async () => ({ number: 212, title: "T", body: "", labels: [gh.label] }),
+    comments: async (n) => (n === 31 ? [] : comments.slice()),
+    comment: async (_n, body) => { comments.push({ id: comments.length + 1, body, createdAt: new Date(Date.UTC(2026, 9, 4, 0, 0, tick++)).toISOString() }); },
+    setFactoryLabel: async (_n, to) => { gh.label = to; },
+  };
+  return gh;
+}
+const review212 = (gh, head, verdicts, decision) => gh.comment(212, renderHandoff({ stage: "review", issue: 212, summary: "s", data: {
+  schema: "factory.review.v1", issue: 212, pr: 31, head_sha: head, round: 1, orchestration: "workflow", guarantee: "structural", decision, verdicts } }));
+const reviewRework212 = async (gh, head) => {
+  await review212(gh, head, [reject212("correctness"), approve212("qa")], "rework");
+  gh.label = "factory:awaiting-review";
+  await transition({ gh, issue: 212, to: "factory:rework", reason: "review", stage: "review", env: {} });
+  gh.label = "factory:in-progress";
+};
+async function repo212() {
+  const root = mkdtempSync(join(tmpdir(), "fq212rs-"));
+  const git = (...args) => realRun212("git", ["-c", "user.email=t@example.invalid", "-c", "user.name=t", "-c", "commit.gpgsign=false", ...args], { cwd: root });
+  const ok = async (...args) => { const r = await git(...args); expect(r.code, `git ${args.join(" ")}: ${r.stderr}`).toBe(0); return r.stdout.trim(); };
+  const put = (p, s) => { mkdirSync(dirname(join(root, p)), { recursive: true }); writeFileSync(join(root, p), s); };
+  await ok("init", "-q", "-b", "main");
+  put(C212, lines212("c").join("\n") + "\n"); put("factory/lib/base-only.js", lines212("x").join("\n") + "\n"); put("factory/lib/other.js", lines212("o").join("\n") + "\n");
+  await ok("add", "-A"); await ok("commit", "-q", "-m", "base");
+  await ok("checkout", "-q", "-b", "claude/fq-212");
+  const b = lines212("c"); b[15] = "export const c15 = 'branch';"; put(C212, b.join("\n") + "\n");
+  put("docs/factory/DECISIONS.md", "# D\n\n## ADR-1 branch\n");
+  await ok("add", "-A"); await ok("commit", "-q", "-m", "approved change");
+  const approved = await ok("rev-parse", "HEAD");
+  await ok("checkout", "-q", "main");
+  const m = lines212("c"); m[15] = "export const c15 = 'main';"; put(C212, m.join("\n") + "\n");
+  const x = lines212("x"); x[3] = "export const x3 = 'main';"; put("factory/lib/base-only.js", x.join("\n") + "\n");
+  put("docs/factory/DECISIONS.md", "# D\n\n## ADR-1 main\n");
+  await ok("add", "-A"); await ok("commit", "-q", "-m", "main moves on");
+  const base = await ok("rev-parse", "HEAD");
+  await ok("checkout", "-q", "claude/fq-212");
+  return { root, git, ok, put, approved, base };
+}
+
+/** one implement round, wired with the production pieces; `builder` is what the session does after the runner left the merge to it */
+async function implementRound212({ gh, repo, recRoot, runnerId, cost, builder, pending = true, localEntry = null, commentFails = false, transitionRefused = false, checkout = null, runRecordFails = null }) {
+  const ctxRoot = ctxRoot212();
+  let ctxCache = null;
+  const harness = { commands: {}, test: { test_glob: ["nothing/**"], source_glob: [] } };
+  const transitionCalls = [];
+  const code = await runStage({
+    stage: "implement", issue: 212, runnerId, runId: runnerId.replace(/^gha-/, ""),
+    deps: {
+      charterReady: async () => true, trustWorkspace: async () => {}, claim: async () => ({ ok: true }),
+      heartbeat: async () => ({ stop() {} }), assertHandoff: async () => ({ ok: true }), release: async () => true,
+      ...(localEntry ? { localEntry: async () => localEntry } : {}),
+      checkoutBranch: async () => {
+        if (!pending) return { ok: true, branch: "claude/fq-212", existed: true, base: "main" };
+        const m = await repo.git("merge", "--no-edit", repo.base);
+        expect(m.code).not.toBe(0);
+        // the runner union-merges the append-only DECISIONS.md itself (mergeBaseIntoBranch) and hands only the source conflict over
+        repo.put("docs/factory/DECISIONS.md", "# D\n\n## ADR-1 branch\n## ADR-1 main\n");
+        await repo.ok("add", "--", "docs/factory/DECISIONS.md");
+        return { ok: true, branch: "claude/fq-212", existed: true, base: "main", merged: repo.base, conflicts: [C212], partial: { mirror: [], union: ["docs/factory/DECISIONS.md"] } };
+      },
+      ...(checkout ? { checkoutBranch: () => checkout(repo) } : {}),
+      baseMergeComplete: async () => ({ ok: true }),
+      buildContext: async ({ mergeConflicts } = {}) => (ctxCache = await buildContext212({ root: ctxRoot, gh, issue: 212, stage: "implement", mergeConflicts })),
+      resetAgentsLog: async () => {},
+      claudeP: async () => { await builder(repo); return { is_error: false, result: "{}", usage: { input_tokens: 7 }, total_cost_usd: cost, num_turns: 4, terminal_reason: "end_turn" }; },
+      mirror: async () => {
+        repo.put(".factory/lib/mirror.js", `// generated ${runnerId}\n`);
+        await repo.ok("add", "-A");
+        await repo.ok("-c", "user.name=factory-runner", "-c", "user.email=factory-runner@users.noreply.github.com", "commit", "-q", "-m", "mirror");
+        return { ok: true, applicable: true, changed: [".factory/lib/mirror.js"], sha: await repo.ok("rev-parse", "HEAD") };
+      },
+      gates: async () => ({ schema: "factory.gates.v1", status: "GREEN", level: "fast" }),
+      verifyStage: () => ({ ok: true, reasons: [], data: { schema: "factory.implement.build.v1", pr: 31, head_sha: "e".repeat(40) } }),
+      selfGate: makeSelfGateDep212({ root: repo.root, harness, run: realRun212, mergeBase: async () => repo.ok("merge-base", "main", "HEAD"), getCtx: () => ctxCache }),
+      comment: async (n, body) => { if (commentFails) throw new Error("gh: 502 Bad Gateway"); return gh.comment(n, body); },
+      // the implement handoff and the hand-off transition are the real ones (`renderHandoff`, `transition()`): the K marker binds to them
+      writeHandoff: async ({ data } = {}) => data?.head_sha && gh.comment(212, renderHandoff({ stage: "implement", issue: 212, summary: "s", data: {
+        schema: "factory.implement.v1", issue: 212, head_sha: data.head_sha, pr: data.pr, gates: { status: "GREEN" }, verifier: { verdict: "accepted" }, orchestration: "workflow", guarantee: "verified" } })),
+      transition: async ({ to, data }) => {
+        transitionCalls.push(to);
+        if (to !== "factory:awaiting-review") { gh.label = to; return { ok: true, to }; }
+        if (transitionRefused) return { ok: false, from: "factory:in-progress", to, reason: "implement head_sha eeeeeee != branch head 0000000" };
+        gh.label = "factory:in-progress";
+        return transition({ gh, issue: 212, to, stage: "implement", env: {}, ctxExtra: { gatesChecked: true, gatesFile: { status: "GREEN", head_sha: data.head_sha } } });
+      },
+      runRecord: (lines) => {
+        if (runRecordFails?.(lines)) throw new Error("EIO: run record write failed");
+        return appendRunRecord({ root: recRoot, issue: 212, stage: "implement", runnerId, lines });
+      },
+    },
+  });
+  return { code, ctx: ctxCache, transitionCalls };
+}
+const resolveOnly212 = async (repo) => {
+  const r = lines212("c"); r.splice(15, 1, "export const c15 = 'branch';", "export const c15b = 'main';");
+  repo.put(C212, r.join("\n") + "\n");
+  await repo.ok("add", "-A"); await repo.ok("commit", "-q", "--no-edit");
+};
+const resolveThenSelfCritique212 = async (repo) => {
+  await resolveOnly212(repo);
+  repo.put("factory/lib/other.js", lines212("o").join("\n") + "\nexport const selfCritiqueFix = 1;\n");
+  await repo.ok("add", "-A"); await repo.ok("commit", "-q", "-m", "self-critique: fix");
+};
+/** the #196 setup: two review reworks, an approving review, the record at its lifetime cap, then the real merge stage's CONFLICTING */
+async function incident212({ reworded = false, makeRepo = repo212 } = {}) {
+  const gh = issue212();
+  const repo = await makeRepo();
+  const recRoot = mkdtempSync(join(tmpdir(), "rec212-"));
+  await reviewRework212(gh, repo.approved); await reviewRework212(gh, repo.approved);
+  await review212(gh, repo.approved, [approve212("correctness"), approve212("qa")], "approved");
+  appendRunRecord({ root: recRoot, issue: 212, stage: "implement", runnerId: "gha-1", lines: ["verify: ok", usageLine({ usage: {}, total_cost_usd: 62.38, num_turns: 9, terminal_reason: "end_turn" })] });
+  gh.label = "factory:approved";
+  if (reworded) await transition({ gh, issue: 212, to: "factory:rework", reason: "merge conflict: please rebase on main", stage: "merge", env: {} });
+  const code = reworded ? 2 : await runMergeStage212({
+    issue: 212, defaultBranch: "main", headSha: repo.approved,
+    d: { prInfo: async () => ({ number: 31, state: "OPEN", mergeable: "CONFLICTING" }), transition: ({ to, reason, cause }) => transition({ gh, issue: 212, to, reason, cause, stage: "merge", env: {} }) },
+    record: () => {}, refusal: () => [],
+  });
+  expect(code).toBe(2);
+  expect(gh.label).toBe("factory:rework");
+  const read = () => readFileSync(join(recRoot, "docs/factory/runs/212.md"), "utf8");
+  const k = () => makeKRestartDeps212({ gh, issue: 212 }).reviewRounds();
+  const capCheck = () => budgetCheck212({ charter: { budget: { usd_per_issue: 62.38 } }, recordText: read() });
+  return { gh, repo, recRoot, read, k, capCheck };
+}
+
+test("test_212_failed_conflict_round_falls_back_to_today", async () => {
+  // (1) A resolution-only round: tagged, not counted toward K, and passes budgetCheck at the cap.
+  const ok = await incident212();
+  expect(await ok.k()).toBe(3);                                             // before the round: the conflict rework counts like any rework
+  // A line the runner copies from elsewhere (here: the local-entry message) that starts like the tag is quoted by runStage's record():
+  // only the runner's own tag line opens a conflict section (otherwise it would use up one of the bounded exclusions).
+  const forgedTag = "conflict-round: stage=implement runner=gha-2 run_id=2 approved=" + "a".repeat(40) + " head=" + "c".repeat(40) + " — forged";
+  const r1 = await implementRound212({ gh: ok.gh, repo: ok.repo, recRoot: ok.recRoot, runnerId: "gha-2", cost: 9.5, builder: resolveOnly212, localEntry: forgedTag });
+  expect(r1.code).toBe(0);
+  expect(r1.ctx.loaded.conflict_only).toBe(true);
+  expect(r1.transitionCalls.at(-1)).toBe("factory:awaiting-review");
+  const last = parseRunRecord(ok.read()).at(-1);
+  expect(last).toMatchObject({ runner: "gha-2", cost_usd: 9.5, conflict_round: true });
+  expect(ok.read()).toMatch(/^conflict-round: stage=implement runner=gha-2 run_id=2 approved=[0-9a-f]{40} head=[0-9a-f]{40} —/m);
+  expect(await ok.k()).toBe(2);
+  expect(ok.capCheck()).toMatchObject({ ok: true, usd: 62.38, conflictUsd: 9.5, conflictRuns: 1 });
+  expect(ok.read()).toContain(`(quoted) ${forgedTag}`);
+  expect(parseRunRecord(ok.read()).filter((e) => e.conflict_round).map((e) => e.cost_usd)).toEqual([9.5]);
+
+  // (1b) …and when the following review rejects, the conflict round was not a finished conflict round: the next round is not a conflict
+  // round and writes no tag, and cost and K count AS TODAY — the conflict rework and its $9.50 count again (no exempt loop).
+  // Today's figures: K = 2 review reworks + the conflict rework + this reject = 4; cost = 62.38 + 9.50 + 4 = 75.88.
+  await reviewRework212(ok.gh, ok.repo.approved);
+  appendRunRecord({ root: ok.recRoot, issue: 212, stage: "review", runnerId: "gha-r", lines: ["verify: ok", "transition: factory:rework"] });
+  expect(await ok.k()).toBe(4);
+  const r1b = await implementRound212({ gh: ok.gh, repo: ok.repo, recRoot: ok.recRoot, runnerId: "gha-3", cost: 4, pending: false,
+    builder: async (repo) => { repo.put("factory/lib/other.js", lines212("o").join("\n") + "\nexport const reworkFix = 1;\n"); await repo.ok("add", "-A"); await repo.ok("commit", "-q", "-m", "rework fix"); } });
+  expect(r1b.ctx.loaded).not.toHaveProperty("conflict_only");
+  expect(parseRunRecord(ok.read()).at(-1)).not.toHaveProperty("conflict_round");
+  expect(ok.capCheck()).toMatchObject({ ok: false, usd: 75.88, conflictRevokedUsd: 9.5, conflictRevokedRuns: 1 });
+  expect(ok.capCheck()).not.toHaveProperty("conflictUsd");
+  expect(await ok.k()).toBe(4);
+
+  // (2) The same round, but the session adds code outside the merge (a self-critique fix): no tag, K counts, and the cap refuses.
+  const bad = await incident212();
+  const r2 = await implementRound212({ gh: bad.gh, repo: bad.repo, recRoot: bad.recRoot, runnerId: "gha-2", cost: 9.5, builder: resolveThenSelfCritique212 });
+  expect(r2.code).toBe(0);                                                  // not blocked — today's counted pipeline, to full review
+  expect(r2.ctx.loaded.conflict_only).toBe(true);
+  expect(r2.transitionCalls.at(-1)).toBe("factory:awaiting-review");
+  expect(bad.read()).toMatch(/^conflict-scope: RED — conflict round changed factory\/lib\/other\.js outside the merge .*counts as a normal round/m);
+  expect(bad.read()).not.toMatch(/^conflict-round:/m);
+  expect(parseRunRecord(bad.read()).some((e) => e.conflict_round)).toBe(false);
+  expect((await bad.gh.comments()).some((c) => c.body.includes("factory-conflict-round:v1"))).toBe(false);
+  expect(await bad.k()).toBe(3);
+  expect(bad.capCheck()).toMatchObject({ ok: false, usd: 71.88 });
+
+  // (3) The merge stage's reason was reworded: not recognised → not a conflict round, counted, and the implement record says so.
+  const rw = await incident212({ reworded: true });
+  const r3 = await implementRound212({ gh: rw.gh, repo: rw.repo, recRoot: rw.recRoot, runnerId: "gha-2", cost: 9.5, builder: resolveOnly212 });
+  expect(r3.ctx.loaded).not.toHaveProperty("conflict_only");
+  expect(rw.read()).toMatch(/^conflict-only: not applied — the last rework came from factory:approved but its reason does not match/m);
+  expect(rw.read()).not.toMatch(/^conflict-round:/m);
+  expect(await rw.k()).toBe(3);
+  expect(rw.capCheck()).toMatchObject({ ok: false });
+
+  // (4) GREEN, but the runner's K marker cannot be posted: both or neither — no tag either, so cost and K count as today.
+  const nm = await incident212();
+  const r4 = await implementRound212({ gh: nm.gh, repo: nm.repo, recRoot: nm.recRoot, runnerId: "gha-2", cost: 9.5, builder: resolveOnly212, commentFails: true });
+  expect(r4.code).toBe(0);
+  expect(nm.read()).toMatch(/^conflict-scope: GREEN, but the conflict-round marker was not written — gh: 502 Bad Gateway; this round counts as a normal round/m);
+  expect(parseRunRecord(nm.read()).some((e) => e.conflict_round)).toBe(false);
+  expect(await nm.k()).toBe(3);
+  expect(nm.capCheck()).toMatchObject({ ok: false });
+
+  // (5) GREEN, but the hand-off transition is REFUSED (skeptic f3): the round did not hand off — no K marker, no tag, cost and K as today.
+  const rf = await incident212();
+  const r5 = await implementRound212({ gh: rf.gh, repo: rf.repo, recRoot: rf.recRoot, runnerId: "gha-2", cost: 9.5, builder: resolveOnly212, transitionRefused: true });
+  expect(r5.code).toBe(2);
+  expect(rf.read()).toMatch(/^conflict-scope: GREEN, but the round did not hand off to factory:awaiting-review \(transition refused: implement head_sha .*\) — no conflict-round marker or tag/m);
+  expect(rf.read()).not.toMatch(/^conflict-round:/m);
+  expect(parseRunRecord(rf.read()).some((e) => e.conflict_round)).toBe(false);
+  expect((await rf.gh.comments()).some((c) => c.body.includes("factory-conflict-round:v1"))).toBe(false);
+  expect(await rf.k()).toBe(3);
+  expect(rf.capCheck()).toMatchObject({ ok: false, usd: 71.88 });
+});
+
+// ── #212 skeptic findings: the runner's mirror resolution inside the same merge, and the K marker and the cost tag as both or neither ────
+const MIR212 = ".factory/lib/conflicted.js";
+/** repo212 where the conflicted source carries its mirror (every factory/** PR here does): the branch also has a clean hunk in both copies */
+async function repoMirror212() {
+  const root = mkdtempSync(join(tmpdir(), "fq212mir-"));
+  const git = (...args) => realRun212("git", ["-c", "user.email=t@example.invalid", "-c", "user.name=t", "-c", "commit.gpgsign=false", ...args], { cwd: root });
+  const ok = async (...args) => { const r = await git(...args); expect(r.code, `git ${args.join(" ")}: ${r.stderr}`).toBe(0); return r.stdout.trim(); };
+  const put = (p, s) => { mkdirSync(dirname(join(root, p)), { recursive: true }); writeFileSync(join(root, p), s); };
+  const both = (ls) => { put(C212, ls.join("\n") + "\n"); put(MIR212, ls.join("\n") + "\n"); };
+  await ok("init", "-q", "-b", "main");
+  both(lines212("c")); put("factory/lib/other.js", lines212("o").join("\n") + "\n");
+  await ok("add", "-A"); await ok("commit", "-q", "-m", "base");
+  await ok("checkout", "-q", "-b", "claude/fq-212");
+  const b = lines212("c"); b[15] = "export const c15 = 'branch';"; b[28] = "export const c28 = 'branch, clean hunk';"; both(b);
+  await ok("add", "-A"); await ok("commit", "-q", "-m", "approved change + its mirror");
+  const approved = await ok("rev-parse", "HEAD");
+  await ok("checkout", "-q", "main");
+  const m = lines212("c"); m[15] = "export const c15 = 'main';"; both(m);
+  await ok("add", "-A"); await ok("commit", "-q", "-m", "main moves on (source + mirror)");
+  const base = await ok("rev-parse", "HEAD");
+  await ok("checkout", "-q", "claude/fq-212");
+  return { root, git, ok, put, approved, base, read: (p) => readFileSync(join(root, p), "utf8") };
+}
+/** what mergeBaseIntoBranch → resolveMirrorConflicts leaves: the mirror path given base's copy, only the source conflict handed over */
+const mirrorCheckout212 = async (repo) => {
+  expect((await repo.git("merge", "--no-edit", repo.base)).code).not.toBe(0);
+  expect(await repo.ok("diff", "--name-only", "--diff-filter=U")).toBe([MIR212, C212].join("\n"));
+  await repo.ok("checkout", repo.base, "--", MIR212);
+  return { ok: true, branch: "claude/fq-212", existed: true, base: "main", merged: repo.base, conflicts: [C212], partial: { mirror: [MIR212], union: [] } };
+};
+const resolveOnlyMirror212 = async (repo) => {
+  const r = lines212("c"); r[28] = "export const c28 = 'branch, clean hunk';"; r.splice(15, 1, "export const c15 = 'branch';", "export const c15b = 'main';");
+  repo.put(C212, r.join("\n") + "\n");
+  await repo.ok("add", "-A"); await repo.ok("commit", "-q", "--no-edit");
+};
+
+test("test_212_conflict_round_with_a_runner_mirror_path_is_green_end_to_end", async () => {
+  // The #196 incident class in this repo: factory/lib/X.js conflicts and so does its .factory/lib/X.js mirror. The runner resolves the mirror
+  // with base's whole copy (dropping the branch's clean hunk in it); the builder resolves only the source. That round is resolution-only.
+  const inc = await incident212({ makeRepo: repoMirror212 });
+  const r = await implementRound212({ gh: inc.gh, repo: inc.repo, recRoot: inc.recRoot, runnerId: "gha-2", cost: 9.5, builder: resolveOnlyMirror212, checkout: mirrorCheckout212 });
+  expect(r.code).toBe(0);
+  expect(r.ctx.loaded.conflict_only).toBe(true);
+  expect(await inc.repo.ok("rev-parse", "HEAD~1^1")).toBe(inc.repo.approved);       // HEAD = mirror commit, HEAD~1 = the merge commit
+  expect(await inc.repo.ok("rev-parse", "HEAD~1^2")).toBe(inc.repo.base);
+  expect(await inc.repo.ok("show", `HEAD~1:${MIR212}`)).not.toContain("clean hunk");    // base's copy really dropped the branch's other hunk
+  expect(inc.read()).not.toMatch(/^conflict-scope: RED/m);
+  expect(inc.read()).toMatch(/^conflict-round: stage=implement runner=gha-2 /m);
+  expect(parseRunRecord(inc.read()).at(-1)).toMatchObject({ runner: "gha-2", cost_usd: 9.5, conflict_round: true });
+  expect(await inc.k()).toBe(2);
+  expect(inc.capCheck()).toMatchObject({ ok: true, usd: 62.38, conflictUsd: 9.5, conflictRuns: 1 });
+});
+
+test("test_212_tag_and_marker_are_both_or_neither", async () => {
+  const markers = async (gh) => (await gh.comments()).filter((c) => c.body.startsWith("<!-- factory-conflict-round:v1"));
+  // (a) GREEN and handed off, but the run-record write of the section that carries the tag FAILS: the marker must not go out either —
+  // otherwise K is exempt while the cost is not (the half state ADR-041 4 rules out). The round counts as today, and says so.
+  const wf = await incident212();
+  let tagWriteFailed = false;
+  const r = await implementRound212({ gh: wf.gh, repo: wf.repo, recRoot: wf.recRoot, runnerId: "gha-2", cost: 9.5, builder: resolveOnly212,
+    runRecordFails: (lines) => (lines.some((l) => l.startsWith("conflict-round: ")) ? (tagWriteFailed = true) : false) });
+  expect(tagWriteFailed).toBe(true);
+  expect(r.code).toBe(0);
+  expect(await markers(wf.gh)).toEqual([]);
+  expect(wf.read()).toMatch(/^conflict-scope: GREEN, but the conflict-round tag could not be written to the run record — EIO: run record write failed; no marker either — this round counts as a normal round \(cost and K\)/m);
+  expect(parseRunRecord(wf.read()).at(-1)).toMatchObject({ runner: "gha-2", cost_usd: 9.5 });
+  expect(parseRunRecord(wf.read()).some((e) => e.conflict_round)).toBe(false);
+  expect(await wf.k()).toBe(3);
+  expect(wf.capCheck()).toMatchObject({ ok: false, usd: 71.88 });
+
+  // (b) The tag was written, then the marker post fails: the tag is revoked by the runner's own line in the next section — the cost counts
+  // again (K never had a marker). A forged revocation could only count MORE, never less.
+  const mf = await incident212();
+  const r2 = await implementRound212({ gh: mf.gh, repo: mf.repo, recRoot: mf.recRoot, runnerId: "gha-2", cost: 9.5, builder: resolveOnly212, commentFails: true });
+  expect(r2.code).toBe(0);
+  expect(mf.read()).toMatch(/^conflict-round: stage=implement runner=gha-2 /m);
+  expect(mf.read()).toMatch(/^conflict-round-revoked: stage=implement runner=gha-2 run_id=2 — the conflict-round marker was not posted/m);
+  expect(parseRunRecord(mf.read()).some((e) => e.conflict_round)).toBe(false);
+  expect(await markers(mf.gh)).toEqual([]);
+  expect(await mf.k()).toBe(3);
+  expect(mf.capCheck()).toMatchObject({ ok: false, usd: 71.88 });
+  expect(mf.capCheck()).not.toHaveProperty("conflictUsd");
+
+  // (c) The success path still writes both, tag BEFORE marker: the record already holds the tag when the marker comment goes out.
+  const both = await incident212();
+  let tagAtMarker = null;
+  const origComment = both.gh.comment;
+  both.gh.comment = async (n, body) => { if (body.startsWith("<!-- factory-conflict-round:v1")) tagAtMarker = /^conflict-round: /m.test(both.read()); return origComment(n, body); };
+  const r3 = await implementRound212({ gh: both.gh, repo: both.repo, recRoot: both.recRoot, runnerId: "gha-2", cost: 9.5, builder: resolveOnly212 });
+  expect(r3.code).toBe(0);
+  expect(tagAtMarker).toBe(true);
+  expect((await markers(both.gh)).length).toBe(1);
+  expect(parseRunRecord(both.read()).filter((e) => e.conflict_round).length).toBe(1);
+  expect(await both.k()).toBe(2);
+  expect(both.capCheck()).toMatchObject({ ok: true, conflictUsd: 9.5 });
+});
+
+test("test_212_conflict_round_rejected_at_round_k_counts_as_today", async () => {
+  // The #196 flow puts the re-review after a GREEN conflict round at round K (2 review reworks + the exempt conflict rework → round 3,
+  // K=3). A rejection there does not go to factory:rework: the REAL review stage (runStage → nextState → reviewRoundsExhausted) sends it
+  // to factory:needs-human — or, with the one #174 self-restart unused, to a restart rework. Either way the review rejected the conflict
+  // round, so its cost counts AS TODAY (no exempt cost behind a human hand-off).
+  const reviewAtK = async (inc, { restart }) => {
+    const transitions = [];
+    const kDeps = makeKRestartDeps212({ gh: inc.gh, issue: 212 });
+    inc.gh.label = "factory:awaiting-review";
+    const code = await runStage({
+      stage: "review", issue: 212, runnerId: "gha-r", runId: "r",
+      deps: {
+        charterReady: async () => true, trustWorkspace: async () => {}, claim: async () => ({ ok: true }), assertHandoff: async () => ({ ok: true }),
+        heartbeat: async () => ({ stop() {} }), release: async () => true, gates: async () => null,
+        buildContext: async () => ({ roster: ["correctness", "qa"], orchestration: "workflow", limits: { K: 3 } }),
+        claudeP: async () => ({ is_error: false, result: "{}", usage: { input_tokens: 3 }, total_cost_usd: 1, num_turns: 2, terminal_reason: "end_turn" }),
+        verifyStage: () => ({ ok: true, reasons: [], data: { schema: "factory.review.v1", issue: 212, pr: 31, head_sha: inc.repo.approved, round: 1, orchestration: "workflow", verdicts: [reject212("correctness"), approve212("qa")] } }),
+        writeHandoff: async () => {},
+        reviewRounds: kDeps.reviewRounds,
+        ...(restart ? { kRestartState: kDeps.kRestartState, postKRestartBrief: kDeps.postKRestartBrief } : {}),
+        transition: async ({ to, reason, by }) => { transitions.push(to); return transition({ gh: inc.gh, issue: 212, to, reason, by, stage: "review", env: {} }); },
+        runRecord: (lines) => appendRunRecord({ root: inc.recRoot, issue: 212, stage: "review", runnerId: "gha-r", lines }),
+      },
+    });
+    return { code, transitions };
+  };
+  for (const restart of [false, true]) {
+    const inc = await incident212();
+    const r1 = await implementRound212({ gh: inc.gh, repo: inc.repo, recRoot: inc.recRoot, runnerId: "gha-2", cost: 9.5, builder: resolveOnly212 });
+    expect(r1.code).toBe(0);
+    expect(parseRunRecord(inc.read()).at(-1)).toMatchObject({ conflict_round: true });
+    expect(await inc.k()).toBe(2);
+    expect(inc.capCheck()).toMatchObject({ ok: true, usd: 62.38, conflictUsd: 9.5, conflictRuns: 1 });
+    const rv = await reviewAtK(inc, { restart });
+    expect(rv.transitions, `restart=${restart}`).toEqual([restart ? "factory:rework" : "factory:needs-human"]);
+    expect(inc.gh.label).toBe(restart ? "factory:rework" : "factory:needs-human");
+    // today's cost: 62.38 + the conflict round 9.50 + this review 1 = 72.88 — the conflict round is counted and named as revoked
+    expect(inc.capCheck(), `restart=${restart}`).toMatchObject({ ok: false, usd: 72.88, conflictRevokedUsd: 9.5, conflictRevokedRuns: 1 });
+    expect(inc.capCheck(), `restart=${restart}`).not.toHaveProperty("conflictUsd");
+  }
+});
+
+// ── #212 self-critique (skeptic, round 3) — the review that DECIDES on a conflict round decides on today's round; a crashed or parked
+// re-review is not a rejection. Fixtures: the real merge stage, the real implement round (incident212's pieces), and the REAL review stage
+// (runStage → reviewRounds from the production K deps → nextState → transition()), so the round the deciding review uses is observed.
+import { reviewRoundOf } from "../bin/run-stage.js";
+/** incident212 with `reworks` review reworks before the approval (the #196 flow with a different round count) */
+async function incidentN212(reworks) {
+  const gh = issue212();
+  const repo = await repo212();
+  const recRoot = mkdtempSync(join(tmpdir(), "rec212n-"));
+  for (let i = 0; i < reworks; i++) await reviewRework212(gh, repo.approved);
+  await review212(gh, repo.approved, [approve212("correctness"), approve212("qa")], "approved");
+  appendRunRecord({ root: recRoot, issue: 212, stage: "implement", runnerId: "gha-1", lines: ["verify: ok", usageLine({ usage: {}, total_cost_usd: 62.38, num_turns: 9, terminal_reason: "end_turn" })] });
+  gh.label = "factory:approved";
+  expect(await runMergeStage212({
+    issue: 212, defaultBranch: "main", headSha: repo.approved,
+    d: { prInfo: async () => ({ number: 31, state: "OPEN", mergeable: "CONFLICTING" }), transition: ({ to, reason, cause }) => transition({ gh, issue: 212, to, reason, cause, stage: "merge", env: {} }) },
+    record: () => {}, refusal: () => [],
+  })).toBe(2);
+  const read = () => readFileSync(join(recRoot, "docs/factory/runs/212.md"), "utf8");
+  const k = () => makeKRestartDeps212({ gh, issue: 212 }).reviewRounds();
+  const capCheck = () => budgetCheck212({ charter: { budget: { usd_per_issue: 62.38 } }, recordText: read() });
+  return { gh, repo, recRoot, read, k, capCheck };
+}
+/** the real review stage on `inc`; only the approved/blocked/needs-info transitions are faked (its merge-side requirements are not this test's subject) */
+async function reviewStage212(inc, { K = 3, verdicts, decision, runnerId = "gha-r", throwAt = null, dependencyBlock = null, budget = false }) {
+  const transitions = [], handoffRounds = [];
+  const kDeps = makeKRestartDeps212({ gh: inc.gh, issue: 212 });
+  inc.gh.label = "factory:awaiting-review";
+  const code = await runStage({
+    stage: "review", issue: 212, runnerId, runId: runnerId.replace(/^gha-/, ""),
+    deps: {
+      charterReady: async () => true, trustWorkspace: async () => {}, claim: async () => ({ ok: true }), assertHandoff: async () => ({ ok: true }),
+      heartbeat: async () => ({ stop() {} }), release: async () => true, gates: async () => null,
+      ...(budget ? { lifetimeBudget: async () => inc.capCheck() } : {}),
+      ...(dependencyBlock ? { dependencyBlock } : {}),
+      buildContext: async () => ({ roster: ["correctness", "qa"], orchestration: "workflow", limits: { K } }),
+      claudeP: async () => ({ is_error: false, result: "{}", usage: { input_tokens: 3 }, total_cost_usd: 1, num_turns: 2, terminal_reason: "end_turn" }),
+      verifyStage: () => {
+        if (throwAt === "verify") throw new TypeError("Cannot read properties of undefined (reading 'verdicts')");
+        return { ok: true, reasons: [], data: { schema: "factory.review.v1", issue: 212, pr: 31, head_sha: inc.repo.approved, round: 1, orchestration: "workflow", verdicts, ...(decision ? { decision } : {}) } };
+      },
+      writeHandoff: async ({ data } = {}) => { handoffRounds.push(data?.round); },
+      reviewRounds: kDeps.reviewRounds,
+      transition: async ({ to, reason, by, cause }) => {
+        transitions.push(to);
+        if (to === "factory:approved" || to === "factory:blocked" || to === "factory:needs-info") { inc.gh.label = to; return { ok: true, to }; }
+        return transition({ gh: inc.gh, issue: 212, to, reason, by, cause, stage: "review", env: {} });
+      },
+      runRecord: (lines) => appendRunRecord({ root: inc.recRoot, issue: 212, stage: "review", runnerId, lines }),
+    },
+  });
+  const evidence = [...inc.read().matchAll(new RegExp(`^review-evidence: run_id=${runnerId.replace(/^gha-/, "")} .* round=(\\S+) decision=(\\S+)`, "gm"))].map((m) => [m[1], m[2]]);
+  return { code, transitions, handoffRounds, evidence };
+}
+
+test("test_212_rejecting_rereview_decides_on_todays_round", async () => {
+  // One review rework, approval at round 2, the real merge-stage CONFLICTING, then a GREEN conflict round. Today (no exemption) the re-review
+  // is round 3 = 1 review rework + the conflict rework + 1. A REJECTING re-review must decide on that round — dw6 "counts K as today":
+  // with K=3 it goes to factory:needs-human (not one extra exempt factory:rework round), and its handoff and evidence line say round 3.
+  const atK = await incidentN212(1);
+  expect((await implementRound212({ gh: atK.gh, repo: atK.repo, recRoot: atK.recRoot, runnerId: "gha-2", cost: 9.5, builder: resolveOnly212 })).code).toBe(0);
+  expect(await atK.k()).toBe(1);                                           // the finished-looking conflict round is exempt while undecided…
+  const rj = await reviewStage212(atK, { K: 3, verdicts: [reject212("correctness"), approve212("qa")] });
+  expect(rj.transitions).toEqual(["factory:needs-human"]);                 // …but the rejection is decided at today's round 3 = K
+  expect(atK.gh.label).toBe("factory:needs-human");
+  expect(rj.handoffRounds).toEqual([3]);
+  expect(rj.evidence).toEqual([["3", "rework"]]);
+  // …and the same when the review handoff carries its own decision (the aggregation is skipped; the round is still today's).
+  const carried = await incidentN212(1);
+  expect((await implementRound212({ gh: carried.gh, repo: carried.repo, recRoot: carried.recRoot, runnerId: "gha-2", cost: 9.5, builder: resolveOnly212 })).code).toBe(0);
+  const rc = await reviewStage212(carried, { K: 3, verdicts: [reject212("correctness"), approve212("qa")], decision: "rework" });
+  expect(rc.transitions).toEqual(["factory:needs-human"]);
+  expect(rc.handoffRounds).toEqual([3]);
+
+  // K=4: the same rejection is today's round 3 → factory:rework, and the next review is round 4 — consecutive, no gap in the issue's rounds.
+  const below = await incidentN212(1);
+  expect((await implementRound212({ gh: below.gh, repo: below.repo, recRoot: below.recRoot, runnerId: "gha-2", cost: 9.5, builder: resolveOnly212 })).code).toBe(0);
+  const rj4 = await reviewStage212(below, { K: 4, verdicts: [reject212("correctness"), approve212("qa")] });
+  expect(rj4.transitions).toEqual(["factory:rework"]);
+  expect(rj4.handoffRounds).toEqual([3]);
+  expect(await below.k()).toBe(3);                                          // 1 review rework + the (revoked) conflict rework + this reject
+  expect(reviewRoundOf(await below.k(), null).round).toBe(4);
+
+  // Control (dw5 unchanged): an APPROVING re-review keeps the exemption — after 2 review reworks it is round 3 = K, not 4, so merge's `round > K` quorum check never trips on it.
+  const ok = await incidentN212(2);
+  expect((await implementRound212({ gh: ok.gh, repo: ok.repo, recRoot: ok.recRoot, runnerId: "gha-2", cost: 9.5, builder: resolveOnly212 })).code).toBe(0);
+  const ap = await reviewStage212(ok, { K: 3, verdicts: [approve212("correctness"), approve212("qa")] });
+  expect(ap.transitions).toEqual(["factory:approved"]);
+  expect(ap.handoffRounds).toEqual([3]);                                    // 2 review reworks + 1: the conflict rework is not a round
+  expect(ap.evidence).toEqual([["3", "approved"]]);
+  expect(await ok.k()).toBe(2);
+});
+
+test("test_212_crashed_or_parked_rereview_keeps_the_conflict_exemption", async () => {
+  // The #196 cap scenario: the record is AT the lifetime cap and the GREEN conflict round's $9.50 is excluded. The re-review first crashes
+  // (the real runStage catch: engine-crash block, `transition: factory:blocked (cause=engine-crash)`), then is parked on a harness issue
+  // (`transition: factory:needs-info`). Neither ended the review — the sweeper/unpark retries it — so neither revokes the exclusion, and the
+  // retried review passes the budget gate at entry and approves. dw6 revokes only on a review that ends anywhere other than factory:approved.
+  const inc = await incident212();
+  expect((await implementRound212({ gh: inc.gh, repo: inc.repo, recRoot: inc.recRoot, runnerId: "gha-2", cost: 9.5, builder: resolveOnly212 })).code).toBe(0);
+  expect(inc.capCheck()).toMatchObject({ ok: true, usd: 62.38, conflictUsd: 9.5, conflictRuns: 1 });
+
+  const crash = await reviewStage212(inc, { runnerId: "gha-r1", verdicts: [], throwAt: "verify", budget: true });
+  expect(crash.code).toBe(1);
+  expect(crash.transitions).toEqual(["factory:blocked"]);
+  expect(inc.read()).toMatch(/^engine-crash: stage=review runner=gha-r1 /m);
+  expect(inc.read()).toMatch(/^transition: factory:blocked \(cause=engine-crash\)$/m);
+  expect(inc.capCheck()).toMatchObject({ ok: true, usd: 62.38, conflictUsd: 9.5, conflictRuns: 1 });
+  expect(inc.capCheck()).not.toHaveProperty("conflictRevokedRuns");
+
+  const park = await reviewStage212(inc, { runnerId: "gha-r2", verdicts: [], dependencyBlock: async () => 300, budget: true });
+  expect(park.code).toBe(0);
+  expect(park.transitions).toEqual(["factory:needs-info"]);
+  expect(inc.read()).toMatch(/^transition: factory:needs-info$/m);
+  expect(inc.capCheck()).toMatchObject({ ok: true, usd: 62.38, conflictUsd: 9.5 });
+  expect(inc.capCheck()).not.toHaveProperty("conflictRevokedRuns");
+
+  const retry = await reviewStage212(inc, { runnerId: "gha-r3", verdicts: [approve212("correctness"), approve212("qa")], budget: true });
+  expect(inc.read()).not.toMatch(/REFUSED/);
+  expect(retry.transitions).toEqual(["factory:approved"]);
+  expect(inc.gh.label).toBe("factory:approved");
+  // after it: 62.38 + this review's own $1 (the crashed run's $1 is the engine-crash exclusion); the conflict round's $9.50 stays excluded
+  expect(inc.capCheck()).toMatchObject({ usd: 63.38, conflictUsd: 9.5, conflictRuns: 1, engineRuns: 1 });
+  expect(inc.capCheck()).not.toHaveProperty("conflictRevokedRuns");
+
+  // Control: a re-review that really rejects still revokes (the crash/park carve-out is not a blanket pass).
+  const rej = await incident212();
+  expect((await implementRound212({ gh: rej.gh, repo: rej.repo, recRoot: rej.recRoot, runnerId: "gha-2", cost: 9.5, builder: resolveOnly212 })).code).toBe(0);
+  await reviewStage212(rej, { runnerId: "gha-r1", verdicts: [], throwAt: "verify" });
+  await reviewStage212(rej, { runnerId: "gha-r2", verdicts: [reject212("correctness"), approve212("qa")] });
+  expect(rej.capCheck()).toMatchObject({ ok: false, conflictRevokedUsd: 9.5, conflictRevokedRuns: 1 });
 });

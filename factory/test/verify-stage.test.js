@@ -1,5 +1,8 @@
 import { test, expect } from "vitest";
 import { verifyStage, hitApiError, apiErrorReason, deriveReworkPins } from "../lib/verify-stage.js";
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 const review = { schema: "factory.review.v1", issue: 7, pr: 9, head_sha: "a".repeat(40), round: 1, orchestration: "workflow", guarantee: "verified",
   verdicts: [{ role: "correctness", verdict: "approve", confidence: "high", must_fix: [], should_fix: [], verified: [] }, { role: "qa", verdict: "approve", confidence: "high", must_fix: [], should_fix: [], verified: [] }] };
@@ -463,6 +466,353 @@ test("validatePlanHandoff: the uncovered-dissent reason lists what the validator
   expect(r).toMatch(/done_when\.covers: dissent-1/);
 });
 
+// ── #232 (gap P-6, E-7) — the issue's done_when is the contract's origin: the plan must cover every item ──
+// #232's own body, verbatim (real issue text, not a hand-reduced string): three `test_232_…` items under
+// `## done_when (draft)`, a `must_not:` block after them and a trailing quote line.
+const ISSUE_232_BODY = [
+  "[ready]",
+  "",
+  "## What",
+  "**이슈의 `done_when`은 계약의 원본이다** — 허점 원장 E-7(P-6), 소유자 결정 2026-10-11. plan 검증기가 \"plan 계약이 이슈의 done_when 항목을 빠짐없이 덮는가\"를 스크립트로 확인한다.",
+  "",
+  "1. `factory/lib/context.js`(또는 admission이 이미 쓰는 파서 옆): 이슈 본문의 `## done_when` 절에서 항목을 읽는다 — 체크리스트 항목(`- [ ]`/`- [x]`)마다 `id`(백틱 안 `test_…` 이름이 있으면 그것, 없으면 항목 순번 `issue-dw<n>`)와 `text`. 절이 없거나 비면 빈 배열.",
+  "2. `factory/lib/verify-stage.js` `validatePlanHandoff`: plan의 `done_when[]`이 이슈 항목을 **전부** 덮어야 한다 — 덮음 = plan 항목의 `check.ref`가 이슈 항목의 `test_…` id와 같거나, plan 항목에 `covers_issue: [\"issue-dw<n>\" | \"test_…\"]`(새 선택 필드)로 명시. 덮이지 않은 이슈 항목이 있으면 거부 사유 `issue done_when not covered by the plan: <id> — \"<text 앞 80자>\"` (수리 턴으로 간다). plan이 이슈에 없는 항목을 **더하는** 것은 허용(상한은 그대로).",
+  "3. `templates`의 plan 프롬프트는 이 이슈 밖(NEVER_AUTOMATE) — 운영 세션이 \"이슈의 done_when을 전부 덮고 `covers_issue`로 표시하라\"를 넣는다. 그 전까지는 `check.ref` 일치로만 덮임이 성립한다(이 저장소의 이슈는 전부 `test_<n>_…` id를 쓴다).",
+  "4. 이슈에 done_when 항목이 하나도 없으면(자기생성 이슈 등) 검사는 통과하고 기록에 `done_when: issue has no items — the plan's contract stands alone` 한 줄.",
+  "",
+  "## Why",
+  "원장 §1 E-7: admission은 done_when **제목**만 보고(`DONE_WHEN_RE`), plan 검증기는 이슈 본문을 거의 읽지 않아 초안이 비거나 어긋나면 plan이 계약을 통째로 발명한다 — 9월 베이스라인(`docs/factory/dogfood/2026-09-14-plan-baseline.md`) must_fix 15건 중 5건이 plan이 발명한 done_when에서 나왔다. 소유자: 이슈의 done_when은 초안이 아니라 **원본**이다.",
+  "",
+  "## Impact paths",
+  "- `factory/lib/context.js`, `factory/lib/verify-stage.js`, `factory/lib/admission.js`",
+  "- `factory/test/context.test.js`, `factory/test/verify-stage.test.js`",
+  "",
+  "## done_when (draft)",
+  "- [ ] `test_232_issue_done_when_items_are_parsed_with_test_ids` — 이 저장소의 실제 이슈 본문(#200 형식)에서 항목·id·text가 나오고, 절이 없으면 빈 배열 (level: fast)",
+  "- [ ] `test_232_plan_must_cover_every_issue_done_when_item` — 이슈 항목 셋 중 하나를 plan이 덮지 않으면 `validatePlanHandoff`가 그 id와 text로 거부; `check.ref` 일치 또는 `covers_issue`로 전부 덮이면 통과; plan이 더한 항목은 허용 (level: fast)",
+  "- [ ] `test_232_issue_without_done_when_items_passes_with_a_record_line` — 항목 0개면 통과 + 기록 한 줄 (level: fast)",
+  "",
+  "must_not:",
+  "- touch: `.github/**`, `factory/hooks/**`, `templates/factory/**`, `docs/factory/CHARTER.md`, `factory/lib/merge-stage.js`",
+  "",
+  "> 제출자: 운영 세션(에이전트). 허점 원장 P-6. plan 프롬프트 문장은 운영 세션 PR.",
+  "",
+].join("\n");
+const ISSUE_232_IDS = [
+  "test_232_issue_done_when_items_are_parsed_with_test_ids",
+  "test_232_plan_must_cover_every_issue_done_when_item",
+  "test_232_issue_without_done_when_items_passes_with_a_record_line",
+];
+const dw232 = (ref, extra = {}) => ({ id: ref, text: `plan item for ${ref}`, check: { kind: "test", ref }, rubric: "observable", level: "unit", ...extra });
+const NOT_COVERED = "issue done_when not covered by the plan:";
+// cf2 — the reason names its remedy: the repair turn reads only this sentence, and the plan prompt does not know covers_issue.
+// dw5 (plan d10/d11): the remedy names `covers`, a field the plan workflow schema carries — `covers_issue` is stripped from the
+// structured output, so advice to write it could never be followed (this branch-only text predates dw5; not on main).
+const FIX_TEST = (id) => ` (cover it: a plan item with check.ref "${id}" or covers: ["${id}"])`;
+const FIX_POS = (id) => ` (cover it: add covers: ["${id}"] to the plan item that checks it)`;
+const NO_ITEMS_LINE = "done_when: issue has no items — the plan's contract stands alone";
+
+test("test_232_plan_must_cover_every_issue_done_when_item", async () => {
+  const { validatePlanHandoff } = await import("../lib/verify-stage.js");
+  const [a, b, c] = ISSUE_232_IDS;
+
+  // one of three items left uncovered → rejected by its id and (the first 80 characters of) its text
+  expect(validatePlanHandoff(planFix({ done_when: [dw232(a), dw232(b)] }), { issueBody: ISSUE_232_BODY }))
+    .toEqual([`${NOT_COVERED} ${c} — "항목 0개면 통과 + 기록 한 줄 (level: fast)"${FIX_TEST(c)}`]);
+  expect(validatePlanHandoff(planFix({ done_when: [dw232(a), dw232(c)] }), { issueBody: ISSUE_232_BODY }))
+    .toEqual([`${NOT_COVERED} ${b} — "이슈 항목 셋 중 하나를 plan이 덮지 않으면 \`validatePlanHandoff\`가 그 id와 text로 거부; \`check.ref\` 일치"${FIX_TEST(b)}`]);
+  // two uncovered → each named
+  const two = validatePlanHandoff(planFix({ done_when: [dw232(b)] }), { issueBody: ISSUE_232_BODY });
+  expect(two.filter((r) => r.startsWith(NOT_COVERED)).map((r) => r.split(" — ")[0])).toEqual([`${NOT_COVERED} ${a}`, `${NOT_COVERED} ${c}`]);
+
+  // every item covered by check.ref, plus one item the issue does not have → valid
+  expect(validatePlanHandoff(planFix({ done_when: [dw232(a), dw232(b), dw232(c), dw232("test_232_extra_plan_item")] }), { issueBody: ISSUE_232_BODY })).toEqual([]);
+
+  // covers_issue covers too — trim and case do not matter (the dissent-id rule, L24); a renamed ref alone does not
+  const renamed = dw232("test_232_coverage_renamed", { covers_issue: [` ${c.toUpperCase()} `] });
+  expect(validatePlanHandoff(planFix({ done_when: [dw232(a), dw232(b), renamed] }), { issueBody: ISSUE_232_BODY })).toEqual([]);
+  expect(validatePlanHandoff(planFix({ done_when: [dw232(a), dw232(b), dw232("test_232_coverage_renamed")] }), { issueBody: ISSUE_232_BODY }))
+    .toEqual([`${NOT_COVERED} ${c} — "항목 0개면 통과 + 기록 한 줄 (level: fast)"${FIX_TEST(c)}`]);
+  // the old `verify` spelling is not coverage (non-goal) — only check.ref and covers_issue count
+  const viaVerify = { id: "dw3", text: "t", verify: c, rubric: "observable", level: "unit" };
+  expect(validatePlanHandoff(planFix({ done_when: [dw232(a), dw232(b), viaVerify] }), { issueBody: ISSUE_232_BODY }).some((r) => r.startsWith(`${NOT_COVERED} ${c}`))).toBe(true);
+
+  // items without a test id are covered by their position name through covers_issue
+  const noIds = "## done_when\n- [ ] the export button downloads a CSV\n- [ ] the CSV has a header row\n";
+  expect(validatePlanHandoff(planFix({ done_when: [dw232("test_9_csv", { covers_issue: ["issue-dw2"] })] }), { issueBody: noIds }))
+    .toEqual([`${NOT_COVERED} issue-dw1 — "the export button downloads a CSV"${FIX_POS("issue-dw1")}`]);
+  expect(validatePlanHandoff(planFix({ done_when: [dw232("test_9_csv", { covers_issue: ["issue-dw1", "ISSUE-DW2"] })] }), { issueBody: noIds })).toEqual([]);
+
+  // through verifyStage the reason is a plan-contract defect: it fails the stage and rides planRepair (one repair turn)
+  const v = verifyPlan(planFix({ done_when: [dw232(a), dw232(b)] }), { issueBody: ISSUE_232_BODY });
+  expect(v.ok).toBe(false);
+  expect(v.planRepair).toEqual([`${NOT_COVERED} ${c} — "항목 0개면 통과 + 기록 한 줄 (level: fast)"${FIX_TEST(c)}`]);
+  expect(v.reasons.length).toBe(v.planRepair.length);
+  expect(verifyPlan(planFix({ done_when: [dw232(a), dw232(b), dw232(c)] }), { issueBody: ISSUE_232_BODY }).ok).toBe(true);
+
+  // cf2 — a docs-only issue written exactly as templates/know-thy-build/issue.md prescribes has no test ids, so its items are
+  // positional and only covers_issue covers them: the reason must say so, or the one-shot repair turn has nothing to act on
+  const docsOnly = [
+    "## Impact paths",
+    "- `README.md` (Quickstart 절)",
+    "",
+    "## done_when (draft)",
+    "- [ ] `README.md`의 Quickstart가 X를 설명한다",
+    "- [ ] 문서 외 파일은 diff에 없다",
+    "",
+    "<!-- docs-only: 회귀 가드 없음 — Impact paths가 전부 문서라 tier는 docs다(CHARTER: diff가 docs/**, *.md만) -->",
+    "",
+  ].join("\n");
+  const docsPlan = (extra) => planFix({ done_when: [{ id: "dw1", text: "Quickstart explains X", check: { kind: "rubric", ref: "README.md" }, rubric: "a reader can follow it", level: "unit", ...extra }] });
+  const docsV = verifyPlan(docsPlan({}), { issueBody: docsOnly });
+  expect(docsV.ok).toBe(false);
+  expect(docsV.planRepair).toEqual([
+    `${NOT_COVERED} issue-dw1 — "\`README.md\`의 Quickstart가 X를 설명한다"${FIX_POS("issue-dw1")}`,
+    `${NOT_COVERED} issue-dw2 — "문서 외 파일은 diff에 없다"${FIX_POS("issue-dw2")}`,
+  ]);
+  // … and doing what the reason says is enough for the repaired plan to pass
+  expect(verifyPlan(docsPlan({ covers_issue: ["issue-dw1", "issue-dw2"] }), { issueBody: docsOnly }).ok).toBe(true);
+});
+
+test("test_232_issue_without_done_when_items_passes_with_a_record_line", async () => {
+  const { validatePlanHandoff } = await import("../lib/verify-stage.js");
+  const plan = planFix({ done_when: [dw232("test_9_own_contract")] });
+  // a factory-written body with no done_when section, and a done_when section that holds no checklist item
+  const bodies = [
+    "<!-- factory-harness-request for=12 -->\n## What\nadd pg to dependencies\n",
+    "## done_when (draft)\n- the plan decides\n\n## Why\nbecause\n",
+    "",
+  ];
+  for (const issueBody of bodies) {
+    const notes = [];
+    expect(validatePlanHandoff(plan, { issueBody, notes })).toEqual([]);
+    expect(notes).toEqual([NO_ITEMS_LINE]);
+    const v = verifyPlan(plan, { issueBody });
+    expect(v.ok).toBe(true);
+    expect(v.reasons).toEqual([]);
+    expect(v.planRepair).toBeNull();
+    expect(v.planNotes).toEqual([NO_ITEMS_LINE]);
+  }
+  // an issue that has items does not get the line, covered or not
+  const notes = [];
+  validatePlanHandoff(planFix({ done_when: ISSUE_232_IDS.map((id) => dw232(id)) }), { issueBody: ISSUE_232_BODY, notes });
+  expect(notes).toEqual([]);
+  expect(verifyPlan(planFix({ done_when: [dw232("test_9_own_contract")] }), { issueBody: ISSUE_232_BODY }).planNotes).toBeNull();
+});
+
+test("test_232_every_admitted_done_when_spelling_yields_its_items", async () => {
+  const { validatePlanHandoff } = await import("../lib/verify-stage.js");
+  const { issueDoneWhenItems } = await import("../lib/context.js");
+  const { queueAdmission } = await import("../lib/admission.js");
+  const headings = ["## done_when", "### Done when", "done_when:", "## Done When (draft)", "### done_when", "## DONE_WHEN"];
+  for (const heading of headings) {
+    const body = `## What\nexport notes as CSV\n\n${heading}\n- [ ] \`test_9_header\` — the CSV has a header row\n- [ ] \`test_9_rows\` — one row per note\n\n## Why\nusers asked\n`;
+    // admission takes this body as an explicit job …
+    const adm = queueAdmission({ issue: { number: 9, body, labels: [] }, charter: {} });
+    expect(adm.reasons.some((r) => /not an explicit job/.test(r))).toBe(false);
+    // … so the parser must see its items, and a plan that drops one is rejected, not waved through as "no items"
+    expect(issueDoneWhenItems(body).map((i) => i.id)).toEqual(["test_9_header", "test_9_rows"]);
+    const notes = [];
+    const reasons = validatePlanHandoff(planFix({ done_when: [dw232("test_9_header")] }), { issueBody: body, notes });
+    expect(reasons).toEqual([`${NOT_COVERED} test_9_rows — "one row per note"${FIX_TEST("test_9_rows")}`]);
+    expect(notes).toEqual([]);
+  }
+});
+
+test("test_232_check_ref_covers_only_test_ids_and_ignores_spelling", async () => {
+  const { validatePlanHandoff } = await import("../lib/verify-stage.js");
+  // check.ref matches an issue test id regardless of surrounding whitespace and case (L24, the dissent-id rule)
+  const body = "## done_when\n- [ ] `test_9_header` — the CSV has a header row\n";
+  expect(validatePlanHandoff(planFix({ done_when: [dw232(" TEST_9_Header ")] }), { issueBody: body }).filter((x) => x.startsWith(NOT_COVERED))).toEqual([]);
+  expect(validatePlanHandoff(planFix({ done_when: [dw232("test_9_footer")] }), { issueBody: body }).filter((x) => x.startsWith(NOT_COVERED))).toHaveLength(1);
+  // a positional id (`issue-dw<n>`) is not a test name: only covers_issue can cover it, never check.ref
+  const noIds = "## done_when\n- [ ] the export button downloads a CSV\n";
+  expect(validatePlanHandoff(planFix({ done_when: [dw232("issue-dw1")] }), { issueBody: noIds }).filter((x) => x.startsWith(NOT_COVERED)))
+    .toEqual([`${NOT_COVERED} issue-dw1 — "the export button downloads a CSV"${FIX_POS("issue-dw1")}`]);
+  // the reason quotes at most the first 80 characters of the item text
+  const long = "x".repeat(79) + "가나다";
+  const r = validatePlanHandoff(planFix({ done_when: [dw232("test_9_other")] }), { issueBody: `## done_when\n- [ ] \`test_9_long\` — ${long}\n` });
+  expect(r.filter((x) => x.startsWith(NOT_COVERED))).toEqual([`${NOT_COVERED} test_9_long — "${"x".repeat(79)}가"${FIX_TEST("test_9_long")}`]);
+});
+
+test("test_232_done_when_section_ignores_fenced_code_and_prose_keys", async () => {
+  const { validatePlanHandoff } = await import("../lib/verify-stage.js");
+  const { issueDoneWhenItems } = await import("../lib/context.js");
+  const { queueAdmission } = await import("../lib/admission.js");
+  // a quoted plan handoff in a fence above the section carries a column-0 `done_when:` — it is code, not the section
+  const fenceFirst = "## What\n```yaml\ndone_when:\n  - id: x\n```\n\n## done_when\n- [ ] `test_1_a` — a\n- [ ] `test_1_b` — b\n";
+  expect(queueAdmission({ issue: { number: 1, body: fenceFirst, labels: [] }, charter: {} }).reasons.some((r) => /not an explicit job/.test(r))).toBe(false);
+  expect(issueDoneWhenItems(fenceFirst).map((i) => i.id)).toEqual(["test_1_a", "test_1_b"]);
+  const notes = [];
+  expect(validatePlanHandoff(planFix({ done_when: [dw232("test_1_a")] }), { issueBody: fenceFirst, notes }).filter((x) => x.startsWith(NOT_COVERED)))
+    .toEqual([`${NOT_COVERED} test_1_b — "b"${FIX_TEST("test_1_b")}`]);
+  expect(notes).toEqual([]);
+  // a `# comment` inside a fenced shell block within the section is not the next heading
+  const codeInSection = "## done_when\n- [ ] `test_1_a` — a\n```bash\n# run\n- [ ] `test_1_code` — inside the fence\n```\n- [ ] `test_1_b` — b\n";
+  expect(issueDoneWhenItems(codeInSection).map((i) => i.id)).toEqual(["test_1_a", "test_1_b"]);
+  // a prose `Note:` line is not a machine key like `must_not:` — the items after it still count
+  const noteKey = "## done_when\n- [ ] `test_1_a` — a\nNote:\n- [ ] `test_1_b` — b\n\nmust_not:\n- [ ] `test_1_not_an_item` — after the key\n";
+  expect(issueDoneWhenItems(noteKey).map((i) => i.id)).toEqual(["test_1_a", "test_1_b"]);
+  // an earlier unfenced `done_when:` with no items does not hide the section that has them
+  const emptyFirst = "done_when:\nsee below\n\n## done_when\n- [ ] `test_1_a` — a\n";
+  expect(issueDoneWhenItems(emptyFirst).map((i) => i.id)).toEqual(["test_1_a"]);
+});
+
+test("test_232_admitted_done_when_with_items_never_reads_as_no_items", async () => {
+  const { validatePlanHandoff } = await import("../lib/verify-stage.js");
+  const { issueDoneWhenItems } = await import("../lib/context.js");
+  const { queueAdmission } = await import("../lib/admission.js");
+  const admitted = (body) => !queueAdmission({ issue: { number: 1, body, labels: [] }, charter: {} }).reasons.some((r) => /not an explicit job/.test(r));
+  const rejectsDropped = (body, kept, dropped, text) => {
+    const notes = [];
+    const reasons = validatePlanHandoff(planFix({ done_when: [dw232(kept)] }), { issueBody: body, notes });
+    expect(reasons.filter((x) => x.startsWith(NOT_COVERED))).toEqual([`${NOT_COVERED} ${dropped} — "${text}"${FIX_TEST(dropped)}`]);
+    expect(notes).toEqual([]);
+  };
+  // an empty draft section that ends at an ordinary heading does not hide a later done_when section with items
+  const emptyDraft = "## done_when (draft)\n_TBD_\n\n## Notes\nsee the plan\n\n### Done when\n- [ ] `test_1_a` — a\n- [ ] `test_1_b` — b\n";
+  expect(admitted(emptyDraft)).toBe(true);
+  expect(issueDoneWhenItems(emptyDraft).map((i) => i.id)).toEqual(["test_1_a", "test_1_b"]);
+  rejectsDropped(emptyDraft, "test_1_a", "test_1_b", "b");
+  // the only done_when heading and its checklist sit inside a fence: admission counts it, so the parser reads it too
+  const fencedOnly = "## What\n```md\n## done_when\n- [ ] `test_1_a` — a\n- [ ] `test_1_b` — b\n```\n";
+  expect(admitted(fencedOnly)).toBe(true);
+  expect(issueDoneWhenItems(fencedOnly).map((i) => i.id)).toEqual(["test_1_a", "test_1_b"]);
+  rejectsDropped(fencedOnly, "test_1_a", "test_1_b", "b");
+  // GFM ordered task lists (`1. [ ]`, `2) [x]`) are checklist items too
+  const ordered = "## done_when\n1. [ ] `test_9_a` — first\n2) [x] `test_9_b` — second\n3. not a task item\n";
+  expect(admitted(ordered)).toBe(true);
+  expect(issueDoneWhenItems(ordered)).toEqual([{ id: "test_9_a", text: "first" }, { id: "test_9_b", text: "second" }]);
+  rejectsDropped(ordered, "test_9_a", "test_9_b", "second");
+});
+
+// dw5 (plan d10, d11) — a plan reaches the validator only after the plan workflow's structured output, which keeps just the
+// done_when properties CONTRACT_ITEM declares (.claude/workflows/factory-plan.js; undeclared fields are dropped, 1.4.43 #111).
+// The declared set is read from that file, not typed here, so the test follows the schema the planner actually answers in.
+const CONTRACT_ITEM_FIELDS = (() => {
+  const src = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "../../.claude/workflows/factory-plan.js"), "utf8");
+  const block = src.slice(src.indexOf("const CONTRACT_ITEM = {")).split(/\n};/)[0];
+  const props = block.slice(block.indexOf("properties: {"));
+  return [...props.matchAll(/^ {4}([A-Za-z_]\w*):/gm)].map((m) => m[1]);
+})();
+const throughSchema = (plan) => ({
+  ...plan,
+  done_when: plan.done_when.map((d) => Object.fromEntries(Object.entries(d).filter(([k]) => CONTRACT_ITEM_FIELDS.includes(k)))),
+});
+
+test("test_232_schema_carried_plan_covers_issue_items_within_cap", async () => {
+  const { validatePlanHandoff } = await import("../lib/verify-stage.js");
+  // the schema read is real: it declares the contract fields (if this parse broke, every item would be stripped empty)
+  expect(CONTRACT_ITEM_FIELDS).toEqual(expect.arrayContaining(["id", "text", "check", "rubric", "level"]));
+  const coverageOrCap = (reasons) => reasons.filter((r) => r.startsWith(NOT_COVERED) || /done_when has \d+ items/.test(r));
+  // every field the remedy tells the planner to write must survive the schema — advice to write a stripped field cannot be followed
+  const remedyFields = (reason) => [...(reason.match(/\(cover it: (.*)\)$/)?.[1] ?? "").matchAll(/\b([a-z_]+)(?:\.ref\b|: \[)/g)].map((m) => m[1]);
+
+  // (a) an issue whose items carry no test id (the docs-only template form) — positional ids, coverable by a carried field
+  const docsOnly = "## done_when (draft)\n- [ ] `README.md`의 Quickstart가 X를 설명한다\n- [ ] 문서 외 파일은 diff에 없다\n";
+  const docsItem = { id: "dw1", text: "Quickstart explains X", check: { kind: "rubric", ref: "README.md" }, rubric: "a reader can follow it", level: "unit" };
+  const docsPlan = throughSchema(planFix({
+    done_when: [{ ...docsItem, covers: ["issue-dw1", " ISSUE-DW2 ", "d1"], covers_issue: ["issue-dw1", "issue-dw2"] }],
+    dissent_log: [{ id: "d1", role: "skeptic", severity: "medium", objection: "o", resolution: "r" }],
+  }));
+  expect(validatePlanHandoff(docsPlan, { issueBody: docsOnly })).toEqual([]);
+  expect(verifyPlan(docsPlan, { issueBody: docsOnly }).ok).toBe(true);
+  // drop one: the reason names the id and a field the schema carries
+  const docsDropped = throughSchema(planFix({ done_when: [{ ...docsItem, covers: ["issue-dw1"] }] }));
+  const [docsReason, ...docsRest] = coverageOrCap(validatePlanHandoff(docsDropped, { issueBody: docsOnly }));
+  expect(docsRest).toEqual([]);
+  expect(docsReason.startsWith(`${NOT_COVERED} issue-dw2 — "문서 외 파일은 diff에 없다"`)).toBe(true);
+  expect(remedyFields(docsReason).length).toBeGreaterThan(0);
+  for (const f of remedyFields(docsReason)) expect(CONTRACT_ITEM_FIELDS).toContain(f);
+
+  // (b) seven test-id items, covered by six plan items (the default max_done_when) — one item covers two issue ids
+  const ids = ["a", "b", "c", "d", "e", "f", "g"].map((x) => `test_9_${x}`);
+  const seven = `## done_when\n${ids.map((id) => `- [ ] \`${id}\` — behaviour ${id.slice(-1)}`).join("\n")}\n`;
+  const sixItems = ids.slice(0, 6).map((id) => dw232(id));
+  sixItems[5] = dw232(ids[5], { covers: [ids[6]] });
+  const sixPlan = throughSchema(planFix({ done_when: sixItems }));
+  expect(sixPlan.done_when).toHaveLength(6);
+  expect(validatePlanHandoff(sixPlan, { issueBody: seven, maxDoneWhen: 6 })).toEqual([]);
+  expect(verifyPlan(sixPlan, { issueBody: seven, planLimits: { max_done_when: 6 } }).ok).toBe(true);
+  // drop the doubled-up cover: rejected by that id, with advice the schema can carry and that needs no seventh item
+  const fiveCover = throughSchema(planFix({ done_when: ids.slice(0, 6).map((id) => dw232(id)) }));
+  const [r7, ...rest7] = coverageOrCap(validatePlanHandoff(fiveCover, { issueBody: seven, maxDoneWhen: 6 }));
+  expect(rest7).toEqual([]);
+  expect(r7.startsWith(`${NOT_COVERED} ${ids[6]} — "behaviour g"`)).toBe(true);
+  expect(r7).toContain(`covers: ["${ids[6]}"]`);
+  for (const f of remedyFields(r7)) expect(CONTRACT_ITEM_FIELDS).toContain(f);
+});
+
+// ── #233 → #254 (gap P-12 / ledger M-6) — triage 검증이 impact_paths를 [load_bearing].paths에 다시 댄다 ──
+// NEVER_AUTOMATE 덮어쓰기와 같은 자리·같은 모양: 신고 tier가 낮아도 load-bearing 경로를 건드리는 이슈는
+// handoff의 `tier` 자체가 load-bearing으로 올라간다(그 필드를 plan·review·merge·sweeper가 이미 읽는다).
+// 덮어쓴 신고는 `tier_declared`로, 무엇이 덮었는지는 `load_bearing_hit`으로 남는다. 내리는 쪽은 없다.
+// 브랜치 claude/fq-233의 같은 이름 테스트와 다른 점: 거기서는 올림이 `tier_effective`/`tier_source: "impact-paths"`에
+// 실렸다 — #254 plan dw1(rubric: "A raise written only to tier_effective or to a new field fails the bar")이 `data.tier`로 정했다.
+const triage233 = (data) => ({ is_error: false, result: JSON.stringify({ schema: "factory.triage.v1", issue: 233, disposition: "ready", reason: "r", ...data }) });
+const LB233 = ["factory/bin/run-stage.js", "core/ledger/**"];
+
+test("test_233_triage_tier_is_raised_when_impact_paths_hit_load_bearing", () => {
+  // hit — standard로 신고했어도 load-bearing 경로 하나면 tier가 올라간다
+  const hit = verifyStage({ stage: "triage", out: triage233({ tier: "standard", impact_paths: ["factory/lib/context.js", "factory/bin/run-stage.js"] }), agentsLog: log([]), loadBearing: LB233 });
+  expect(hit.ok).toBe(true);
+  expect(hit.data.tier).toBe("load-bearing");
+  expect(hit.data.tier_declared).toBe("standard");              // 덮어쓴 신고는 기록으로 남는다
+  expect(hit.data.load_bearing_hit).toEqual([{ path: "factory/bin/run-stage.js", glob: "factory/bin/run-stage.js" }]);
+  expect(hit.data.disposition).toBe("ready");                   // 판정은 그대로 — tier만 올린다
+
+  // docs 신고 + 글롭 매치도 같다
+  const docs = verifyStage({ stage: "triage", out: triage233({ tier: "docs", impact_paths: ["core/ledger/post.js"] }), agentsLog: log([]), loadBearing: LB233 });
+  expect([docs.data.tier, docs.data.tier_declared]).toEqual(["load-bearing", "docs"]);
+  expect(docs.data.load_bearing_hit).toEqual([{ path: "core/ledger/post.js", glob: "core/ledger/**" }]);
+
+  // miss — 신고 tier 그대로, 올린 흔적 없음
+  const miss = verifyStage({ stage: "triage", out: triage233({ tier: "standard", impact_paths: ["factory/lib/context.js"] }), agentsLog: log([]), loadBearing: LB233 });
+  expect(miss.ok).toBe(true);
+  expect(miss.data.tier).toBe("standard");
+  expect(miss.data.tier_declared).toBeUndefined();
+  expect(miss.data.load_bearing_hit).toBeUndefined();
+
+  // 글롭이 주입되지 않으면 아무것도 올리지 않는다(없는 규칙을 발명하지 않는다)
+  const none = verifyStage({ stage: "triage", out: triage233({ tier: "standard", impact_paths: ["factory/bin/run-stage.js"] }), agentsLog: log([]) });
+  expect(none.data.tier).toBe("standard");
+  expect(none.data.load_bearing_hit).toBeUndefined();
+
+  // 이미 load-bearing으로 신고했으면 그대로 — 내리지 않고, "올렸다"고 적지도 않는다
+  const lb = verifyStage({ stage: "triage", out: triage233({ tier: "load-bearing", impact_paths: ["factory/lib/context.js"] }), agentsLog: log([]), loadBearing: LB233 });
+  expect(lb.data.tier).toBe("load-bearing");
+  expect(lb.data.load_bearing_hit).toBeUndefined();
+  const lbHit = verifyStage({ stage: "triage", out: triage233({ tier: "load-bearing", impact_paths: ["factory/bin/run-stage.js"] }), agentsLog: log([]), loadBearing: LB233 });
+  expect(lbHit.data.tier).toBe("load-bearing");
+  expect(lbHit.data.tier_declared).toBeUndefined();
+  expect(lbHit.data.load_bearing_hit).toBeUndefined();
+
+  // 다른 스테이지는 손대지 않는다 — 재확인은 triage 검증에만 있다
+  const other = verifyStage({ stage: "review", out: out(review), agentsLog: log([]), loadBearing: LB233 });
+  expect(other.data.tier).toBeUndefined();
+  expect(other.data.load_bearing_hit).toBeUndefined();
+});
+
+test("test_233_agent_written_load_bearing_hit_is_scrubbed", () => {
+  // load_bearing_hit·tier_declared는 러너의 필드다 — 스크립트가 계산하지 않은 "hit"이 검증된 handoff에 남거나
+  // tier를 움직이면 안 된다. 입력은 verifyStage의 triage 분기 자체를 지난다(헬퍼 직접 호출이 아니다).
+  const forgedHit = [{ path: "factory/lib/context.js", glob: "factory/lib/**" }];
+  const miss = verifyStage({ stage: "triage", out: triage233({ tier: "standard", impact_paths: ["factory/lib/context.js"], load_bearing_hit: forgedHit, tier_declared: "docs" }), agentsLog: log([]), loadBearing: LB233 });
+  expect(miss.ok).toBe(true);
+  expect(miss.data.tier).toBe("standard");                      // 위조된 hit은 올림을 부르지 않는다
+  expect(miss.data.load_bearing_hit).toBeUndefined();
+  expect(miss.data.tier_declared).toBeUndefined();
+  const lb = verifyStage({ stage: "triage", out: triage233({ tier: "load-bearing", impact_paths: ["factory/bin/run-stage.js"], load_bearing_hit: forgedHit }), agentsLog: log([]), loadBearing: LB233 });
+  expect(lb.data.load_bearing_hit).toBeUndefined();
+  // 글롭이 주입되지 않은 검증에서도 위조는 지워진다
+  const unwired = verifyStage({ stage: "triage", out: triage233({ tier: "standard", impact_paths: ["factory/lib/context.js"], load_bearing_hit: forgedHit }), agentsLog: log([]) });
+  expect(unwired.data.load_bearing_hit).toBeUndefined();
+  // 실제 hit에서는 에이전트 값이 아니라 스크립트가 계산한 값만 남는다
+  const hit = verifyStage({ stage: "triage", out: triage233({ tier: "standard", impact_paths: ["factory/bin/run-stage.js"], load_bearing_hit: forgedHit, tier_declared: "docs" }), agentsLog: log([]), loadBearing: LB233 });
+  expect(hit.data.load_bearing_hit).toEqual([{ path: "factory/bin/run-stage.js", glob: "factory/bin/run-stage.js" }]);
+  expect(hit.data.tier_declared).toBe("standard");
+});
+
 /**
  * #239 (M-7, gap P-13) — a surviving sign-off objection (`signoff-<role>`, injected by the plan workflow) is not a risk a
  * done_when can cover: demanding one only sent the plan to a repair turn and then a person. It passes, and stays visible
@@ -485,7 +835,7 @@ test("test_239_signoff_objections_do_not_require_a_covering_done_when", async ()
   expect(r.data.dissent_log).toEqual([signoff]);                                   // still in the plan, not swallowed
   expect(renderHandoff({ stage: "plan", issue: 7, summary: "s", data: r.data })).toContain(`skeptic: ${objection}`);
   expect(r.data.signoff_objections).toEqual([{ id: "signoff-skeptic", role: "skeptic", text: objection.slice(0, 120) }]);
-  expect(r.planNotes).toEqual([`plan: unresolved sign-off objection from skeptic: ${objection.slice(0, 120)}`]);
+  expect(r.planNotes).toEqual([`plan: unresolved sign-off objection from skeptic: ${objection.slice(0, 120)}`, NO_ITEMS_LINE]);
 
   // The same fixture with an ordinary medium dissent and a signoff-* id that does not name its role: both rejected.
   const mixed = planFix({ dissent_log: [signoff, { id: "d1", role: "operator", severity: "medium", objection: "x" }, { id: "signoff-foo", role: "skeptic", severity: "medium", objection: "y" }] });
@@ -500,7 +850,7 @@ test("test_239_signoff_objections_do_not_require_a_covering_done_when", async ()
   const plain = verifyPlan(planFix());
   expect(plain.ok).toBe(true);
   expect("signoff_objections" in plain.data).toBe(false);
-  expect(plain.planNotes).toEqual([]);
+  expect(plain.planNotes).toEqual([NO_ITEMS_LINE]);   // only #232's line: the issue body here is empty
 });
 
 /**
@@ -519,13 +869,13 @@ test("test_239_skeptic_items_beyond_max_done_when_are_dropped_not_rejected", asy
   const r = verifyPlan(plan, limits);
   expect(r.ok).toBe(true);
   expect(r.data.done_when.map((d) => d.id)).toEqual(["dw1", "dw2", "dw3", "dw4", "dw5", "dw6"]);
-  expect(r.planNotes).toEqual(["plan: skeptic items beyond max_done_when dropped: dw7"]);
+  expect(r.planNotes).toEqual(["plan: skeptic items beyond max_done_when dropped: dw7", NO_ITEMS_LINE]);
 
   // A skeptic item that fits under the cap is kept — nothing is dropped that did not overflow.
   const fits = verifyPlan(planFix({ done_when: [...six.slice(0, 5), dw239(7, { source: "skeptic" })] }), limits);
   expect(fits.ok).toBe(true);
   expect(fits.data.done_when.map((d) => d.id)).toEqual(["dw1", "dw2", "dw3", "dw4", "dw5", "dw7"]);
-  expect(fits.planNotes).toEqual([]);
+  expect(fits.planNotes).toEqual([NO_ITEMS_LINE]);
 
   // Planner 7, unmarked: rejected as today, nothing truncated.
   const seven = planFix({ done_when: [...six, dw239(7)] });
@@ -564,12 +914,12 @@ test("test_239_skeptic_overflow_drops_the_trailing_skeptic_items", async () => {
   }), limits);
   expect(r.reasons).toEqual([]);
   expect(r.data.done_when.map((d) => d.id)).toEqual(["dw1", "dw2", "dw3", "dw4", "dw5", "dw6"]);
-  expect(r.planNotes).toEqual(["plan: skeptic items beyond max_done_when dropped: dw7, dw8"]);
+  expect(r.planNotes).toEqual(["plan: skeptic items beyond max_done_when dropped: dw7, dw8", NO_ITEMS_LINE]);
 
   // Interleaved: a skeptic item between planner items is kept when it is not among the trailing overflow.
   const mid = verifyPlan(planFix({ done_when: [dw239(1), sk(2), dw239(3), dw239(4), dw239(5), dw239(6), sk(7)] }), limits);
   expect(mid.data.done_when.map((d) => d.id)).toEqual(["dw1", "dw2", "dw3", "dw4", "dw5", "dw6"]);
-  expect(mid.planNotes).toEqual(["plan: skeptic items beyond max_done_when dropped: dw7"]);
+  expect(mid.planNotes).toEqual(["plan: skeptic items beyond max_done_when dropped: dw7", NO_ITEMS_LINE]);
 
   // The only cover of dB sits on a dropped trailing item → rejected by name, even though a kept skeptic item exists.
   const o = verifyPlan(planFix({
@@ -590,7 +940,7 @@ test("test_239_signoff_severity_and_verbatim_first_120_chars", async () => {
   const low = verifyPlan(planFix({ dissent_log: [{ id: "signoff-skeptic", role: "skeptic", severity: "low", objection: "minor nit" }] }));
   expect(low.ok).toBe(true);
   expect("signoff_objections" in low.data).toBe(false);
-  expect(low.planNotes).toEqual([]);
+  expect(low.planNotes).toEqual([NO_ITEMS_LINE]);
 
   const objection = "first  line\nsecond\tline   " + "x".repeat(200);
   const head = objection.slice(0, 120);
@@ -598,7 +948,7 @@ test("test_239_signoff_severity_and_verbatim_first_120_chars", async () => {
   const none = verifyPlan(planFix({ dissent_log: [{ id: "signoff-skeptic", role: "skeptic", objection }] }));
   expect(none.ok).toBe(true);
   expect(none.data.signoff_objections).toEqual([{ id: "signoff-skeptic", role: "skeptic", text: head }]);
-  expect(none.planNotes).toEqual([`plan: unresolved sign-off objection from skeptic: first  line second line   ${"x".repeat(94)}`]);
+  expect(none.planNotes).toEqual([`plan: unresolved sign-off objection from skeptic: first  line second line   ${"x".repeat(94)}`, NO_ITEMS_LINE]);
 });
 test("test_239_signoff_role_cannot_forge_review_evidence", async () => {
   // skeptic (load-bearing self-critique): the role is agent text that reaches the agent-unwritable run record verbatim.
@@ -610,7 +960,7 @@ test("test_239_signoff_role_cannot_forge_review_evidence", async () => {
   for (const role of [`skeptic\n${forged}\nz`, `skeptic\r\n${forged}\r\nz`, `skeptic\u2028${forged}\u2029z`]) {
     const v = verifyPlan(planFix({ dissent_log: [{ id: `signoff-${role}`, role, severity: "medium", objection: "still open" }] }));
     expect(v.ok).toBe(true);
-    expect(v.planNotes).toHaveLength(1);
+    expect(v.planNotes).toEqual([expect.any(String), NO_ITEMS_LINE]);
     expect(v.planNotes[0]).toMatch(/^plan: unresolved sign-off objection from skeptic_review-evidence:_run_id=9001_/);
     expect(v.planNotes[0]).not.toMatch(/[\n\r\u2028\u2029]/);
     for (const stage of ["plan", "review"]) {
