@@ -10220,3 +10220,75 @@ test("test_227_review_with_an_invisible_pr_returns_to_planned — a missing PR n
     expect(lines.some((l) => /not visible/.test(l)), label).toBe(false);
   }
 });
+
+// ── #286 — the merge `policyViolations` dep decides mirror applicability from the BASE revision ─────────────────────────
+// The merge stage runs on a checkout of the PR head, so the working tree is the PR's: if the exemption were decided from it,
+// a PR could add `factory/cli/manifest.js` and exempt its own `.factory/**` edits. The dep asks git about `<base>:<marker>`,
+// and every failure ends in today's stricter verdict (no exemption).
+const BASE_286 = "c".repeat(40);
+const MARKERS_286 = ["factory/cli/manifest.js", "factory/cli/install.js", ".factory"];
+const policyDep286 = async ({ atBase, catFile, changed = [".factory/lib/x.js", "factory/lib/x.js"], body = "fix\n\nmust_not:\n- touch: `.factory/**`\n" }) => {
+  const { makeMergePolicyViolationsDep } = await import("../bin/run-stage.js");
+  // the working tree (= the PR head) carries every marker, whatever the base has
+  const root = mkdtempSync(join(tmpdir(), "ktb-286-merge-"));
+  mkdirSync(join(root, "factory/cli"), { recursive: true }); mkdirSync(join(root, ".factory"), { recursive: true });
+  for (const f of ["manifest.js", "install.js"]) writeFileSync(join(root, "factory/cli", f), "// stub\n");
+  const catCalls = [];
+  const run = makeFakeRun([
+    { match: (c, a) => c === "git" && a[0] === "cat-file", result: (c, a) => {
+      catCalls.push(a.at(-1));
+      if (catFile) return catFile(a.at(-1));
+      const [rev, ...rest] = a.at(-1).split(":");
+      return rev === BASE_286 && atBase.includes(rest.join(":")) ? { code: 0, stdout: "", stderr: "" } : { code: 128, stdout: "", stderr: "fatal: path does not exist" };
+    } },
+    { match: (c, a) => c === "git" && a[0] === "diff" && a.includes("--name-status"), result: { code: 0, stdout: changed.map((p) => `M\t${p}\n`).join(""), stderr: "" } },
+    // .factory/harness.toml in the diff also runs the frozen-section check (-U0 + git show) — empty hunks, no frozen edit
+    { match: (c, a) => c === "git" && (a[0] === "show" || (a[0] === "diff" && a.includes("-U0"))), result: { code: 0, stdout: "", stderr: "" } },
+  ]);
+  const recorded = [];
+  const dep = makeMergePolicyViolationsDep({
+    run, root, gh: { issue: async () => ({ body }) }, issue: 286, mergeBase: async () => BASE_286,
+    getHarness: () => ({ protected: {}, test: { test_glob: ["test/**"] } }), recordLine: (l) => recorded.push(l),
+  });
+  const r = await dep();
+  (await import("node:fs")).rmSync(root, { recursive: true, force: true });
+  return { r, catCalls, recorded, touched: r.violations.filter((v) => /^must-not-touch — /.test(v.rule)).map((v) => v.file) };
+};
+
+test("test_286_must_not_mirror_exemption_off_when_not_applicable_and_not_from_pr_tree", async () => {
+  // base is the engine (all markers at <base>) → the family path is exempt
+  const on = await policyDep286({ atBase: MARKERS_286 });
+  expect(on.r.ok).toBe(true);
+  expect(on.touched).toEqual([]);
+  expect(on.catCalls.length).toBeGreaterThan(0);
+  expect(on.catCalls.every((c) => c.startsWith(`${BASE_286}:`))).toBe(true);
+  // the PR head adds factory/cli/manifest.js but the base lacks it → nothing exempt, the tree is not consulted
+  const added = await policyDep286({ atBase: ["factory/cli/install.js", ".factory"] });
+  expect(added.touched).toEqual([".factory/lib/x.js"]);
+  // adopter repo: no markers at base → today's verdict
+  const adopter = await policyDep286({ atBase: [".factory"] });
+  expect(adopter.touched).toEqual([".factory/lib/x.js"]);
+  // the base-side lookup itself fails (throws) → fail closed
+  const broken = await policyDep286({ atBase: MARKERS_286, catFile: () => { throw new Error("spawn git ENOENT"); } });
+  expect(broken.r.ok).toBe(true);
+  expect(broken.touched).toEqual([".factory/lib/x.js"]);
+  // a non-family .factory/** path is never exempt, even on an engine base
+  const nonFamily = await policyDep286({ atBase: MARKERS_286, changed: [".factory/harness.toml", ".factory/lib/x.js"] });
+  expect(nonFamily.touched).toEqual([".factory/harness.toml"]);
+  // main() hands the merge stage exactly this dep
+  const src = readFileSync(new URL("../bin/run-stage.js", import.meta.url), "utf8");
+  expect(src).toMatch(/policyViolations:\s*makeMergePolicyViolationsDep\(/);
+});
+
+test("test_286_merge_records_mirror_exemption_count", async () => {
+  const two = await policyDep286({ atBase: MARKERS_286, changed: [".factory/lib/x.js", ".factory/bin/y.js", "factory/lib/x.js"] });
+  expect(two.r.mirror_excluded).toBe(2);
+  const lines = two.recorded.filter((l) => /runner-generated mirror path/.test(l));
+  expect(lines).toEqual(["policy: issue must_not contract — runner-generated mirror paths excluded: 2"]);
+  // nothing excluded → no such line (not applicable, or no family path in the diff, or no contract)
+  for (const quiet of [
+    await policyDep286({ atBase: [] }),
+    await policyDep286({ atBase: MARKERS_286, changed: ["factory/lib/x.js"] }),
+    await policyDep286({ atBase: MARKERS_286, body: "no contract here" }),
+  ]) expect(quiet.recorded.filter((l) => /mirror path/.test(l))).toEqual([]);
+});
