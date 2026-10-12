@@ -310,8 +310,9 @@ const SIGNOFF_TEXT_MAX = 120;
  * #239 — agent text bound for the agent-unwritable run record as a single token (a sign-off role, a dropped skeptic
  * done_when id): any whitespace/control run — line terminators \n, \r, U+2028/9 included — becomes `_`, so it can never
  * start a `review-evidence:` / `stage-settled:` line of its own (same class as review-r1's sec1).
+ * #289 (arch1) — the ONE source of this fold: run-stage.js's `reviewR1Line` imports it; do not copy it.
  */
-const recordToken = (t) => String(t ?? "?").replace(/[\s\u0000-\u001f\u007f-\u009f]+/g, "_");
+export const recordToken =(t) => String(t ?? "?").replace(/[\s\u0000-\u001f\u007f-\u009f]+/g, "_");
 
 /**
  * #239 — what the plan verifier does to a plan **before** it checks it, computed in one place so the validator and

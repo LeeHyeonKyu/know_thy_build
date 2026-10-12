@@ -30,7 +30,7 @@ import { resolveReviewRoster } from "../lib/review-roster.js";
 import { startHeartbeat } from "../lib/heartbeat.js";
 import { readProgress, progressMarker } from "../lib/progress.js";
 import { readAgentsLog } from "../lib/agents-log.js";
-import { verifyStage, hitMaxTurns, hitApiError, isNonTransientApiError, qaEvidenceUnusable, deriveReworkPins } from "../lib/verify-stage.js";
+import { verifyStage, hitMaxTurns, hitApiError, isNonTransientApiError, qaEvidenceUnusable, deriveReworkPins, recordToken } from "../lib/verify-stage.js";
 import { readTranscript, extractStageArtifact } from "../lib/stage-artifact.js";
 import { matchesAny } from "../lib/glob.js";
 import { aggregateReview } from "../lib/aggregate.js";
@@ -2383,8 +2383,8 @@ export function reviewR1Line(r1, final) {
   // sec1 (rework): role/verdict are agent text and this line lands in the agent-unwritable run record, ahead of (on the
   // incomplete exit: instead of) the real `review-evidence:` line. Any whitespace/control run — line terminators included —
   // becomes `_`, so the line stays ONE line and agent text can never start a parseable evidence line of its own.
-  const oneLine = (t) => String(t ?? "?").replace(/[\s\u0000-\u001f\u007f-\u009f]+/g, "_");
-  return `review-r1: ${normalizeVerdicts(before.map((x) => ({ role: oneLine(x.role), verdict: oneLine(x.verdict) })))} r2_flipped=${flipped}`;
+  // #289 (arch1) — the fold is verify-stage.js's `recordToken`, the same one its sign-off/dropped-id record lines use; one source.
+  return `review-r1: ${normalizeVerdicts(before.map((x) => ({ role: recordToken(x.role), verdict: recordToken(x.verdict) })))} r2_flipped=${flipped}`;
 }
 
 export const K_TWICE = "K exhausted twice (one self-restart used)";

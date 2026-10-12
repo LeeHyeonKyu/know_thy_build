@@ -4829,6 +4829,10 @@ diff로 좁히는 것은 `templates/factory/**`에 있고 #212의 must_not이다
 `review-r1:`은 자리표시 줄로 남는다. 기록에 들어가는 에이전트 문자열(role·id·verdict)은 한 토큰으로, 반박 본문은 한 줄로 바뀌어 `review-evidence:`/
 `stage-settled:` 줄을 위조하지 못한다 — 핀: `test_239_agent_text_cannot_forge_a_record_line`.
 
+**접기는 한 곳에 있다(#289, arch1)**: 그 한 토큰 접기는 `factory/lib/verify-stage.js`의 export `recordToken` 하나다. `run-stage.js`의 `reviewR1Line`은
+기존 `../lib/verify-stage.js` import로 그것을 가져다 쓰고 자기 복사본을 두지 않는다 — 두 생산자의 토큰은 바이트 단위로 같다. 핀:
+`test_239_record_line_fold_is_single_sourced`(동작: 적대적 입력에서 세 기록 줄의 토큰이 `recordToken(input)`과 같다, 구조: import와 복사본 부재).
+
 **남는 것**: 템플릿이 `source: "skeptic"`과 `r1_verdicts`를 내기 전까지 M-9와 M-2의 채워진 경로는 운영에서 발화하지 않는다(템플릿 짝은 운영 세션 PR —
 `templates/**`는 이 이슈의 must_not). 그때까지 `templates/factory/claude/workflows/factory-plan.js:496-500`의 주석(과 `.claude` 사본)은 "못 덮으면 사람에게
 간다"고 말하는 **낡은 문장**이다. `{id:'signoff-x', role:'x'}`를 지어내는 합성자는 덮임 규칙을 피할 수 있고 그 흔적은 기록 줄 하나다(plan open_risks).
