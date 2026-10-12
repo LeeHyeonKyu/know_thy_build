@@ -4896,3 +4896,68 @@ PullRequest`)에 기대고 있다. gh가 문구를 바꾸면 gone이 unknown으�
 분류된다(sec-s1, 후속 이슈 — 체크아웃이 origin의 브랜치만 fetch하므로 리뷰에 닿지는 않는다). 빌더 프롬프트에는 "handoff PR이 비면
 `gh pr create`" 규칙이 없다(arch4, `.claude/**`는 보호 경로 — 후속 이슈); 2번이 그 빈자리를 needs-human으로 닫는다. main()이 2번의 `prView`
 dep을 싣는지는 소스 문자열 핀으로 고정하지 않는다(계획 non_goal) — 동작 테스트는 runStage에 dep을 주입해 돈다.
+
+## ADR-044 Actions 없는 모드의 마지막 두 단계 — 로컬 integrity 판정과 운영 세션의 로컬 머지; 운영자의 존재가 거부권 창의 기다림을 대신한다(ADR-033 개정) — 2026-10-12 (#236, 허점 원장 B-1 P-7b·P-7c)
+
+**문제**: Actions가 막히면 필수 체크 `factory/integrity`가 붙지 않고, merge는 로컬에서 금지이며, `--remote`도 Actions다 — approved 이슈가
+영영 머지되지 않는다. 로컬 연쇄(P-7a)가 있어도 마지막 두 단계가 Actions에 묶여 있으면 Actions 없는 모드가 아니다.
+
+**결정**:
+1. `factory integrity <pr>`(`factory/cli/integrity.js`): CI 잡과 **같은 함수**(`integrityCheck`)로 PR **head sha**를 판정하고(diff는
+   `<merge-base>...<sha>`, 내용은 `git show <sha>:<path>` — 운영자의 작업 트리가 아니다) `factory/integrity` commit status를 success 또는
+   failure로 올린다. 설명은 `local:<login>`(`gh api user`). 러너(§2의 러너 표식 — 같은 함수 `ciRunnerMarker`)에서, 로그인을 모를 때, head 커밋이 클론에 없을 때,
+   merge-base를 못 구할 때는 아무것도 올리지 않는다. 보호 경로를 바꾼 PR은 **failure**다(plan dw1 "failure on a violating or protected-path
+   fixture", rework spec1) — 판정 객체는 CI와 같은 `integrityCheck`의 것이고, CI bin은 그 `protected`를 알림으로만 남기지만(KTB-5, `bin/integrity.js`)
+   로컬 상태는 로컬 머지 door가 읽는 것이라 사람이 머지해야 하는 PR을 운영 세션이 초록으로 만들지 않는다. 대가: Actions 없는 저장소에서 보호 경로
+   PR은 로컬 상태로 초록이 되지 않는다 — 그 PR은 원래 사람이 머지한다(merge 스테이지 `protectedPaths`). — `test_236_local_integrity_posts_the_same_verdict_as_ci_and_refuses_on_a_runner`(— protected-path fixtures are posted failure 포함),
+   `test_236_local_integrity_judges_the_pr_head_sha_not_the_worktree`
+2. `factory run merge <issue>`: 운영 세션(러너가 아님)만 merge 스테이지를 로컬에서 돌린다("merge는 로컬 금지" → "운영 세션에서만 로컬
+   허용"). `cli/run.js`가 `FACTORY_OPERATOR_MERGE=1`을 싣고, run-stage는 러너 표식 — `GITHUB_ACTIONS`·`GITHUB_RUN_ID`·`RUNNER_TEMP`
+   (GitHub이 모든 러너 스텝에 싣고 `$GITHUB_ENV`로 덮을 수 없다), merge 잡 스텝 env의 `FACTORY_TWO_ACTOR`·`FACTORY_RUNNER_ID=gha-…` — 중
+   하나라도 env에 있으면(빈 값도) 그 표식을 무시한다(`isOperatorMerge`) — 위조한 표식으로도 러너는 창을 연다. 이 판정은 merge-stage
+   `ciRunnerMarker` 하나이고 `cli/run.js`·`cli/integrity.js`·`isOperatorMerge`가 모두 그것을 부른다(rework arch1 — `test_236_local_merge_runs_merge_stage_with_the_operator_token_and_no_veto_wait — every runner marker refuses both entry points, as isOperatorMerge does`). 두 배우 모드의 머지 PAT은
+   팩토리 로그인 목록에 없는 사람 계정이라 행위자 검사로는 러너를 가르지 못한다; 그래서 표식이 여럿이다. 그것을 전부 지울 수 있는 것은
+   merge 스텝 안에서 도는 엔진 코드 자신뿐이고, 그 너머는 이 거름망의 한계다. 행위자 검사는 그대로다: 머지하는 계정(`gh api user`)이
+   팩토리 계정이거나 사람(`User`)이 아니면 거부한다. 운영 모드의 팩토리 계정(H1b와 door가 같이 쓴다)은 운영자 env의 `FACTORY_BOT_LOGIN`
+   **하나에서만** 온다 — 이슈 코멘트(하트비트)는 보지 않는다: 하트비트의 runner 필드는 코멘트 본문이라 누구든 적고, 러너가 돈 적 없는 Actions
+   없는 저장소에서는 위조 하나가 그 작성자를 H1b의 팩토리 계정으로 만든다(skeptic r5 — H1b를 푸는 것은 plan non_goal). 없으면 거부하고 사유가
+   `FACTORY_BOT_LOGIN`을 말한다. `--remote`는 그대로다. 거부 문구: 운영자가 보는 거부(러너 표식, env를 넘긴 경로)는 CI 전용·`--remote`를
+   말하지 않는다(dw4). env를 **주입하지 않은** `runCommand` 호출자에게만 옛 문구 "merge runs only in CI (branch protection)"가 남는다 —
+   그 호출자는 러너가 아님을 증명하지 못하므로 거부하고, 기존 테스트(`run-cli.test.js` "stage merge → error, runs only in CI")가 그 문구를
+   단언하는데 이슈 본문에 `tests_changed_allowed:`가 없어 그 단언을 바꿀 수 없다(tests_are_load_bearing). 실제 진입점 `cli/index.js`는 env를
+   넘기므로 운영자는 그 문구를 보지 않는다 — dw4의 문구 조항은 이 범위로 읽는다.
+   — `test_236_local_merge_runs_merge_stage_with_the_operator_token_and_no_veto_wait`
+3. **ADR-033 개정**: merge-stage의 새 dep `operatorPresent`(정확히 `true`일 때만)는 거부권 창의 **기다림 하나**만 지운다 — 창 상태·알림 코멘트·
+   라벨 폴링·sleep이 없다. 다만 이미 서 있는 `factory:veto`는 기다림이 아니므로 **한 번** 읽는다: 붙어 있으면 사람에게 넘기고, 읽지 못하면
+   막힌 것으로 본다(rework sec1). **이것은 plan dw3의 "never … reads the veto window"를 이 ADR이 명시적으로 고친 것이다**: 그 읽기는
+   창이 아니라 이 런의 시계 한 점(`since` = 지금)에서 한 번 하는 라벨 읽기이고, 창 상태·알림·폴링·시계 진행은 없다. 대신 새 거부 경로가
+   하나 생긴다 — 라벨을 읽지 못하면 머지하지 않는다(창이 있을 때도 같은 실패는 판정 불가였다). 소유자가 이 개정을 받지 않으면 되돌릴 것은
+   merge-stage `standingVeto` 한 곳이다. — `test_236_operator_present_skips_only_the_veto_window — the standing-veto read is one point read at now, never the window`. 창 앞뒤의 차단기, 창 자리의 리뷰 재검증(H1b 포함), mergeGates, ready 뒤 재확인(head가 움직였는지 포함)은
+   그대로이고 각각 이름을 대고 거부한다. H1b는 풀리지 않는다: `factory/review`·`factory/gates`는 여전히 팩토리 계정이 올린 것이어야 하고,
+   로컬 머지의 거부 사유가 그 말을 덧붙인다. dep이 없으면 같은 PR이 오늘처럼 창을 연다. 근거: 로컬 머지를 부른 운영 세션이 곧 거부권자다
+   (소유자에게 남는 것은 revert·`factory:veto`·차단기 리셋 — ADR-039 §4). — `test_236_operator_present_skips_only_the_veto_window`
+4. 로컬 머지의 문: mergePr 전에 run-stage가 운영 door와 **같은** `operatorMergeVerdict`(같은 `gh pr view` 필드, 같은 CHARTER 스위치
+   `self_change.operator_merge_judge`, 같은 엔진 판정)를 코드로 부른다 — 훅은 node가 부르는 머지를 보지 못한다. door 파일이 든 PR과
+   GREEN이 아닌 체크(같은 context의 CI 체크와 로컬 상태가 함께 있으면 어느 하나라도)는 거부된다. `factory/cli/integrity.js`는 DOOR_FILES에
+   들어갔다. 그 상태를 소비해 기다림을 건너뛸지 정하는 판정 코드 — `factory/lib/merge-stage.js`·`factory/bin/run-stage.js`와 그 설치본 —
+   도 DOOR_FILES다(rework sec1/arch2): 생산자만 두면 소비자를 약하게 고친 PR이 운영 door로 머지되고 그 뒤의 모든 로컬 머지가 약해진
+   문을 지난다. 그래서 이 두 엔진 파일을 건드리는 PR은 운영 door로 머지되지 않는다(공장의 자기 변경 머지는 그대로다).
+   **소유자 서명 사항**: 이 네 항목(두 파일과 설치본)은 dw5가 요구한 `factory/cli/integrity.js` 하나를 넘는다. `operator-merge.js`의
+   `files.filter(isDoorFile)`이 이 목록을 읽으므로, `operator-merge*.js`를 고치지 않고도 운영 door(`operator-merge-check.js`, ADR-039 §2·
+   CLAUDE.md "운영 머지" 2번의 `factory/**` 핫픽스 경로)의 동작이 바뀐다 — run-stage.js·merge-stage.js를 건드리는 **모든** 운영 머지가
+   "the door cannot open itself — a person merges"로 사람에게 간다. plan non_goal("Changes to operator-merge.js, operator-merge-check.js …")은
+   파일을 지키고 이 변경은 그 파일을 고치지 않지만, door의 거동을 바꾼다는 점에서 그 의도와 부딪친다. rework must_fix sec1/arch2가 요구해 남겼다.
+   이 PR은 door 파일을 바꾸므로 소유자가 머지한다; 소유자가 이 확장을 받지 않으면 되돌릴 것은 `non-judge-paths.js` DOOR_FILES의 그 네 줄이다(그때 로컬 머지 door는
+   생산자만 지킨다).
+   — `test_236_local_merge_refuses_door_files_and_non_green_checks`
+5. `factory/integrity`는 이 head에 있어야 한다(`operatorMergeVerdict`는 없는 체크를 묻지 않는다): CI check run이 GREEN이거나, 이 head의
+   모든 `factory/integrity` 상태가 `local:<login>`·success·생성자 로그인 = 설명의 로그인·팩토리 계정 아님·사람 계정(`User`)이어야 한다.
+   옛 head의 상태는 세지 않는다. 행위자 로그인을 모르거나, 행위자가 팩토리 계정이거나 사람 계정이 아니면 거부한다. 머지 뒤 감사 줄 `local-merge pr=<n> sha=<sha> actor=<login> veto=skipped`가
+   run 기록과 stderr에 남는다. — `test_236_local_merge_refuses_stale_head_status_and_nonhuman_actor`
+
+**남는 것**(plan open_risks): 브랜치 보호의 L0 context는 앱에 묶이지 않아 statuses:write 토큰이 올린 아무 `factory/integrity`나 UI·`--admin`
+머지를 연다 — 5번은 로컬 머지 경로만 지킨다. 소유자의 사람 토큰을 쥔 에이전트 세션은 사람 계정 검사를 통과한다; 구조적 경계는 door 변경의
+사람 머지와 소유자의 거부권이다. P-7a가 로컬의 review/gates 게시자를 정하기 전에는 진짜 Actions 없는 저장소의 로컬 머지가 H1b에서 멈출 수
+있다. 창의 기다림이 실제로 있는 것은 자기 변경 경로(판정·비판정) PR뿐이므로, 이 개정의 실효는 그 PR들에서 소유자의 15분 창을 운영 세션이
+대신하는 것이다(skeptic d1 — 이 PR이 door 파일을 바꾸므로 소유자가 머지하며 그 판단을 한다). **되돌리기**: `git revert` — 남는 것은 이미 올라간
+`local:` 상태와 이미 머지된 PR뿐이다.

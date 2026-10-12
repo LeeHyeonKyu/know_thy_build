@@ -4285,3 +4285,200 @@ test("test_286_must_not_and_role_section_violations_get_separate_headings", asyn
     expect(r.body).not.toContain(ROLE_HEADING_286);
   }
 });
+
+// ── #236 (ADR-044) — operator presence replaces the veto WAIT, and nothing else ─────────────────────────────────────────
+import { readFileSync as readFileSync236 } from "node:fs";
+import { LOCAL_MERGE_H1B_NOTE } from "../lib/merge-stage.js";
+
+const OPERATOR_OK_236 = () => vi.fn(async () => ({ ok: true, reasons: [], actor: "alice", detail: "operator door: 2 file(s), checks green, factory/integrity local:alice on bbbbbbb" }));
+/** The self-change fixture (the only path that has a window today) in operator mode — no clock, no job budget wired. */
+const operatorD236 = (over = {}) => selfD179({ operatorPresent: true, operatorMergeCheck: OPERATOR_OK_236(), jobStartedAt: undefined, jobTimeoutMinutes: undefined, ...over });
+const windowUntouched236 = (d, at) => {
+  for (const dep of [d.vetoWindow.open, d.vetoWindow.read, d.sleep]) expect(dep, at).not.toHaveBeenCalled();
+  expect(d.vetoLabel.mock.calls.length, at).toBeLessThanOrEqual(1);   // sec1: one read of the standing label, never a poll
+  expect(d.comment.mock.calls.some(([, body]) => /거부권 창/.test(String(body))), at).toBe(false);
+};
+const refusedNoMerge236 = (d, lines, at, why) => {
+  expect(d.mergePr, at).not.toHaveBeenCalled();
+  expect(d.transition.mock.calls.map((x) => x[0].to), at).not.toContain("factory:merged");
+  expect(lines.join("\n"), at).toMatch(why);
+};
+
+test("test_236_operator_present_skips_only_the_veto_window", async () => {
+  // (a) operator present, everything green → merged with no window: no status, no announcement, no label poll, no sleep.
+  for (const route of ["non_judge", "judge"]) {
+    const d = route === "judge"
+      ? operatorD236({ protectedPaths: vi.fn(async () => ({ ok: true, files: BASE_FIXTURES_179.judge.files })), selfChange: { auto_merge_non_judge: false, auto_merge_judge: true, veto_minutes: 60 }, reviewRoster: vi.fn(async () => ({ ok: true, roles: ["correctness", "qa"], tier: "load-bearing" })) })
+      : operatorD236();
+    const { code, lines } = await run179(d);
+    expect(code, route).toBe(0);
+    windowUntouched236(d, route);
+    expect(d.breaker, route).toHaveBeenCalledTimes(2);                       // before and after, as around a window
+    expect(d.reviewEvidence.mock.calls.length, route).toBeGreaterThanOrEqual(2); // the review is verified again where the window was
+    expect(d.operatorMergeCheck, route).toHaveBeenCalledWith({ pr: 9, sha: HEAD });
+    expect(d.operatorMergeCheck.mock.invocationCallOrder[0], route).toBeLessThan(d.mergePr.mock.invocationCallOrder[0]);
+    expect(d.mergePr, route).toHaveBeenCalledTimes(1);
+    expect(d.transition.mock.calls.map((x) => x[0].to), route).toEqual(["factory:merged"]);
+    expect(lines.some((l) => /veto window skipped — operator present/.test(l)), route).toBe(true);
+    expect(lines, route).toContain(`local-merge pr=9 sha=${HEAD} actor=alice veto=skipped`);
+  }
+
+  // (b) every check around the wait still refuses in operator mode, each with a named reason, and nothing merges.
+  const OPEN = { ok: true, open: true, since: "2026-10-12T00:00:00.000Z", reason: "revert streak" };
+  const CLOSED = { ok: true, open: false, since: null, reason: null, detail: "closed" };
+  let n = 0;
+  const cases = [
+    ["breaker open before", { breaker: vi.fn(async () => OPEN) }, /breaker open since/],
+    ["breaker open after", { breaker: vi.fn(async () => (++n === 1 ? CLOSED : OPEN)) }, /breaker open since/],
+    ["H1b — review/gates not posted by a factory account", {
+      commitStatuses: vi.fn(async () => [
+        { context: "factory/review", state: "success", creatorLogin: "alice" },
+        { context: "factory/gates", state: "success", creatorLogin: "alice" },
+      ]),
+    }, /not a factory account[\s\S]*must come from a factory account/],
+    ["mergeGates not green", { mergeGates: vi.fn(async () => ({ checksGreen: false, integrityGreen: true })) }, /mergeGates — required checks not GREEN/],
+    ["re-check after ready not green", { mergeGates: (() => { let k = 0; return vi.fn(async () => (++k === 1 ? { checksGreen: true, integrityGreen: true } : { checksGreen: true, integrityGreen: false })); })() }, /re-check after ready — integrity not GREEN/],
+    ["head moved after review", { prHeadShaLive: vi.fn(async () => "c".repeat(40)) }, /PR head moved during this run/],
+    ["operator door refuses", { operatorMergeCheck: vi.fn(async () => ({ ok: false, reasons: ["the door cannot open itself — a person merges a change to the operator door: factory/lib/operator-merge.js"] })) }, /local merge refused — the door cannot open itself/],
+    ["operator door not wired", { operatorMergeCheck: undefined }, /local merge refused — the operator door check is not wired/],
+    ["operator door throws", { operatorMergeCheck: vi.fn(async () => { throw new Error("gh pr view failed"); }) }, /local merge refused — .*gh pr view failed/],
+  ];
+  for (const [label, over, why] of cases) {
+    const d = operatorD236(over);
+    const { code, lines } = await run179(d);
+    expect(code, label).toBe(2);
+    refusedNoMerge236(d, lines, label, why);
+    windowUntouched236(d, label);
+    expect(lines.some((l) => l.startsWith("local-merge ")), label).toBe(false);
+  }
+  expect(LOCAL_MERGE_H1B_NOTE).toMatch(/factory\/review and factory\/gates must come from a factory account/);
+
+  // (c) the dep absent (or anything but `true`) → the same fixture opens the window exactly as today; the door check is not asked.
+  for (const [label, op] of [["absent", undefined], ["string \"true\"", "true"], ["1", 1]]) {
+    const d = selfD179({ operatorMergeCheck: OPERATOR_OK_236(), ...(op === undefined ? {} : { operatorPresent: op }) });
+    const { code, lines } = await run179(d);
+    expect(code, label).toBe(0);
+    expect(d.vetoWindow.open, label).toHaveBeenCalledTimes(1);
+    expect(d.sleep.mock.calls.length, label).toBe(12);
+    expect(d.operatorMergeCheck, label).not.toHaveBeenCalled();
+    expect(lines.some((l) => /veto window skipped/.test(l) || l.startsWith("local-merge ")), label).toBe(false);
+  }
+  // …and an ordinary (non-self-change) PR without the dep keeps today's record exactly: no door check, no audit line.
+  {
+    const plain = baseD({ operatorMergeCheck: OPERATOR_OK_236() });
+    const { lines, record } = makeRecord();
+    expect(await run(plain, { record })).toBe(0);
+    expect(plain.operatorMergeCheck).not.toHaveBeenCalled();
+    expect(lines.some((l) => l.startsWith("local-merge ") || /operator/.test(l))).toBe(false);
+  }
+
+  // (d) the amendment is recorded as its own ADR entry that names ADR-033.
+  const decisions = readFileSync236(new URL("../../docs/factory/DECISIONS.md", import.meta.url), "utf8");
+  const entry = /^## ADR-044 [^\n]*\n[\s\S]*?(?=^## ADR-|(?![\s\S]))/m.exec(decisions)?.[0] ?? "";
+  expect(entry).toMatch(/#236/);
+  expect(entry).toMatch(/ADR-033/);
+  expect(entry).toMatch(/operatorPresent/);
+});
+
+test("test_236_operator_present_skips_only_the_veto_window — and the local mergePr pins the judged head", async () => {
+  // A local merge of an ordinary (non-self-change) PR: the operator door judged HEAD, then a push lands before the squash.
+  // The merge call must carry the judged head, so the forge refuses the moved head instead of squashing a tree no
+  // factory/integrity ever judged. The forge fake behaves like GitHub's --match-head-commit: no pin → it merges whatever is live.
+  const MOVED = "c".repeat(40);
+  let live = HEAD;
+  const merged = [];
+  const d = baseD({
+    operatorPresent: true,
+    operatorMergeCheck: vi.fn(async ({ sha }) => { const v = { ok: sha === live, reasons: sha === live ? [] : ["head moved"], actor: "alice" }; live = MOVED; return v; }),
+    mergePr: vi.fn(async (pr, opts = {}) => {
+      if (opts.matchHeadCommit !== undefined && opts.matchHeadCommit !== live) throw new Error(`Head branch was modified (expected ${opts.matchHeadCommit.slice(0, 7)})`);
+      merged.push(live);
+    }),
+  });
+  const { lines, record } = makeRecord();
+  const code = await run(d, { record });
+  expect(d.operatorMergeCheck).toHaveBeenCalledWith({ pr: 9, sha: HEAD });
+  expect(d.mergePr.mock.calls).toEqual([[9, { matchHeadCommit: HEAD }]]);
+  expect(merged).toEqual([]);                                             // the unjudged head was never squashed
+  expect(code).toBe(2);
+  expect(d.transition.mock.calls.map((x) => x[0].to)).not.toContain("factory:merged");
+  expect(lines.join("\n")).toMatch(/mergePr FAIL — merge API failed: Head branch was modified/);
+
+  // The same fixture with the head standing still merges exactly the judged head.
+  live = HEAD;
+  const still = baseD({ operatorPresent: true, operatorMergeCheck: OPERATOR_OK_236(), mergePr: vi.fn(async () => { merged.push(live); }) });
+  expect(await run(still, makeRecord())).toBe(0);
+  expect(still.mergePr.mock.calls).toEqual([[9, { matchHeadCommit: HEAD }]]);
+  expect(merged).toEqual([HEAD]);
+});
+
+// sec1 (rework) — skipping the WAIT must not skip the owner's STANDING `factory:veto`. The label is read once, through the real
+// producer (run-stage `makeMergeSelfChangeDeps().vetoLabel`) over a fake gh: only a label that is on the issue now stops the merge.
+import { makeMergeSelfChangeDeps as makeMergeSelfChangeDeps236 } from "../bin/run-stage.js";
+import { VETO_LABEL as VETO_LABEL236 } from "../lib/label-catalog.js";
+
+test("test_236_operator_present_skips_only_the_veto_window — and a standing factory:veto on the issue still stops a local merge", async () => {
+  const OLD = "2026-09-01T00:00:00.000Z";   // the label event predates this run (attached before anyone asked for the merge)
+  const realVeto = (labels) => {
+    const gh = { labelEvents: vi.fn(async () => [{ login: "owner", at: OLD }]), issue: vi.fn(async () => ({ labels })) };
+    return { gh, vetoLabel: vi.fn(makeMergeSelfChangeDeps236({ gh, issue: 7 }).vetoLabel) };
+  };
+  for (const route of ["non_judge", "judge"]) {
+    const judge = route === "judge"
+      ? { protectedPaths: vi.fn(async () => ({ ok: true, files: BASE_FIXTURES_179.judge.files })), selfChange: { auto_merge_non_judge: false, auto_merge_judge: true, veto_minutes: 60 }, reviewRoster: vi.fn(async () => ({ ok: true, roles: ["correctness", "qa"], tier: "load-bearing" })) }
+      : {};
+    // (a) the owner's label stands on #7 → refused, handed to a person, nothing merged, and still no window, no wait.
+    {
+      const { gh, vetoLabel } = realVeto(["factory:approved", VETO_LABEL236]);
+      const d = operatorD236({ ...judge, vetoLabel });
+      const { code, lines } = await run179(d);
+      expect(code, route).toBe(2);
+      refusedNoMerge236(d, lines, route, /vetoed by @owner/);
+      expect(d.transition.mock.calls.map((x) => x[0].to), route).toContain("factory:needs-human");
+      expect(gh.issue, route).toHaveBeenCalled();
+      expect(vetoLabel, route).toHaveBeenCalledTimes(1);                          // one read, not a poll
+      for (const dep of [d.vetoWindow.open, d.vetoWindow.read, d.sleep]) expect(dep, route).not.toHaveBeenCalled();
+      expect(lines.some((l) => l.startsWith("local-merge ")), route).toBe(false);
+    }
+    // (b) the label was attached once and removed before the merge → only a STANDING veto counts here: the merge goes through.
+    {
+      const { vetoLabel } = realVeto(["factory:approved"]);
+      const d = operatorD236({ ...judge, vetoLabel });
+      const { code, lines } = await run179(d);
+      expect(code, route).toBe(0);
+      expect(d.mergePr, route).toHaveBeenCalledTimes(1);
+      expect(vetoLabel, route).toHaveBeenCalledTimes(1);
+      expect(d.vetoLabel.mock.invocationCallOrder[0], route).toBeLessThan(d.mergePr.mock.invocationCallOrder[0]);
+      expect(lines, route).toContain(`local-merge pr=9 sha=${HEAD} actor=alice veto=skipped`);
+    }
+  }
+  // (c) the label cannot be read → not "no veto": blocked, nothing merged.
+  for (const [label, vetoLabel] of [["ok:false", vi.fn(async () => ({ ok: false, reason: "label events unreadable" }))], ["throws", vi.fn(async () => { throw new Error("socket hang up"); })], ["unwired", undefined]]) {
+    const d = operatorD236({ vetoLabel });
+    const { code, lines } = await run179(d);
+    expect(code, label).toBe(2);
+    refusedNoMerge236(d, lines, label, /standing factory:veto could not be computed/);
+    expect(d.transition.mock.calls.map((x) => x[0].to), label).toContain("factory:blocked");
+  }
+});
+
+// ── #236 skeptic r6 — dw3 says the operator path "never reads the veto window". The one label read sec1 added is not the
+// window: it is a single point read at this run's own clock (since = now, so no window-era event can be in it), it happens
+// once, the clock never moves (nothing waits), and no window status/announcement exists for it to read. A poll, a since that
+// reaches back to an opened window, or a second read would each be the window coming back — this case fails on all three. ──
+test("test_236_operator_present_skips_only_the_veto_window — the standing-veto read is one point read at now, never the window", async () => {
+  for (const route of ["non_judge", "judge"]) {
+    const judge = route === "judge"
+      ? { protectedPaths: vi.fn(async () => ({ ok: true, files: BASE_FIXTURES_179.judge.files })), selfChange: { auto_merge_non_judge: false, auto_merge_judge: true, veto_minutes: 60 }, reviewRoster: vi.fn(async () => ({ ok: true, roles: ["correctness", "qa"], tier: "load-bearing" })) }
+      : {};
+    const d = operatorD236(judge);
+    const { code } = await run179(d);
+    expect(code, route).toBe(0);
+    expect(d.vetoLabel, route).toHaveBeenCalledTimes(1);
+    const nowValues = d.now.mock.results.map((r) => r.value);
+    expect(new Set(nowValues).size, route).toBe(1);                                   // the clock never advanced: no wait of any length
+    expect(d.vetoLabel.mock.calls[0][0], route).toEqual({ since: new Date(nowValues[0]).toISOString() });
+    for (const dep of [d.vetoWindow.open, d.vetoWindow.read, d.sleep]) expect(dep, route).not.toHaveBeenCalled();
+    expect(d.vetoWindow.statuses, route).toEqual([]);                                 // no window status was ever put up to be read
+  }
+});

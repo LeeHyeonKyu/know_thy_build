@@ -15,6 +15,11 @@ export const HELP = `
     factory rehearse [--json]           Run the harness once ON THE RUNNER before the first issue (ADR-025);
                                         prints the step table and exits non-zero on RED
     factory run <stage> <issue>         Run a stage locally with the same scripts CI uses (triage|plan|implement|review)
+    factory run merge <issue>
+                                        Merge an approved issue locally from an operator session (your token, no veto
+                                        wait; refused on a CI runner; door files and non-green checks refused — ADR-044)
+    factory integrity <pr>              Post the CI integrity verdict for the PR head as factory/integrity (local:<login>);
+                                        operator session only, refused on a CI runner (ADR-044)
     factory run retro [--force]         Run the retro job locally (--force ignores the merge count N)
     factory status [--json]             Needs You / queue / in progress / recent merges / usage (read-only)
     factory analyze <issue> [--json]    One issue's whole timeline from the records branch + comments —
@@ -51,7 +56,8 @@ export async function main(argv) {
     case "bootstrap": return (await import("./bootstrap.js")).bootstrapCommand({ root, argv: rest, io });
     // rehearse는 doctor처럼 실주입이 필요하다 — 이 명령의 일은 러너에 주문을 넣고 결과를 가져오는 것이다.
     case "rehearse": return (await import("./rehearse.js")).rehearseCommand({ argv: rest, io, run: realRun });
-    case "run": return (await import("./run.js")).runCommand({ root, argv: rest, io });
+    // #236 dw4 — env를 명시로 넘긴다: runCommand는 env를 주입받지 못하면 로컬 merge를 거부한다(러너가 아님을 증명할 재료가 없다).
+    case "run": return (await import("./run.js")).runCommand({ root, argv: rest, io, env: process.env });
     case "status": return (await import("./status.js")).statusCommand({ root, argv: rest, io });
     // analyze는 status처럼 읽기 전용이다 — `run`은 gh 호출(코멘트·records 브랜치 내용)에만 쓰이고,
     // `--health`는 Task 4의 집계를 **지연 import**한다(그 파일이 없는 설치에서도 이 명령은 산다).
@@ -61,6 +67,8 @@ export async function main(argv) {
     case "board": return (await import("./board.js")).boardCommand({ root, pkgRoot, argv: rest, io });
     // #189 — 사람 전용 리셋. `env`를 명시로 넘긴다: 그 함수는 process.env를 직접 읽지 않는다(에이전트 세션·CI 판정의 재료가 이것이다).
     case "breaker": return (await import("./breaker.js")).breakerCommand({ root, argv: rest, io, run: realRun, env: process.env });
+    // #236 (ADR-044) — 운영 세션의 로컬 integrity 판정. 러너에서는 거부한다 — env를 명시로 넘긴다(그 함수는 process.env를 읽지 않는다).
+    case "integrity": return (await import("./integrity.js")).integrityCommand({ root, argv: rest, io, run: realRun, env: process.env });
     default: io.err(`unknown factory command: ${sub}\n${HELP}`); return 1;
   }
 }

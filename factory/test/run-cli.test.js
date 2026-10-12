@@ -270,3 +270,83 @@ test("default spawnInherit and run are used when not injected (smoke — routes 
   const mod = await import("../cli/run.js");
   expect(typeof mod.runCommand).toBe("function");
 });
+
+// #236 dw4 (rework spec1/qa1) — plain `factory run merge <n>`: off a runner it spawns the local merge with the operator marker;
+// on a runner (GITHUB_ACTIONS set — blank included, sec1) it refuses, spawns nothing, and never sends anyone to CI or `--remote`.
+test("test_236_plain_merge_runs_locally_off_a_runner_and_is_refused_on_one", async () => {
+  const root = makeRoot();
+  const { io: i, o } = io();
+  const spawnInherit = vi.fn(() => 0);
+  expect(await runCommand({ root, argv: ["merge", "5"], io: i, run: makeOkRun(), spawnInherit, env: {} })).toBe(0);
+  expect(o.err).toEqual([]);
+  expect(spawnInherit.mock.calls[0][1]).toEqual([".factory/bin/run-stage.js", "merge", "5"]);
+  expect(spawnInherit.mock.calls[0][2].env.FACTORY_OPERATOR_MERGE).toBe("1");
+  for (const env of [{ GITHUB_ACTIONS: "true" }, { GITHUB_ACTIONS: "" }]) {
+    const r = io();
+    const run = vi.fn();
+    const spawn = vi.fn(() => 0);
+    expect(await runCommand({ root, argv: ["merge", "5"], io: r.io, run, spawnInherit: spawn, env }), JSON.stringify(env)).toBe(1);
+    const text = r.o.err.join("\n");
+    expect(text).toMatch(/GITHUB_ACTIONS/);
+    expect(text).not.toMatch(/runs only in CI|--remote/);
+    expect(run).not.toHaveBeenCalled();
+    expect(spawn).not.toHaveBeenCalled();
+  }
+  // The real entry (`factory run merge <n>` through cli/index.js) injects the env, so the operator gets the runner refusal above —
+  // never the un-injected caller's "runs only in CI" refusal. Driven under GITHUB_ACTIONS=true so nothing can spawn.
+  const saved = process.env.GITHUB_ACTIONS;
+  process.env.GITHUB_ACTIONS = "true";
+  const errs = [];
+  const spy = vi.spyOn(console, "error").mockImplementation((s) => { errs.push(String(s)); });
+  try {
+    const { main } = await import("../cli/index.js");
+    expect(await main(["run", "merge", "5"])).toBe(1);
+  } finally {
+    spy.mockRestore();
+    if (saved === undefined) delete process.env.GITHUB_ACTIONS; else process.env.GITHUB_ACTIONS = saved;
+  }
+  expect(errs.join("\n")).toMatch(/GITHUB_ACTIONS is set/);
+  expect(errs.join("\n")).not.toMatch(/runs only in CI|--remote/);
+});
+
+// ── #236 rework arch1 — "is this a CI runner?" is one rule. The two operator entry points (`factory run merge`, `factory integrity`)
+// and run-stage's isOperatorMerge must agree on every env: a runner that one of them still treats as an operator is the gap. ──
+import { isOperatorMerge as isOperatorMergeArch1 } from "../bin/run-stage.js";
+import { integrityCommand as integrityCommandArch1 } from "../cli/integrity.js";
+
+test("test_236_local_merge_runs_merge_stage_with_the_operator_token_and_no_veto_wait — every runner marker refuses both entry points, as isOperatorMerge does", async () => {
+  const envs = [
+    {},
+    { FACTORY_RUNNER_ID: "local/laptop" },
+    { GITHUB_ACTIONS: "true" },
+    { GITHUB_ACTIONS: "" },
+    { GITHUB_RUN_ID: "777" },
+    { GITHUB_RUN_ID: "" },
+    { RUNNER_TEMP: "/home/runner/work/_temp" },
+    { FACTORY_TWO_ACTOR: "true" },
+    { FACTORY_RUNNER_ID: "gha-777" },
+    { FACTORY_RUNNER_ID: "gha-777", FACTORY_TWO_ACTOR: "true", GITHUB_RUN_ID: "777", RUNNER_TEMP: "/tmp/r" },
+  ];
+  for (const env of envs) {
+    const label = JSON.stringify(env);
+    const operator = isOperatorMergeArch1({ stage: "merge", env: { ...env, FACTORY_OPERATOR_MERGE: "1" } });
+    expect(operator, label).toBe(Object.keys(env).every((k) => k === "FACTORY_RUNNER_ID" && !env[k].startsWith("gha-")));
+
+    // `factory run merge 5` — refused (nothing spawned) exactly when run-stage would not be in operator mode.
+    const r = io();
+    const spawn = vi.fn(() => 0);
+    const code = await runCommand({ root: makeRoot(), argv: ["merge", "5"], io: r.io, run: makeOkRun(), spawnInherit: spawn, env });
+    expect(spawn.mock.calls.length, `run merge ${label}`).toBe(operator ? 1 : 0);
+    expect(code === 0, `run merge ${label}`).toBe(operator);
+    if (!operator) expect(r.o.err.join("\n"), label).toMatch(/CI runner/);
+
+    // `factory integrity 9` — on a runner it stops before asking who the operator is, and posts nothing.
+    const gh = { viewerLogin: vi.fn(async () => { throw new Error("no login in this fixture"); }), setStatus: vi.fn(), prHead: vi.fn() };
+    const g = io();
+    const icode = await integrityCommandArch1({ root: mktemp(), argv: ["9"], io: g.io, run: vi.fn(), env, gh });
+    expect(icode, `integrity ${label}`).not.toBe(0);
+    expect(gh.setStatus, `integrity ${label}`).not.toHaveBeenCalled();
+    expect(gh.viewerLogin.mock.calls.length > 0, `integrity ${label}`).toBe(operator);
+    if (!operator) expect(g.o.err.join("\n"), label).toMatch(/CI runner/);
+  }
+});
