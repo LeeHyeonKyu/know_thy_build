@@ -2408,8 +2408,8 @@ test("factory-retro.js: once() is byte-identical to the four stage workflows', a
 });
 
 /**
- * #238 (P-14) dw2 — the repair-turn `loaded.json` the engine now produces (`plan_repair` string[] **plus** the sibling
- * `plan_repair_previous`) is fed, unchanged, to the shipped factory-plan.js. The loaded payload comes from the real producer
+ * #238 (P-14) dw3 — the repair-turn `loaded.json` the engine now produces (`plan_repair` string[]; the rejected plan goes to
+ * context.json as `plan_repair_previous`, never into loaded.json) is fed, unchanged, to the shipped factory-plan.js. The loaded payload comes from the real producer
  * (`buildContext`), not a hand-written fixture: if the new key ever displaced or reshaped `plan_repair`, the workflow's
  * `Array.isArray(loaded.plan_repair)` would quietly turn today's targeted repair into a blind retry.
  */
@@ -2425,9 +2425,10 @@ test("test_238_current_workflow_still_renders_repair_reasons_from_new_shape", as
   const rejected = { schema: "factory.plan.v1", issue: 42, done_when: [{ id: "dw1", text: "REJECTED-PLAN-MARKER", verify: "test_42_x", level: "unit" }], dissent_log: [{ id: "d2", severity: "high" }] };
   await buildContext238({ root: r, gh, issue: 42, stage: "plan", planRepair: R1_REPAIR_REASONS, planRepairPrevious: rejected });
   const loaded = JSON.parse(readFileSync(join(r, ".factory/out/loaded.json"), "utf8"));
-  // the new shape really is the engine's: both keys, plan_repair untouched.
+  // the new shape really is the engine's: plan_repair untouched in loaded.json; the rejected plan rides in context.json only (dw1).
   expect(loaded.plan_repair).toEqual(R1_REPAIR_REASONS);
-  expect(loaded.plan_repair_previous).toEqual(rejected);
+  expect(Object.keys(loaded)).not.toContain("plan_repair_previous");
+  expect(JSON.parse(readFileSync(join(r, ".factory/out/context.json"), "utf8")).plan_repair_previous).toEqual(rejected);
 
   for (const mode of ["debate", "single"]) {
     const { calls } = await runWorkflow(FACTORY_PLAN_WORKFLOW, {

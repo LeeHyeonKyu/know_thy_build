@@ -319,6 +319,7 @@ export async function buildContext({ root, gh, issue, stage, run = null, base = 
      * plan by rerunning synthesis only instead of the whole debate. A sibling key, never folded into `plan_repair`: the shipped
      * workflow reads `Array.isArray(loaded.plan_repair)` and must keep seeing today's string[] (test_238_current_workflow_…).
      * Carried whole or not at all — only next to `plan_repair`, only for a plain object (run-stage leaves it out otherwise).
+     * It lives in context.json / context.<role>.json (the file the planners read as `args.context`), never in `loaded.json` (dw1).
      */
     ...(stage === "plan" && Array.isArray(planRepair) && planRepair.length && isPlainObject(planRepairPrevious) ? { plan_repair_previous: planRepairPrevious } : {}),
     /**
@@ -554,8 +555,9 @@ async function loadedFor({ ctx, roleBlock, gh, comments = [] }) {
     // Task 9 (KTB-51): the plan validator reasons this repair turn must fix (factory-plan.js reads
     // them and hands them to the planner). Absent on a normal plan pass; present on the one repair turn.
     ...(Array.isArray(ctx.plan_repair) && ctx.plan_repair.length ? { plan_repair: ctx.plan_repair } : {}),
-    // #238: the rejected plan those reasons were raised against (absent unless plan_repair is present). See buildContext.
-    ...(Array.isArray(ctx.plan_repair) && ctx.plan_repair.length && isPlainObject(ctx.plan_repair_previous) ? { plan_repair_previous: ctx.plan_repair_previous } : {}),
+    // #238 dw1: the rejected plan (`ctx.plan_repair_previous`) is deliberately NOT copied here. This file is hand-copied by the
+    // dispatcher into `args.loaded` under a 4096-byte soft limit and is not truncated on plan; a real plan is 8 KB+. The planners
+    // read it whole from `args.context` (context.json / context.<role>.json) — test_238_repair_turn_loaded_json_stays_within_…
     // #143 (S3b): the source paths still conflicted in the base merge the stage left to the builder. Absent when no merge is pending.
     ...(Array.isArray(ctx.merge_conflicts) && ctx.merge_conflicts.length ? { merge_conflicts: ctx.merge_conflicts } : {}),
     // #212: an approved PR's base conflict, resolution-only round (`conflictOnlyOf`). Absent unless all three runner facts hold.
