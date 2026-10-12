@@ -765,3 +765,34 @@ test("test_196_library_retry_refusals_name_this_issue_not_a_template", async () 
     expect(h.issue).not.toHaveBeenCalled();
   }
 });
+
+// ── #231 — `transition()`은 이슈 번호만 넘기고, 배선된 심사기가 `gh.issue()`로 작성자까지 다시 읽는다.
+// 사람이 붙여 넣은 flaky 마커(라벨·done_when 없음)는 진짜 배선을 지나도 큐로 가지 않는다; 공장(App)이 연 같은 이슈는 간다.
+test("test_231_transition_admission_reads_the_issue_author", async () => {
+  const { makeQueueAdmission } = await import("../lib/admission.js");
+  const { makeGh } = await import("../lib/gh.js");
+  const { makeFakeRun } = await import("../lib/exec.js");
+  const viewOf = (author) => JSON.stringify({ number: 7, title: "t", body: "Detected while implementing #3. evidence: {}", labels: [{ name: "backlog" }], author });
+  const wired = (author) => {
+    const run = makeFakeRun([
+      // 기원 이슈 #3은 읽히지 않는다(404) — 세대는 1로 센다
+      { match: (c, a) => a[0] === "issue" && a[1] === "view", result: (c, a) => (a[2] === "7" ? { code: 0, stdout: viewOf(author), stderr: "" } : { code: 1, stdout: "", stderr: "Could not resolve to an issue" }) },
+      { match: (c, a) => a[0] === "issue" && a[1] === "list", result: { code: 0, stdout: "[]", stderr: "" } },
+    ]);
+    const gh = makeGh({ run, repo: "o/r" });
+    gh.setFactoryLabel = vi.fn(async () => ({ verify: "ok" }));
+    gh.comments = vi.fn(async () => []);
+    gh.comment = vi.fn(async () => "url#issuecomment-1");
+    const admission = makeQueueAdmission({ gh, charter: { never_automate: [], back_pressure: {} }, factoryLogins: async () => ({ ok: true, logins: ["ktb-factory[bot]"] }) });
+    return { gh, admission };
+  };
+  const human = wired({ id: "U_1", is_bot: false, login: "LeeHyeonKyu", name: "Lee" });
+  const refused = await transition({ gh: human.gh, issue: 7, to: "factory:queue", rehearsal: { ok: true }, admission: human.admission });
+  expect(refused.ok).toBe(false);
+  expect(refused.reason).toMatch(/^queue admission refused — not an explicit job: .*author `LeeHyeonKyu` is not a factory login/);
+  expect(human.gh.setFactoryLabel).not.toHaveBeenCalled();
+  const bot = wired({ is_bot: true, login: "app/ktb-factory" });
+  const moved = await transition({ gh: bot.gh, issue: 7, to: "factory:queue", rehearsal: { ok: true }, admission: bot.admission });
+  expect(moved.ok).toBe(true);
+  expect(bot.gh.setFactoryLabel).toHaveBeenCalled();
+});

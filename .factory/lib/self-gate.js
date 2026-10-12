@@ -189,6 +189,7 @@ export async function runSelfGate({
   pins = [],               // Task 5 — regression pins carried from the prior rework round
   restartBrief = null,     // #174 — { paths, newFiles, error? } computed by run-stage (`restartBriefInput`); null = no restart
   scope = null,            // #200 — { issue, plan, filesExpected, changes, error? } computed by run-stage (`scopeInput`); null = not wired
+  conflictScope = null,    // #212 — { paths, outside, error? } computed by run-stage (`conflictScopeInput`); null = not a conflict-only round
 } = {}) {
   const findings = [];
   const ranChecks = [];
@@ -299,8 +300,22 @@ export async function runSelfGate({
     }
   }
 
+  // (7) #212 (ADR-041) — `conflict-scope`: a conflict-only round (an approved PR re-queued by a base conflict) may change only the
+  // conflicted hunks of the base merge. Runs ONLY with input (not a conflict round → nothing here changes, not even a skip entry).
+  // Every finding is NON-blocking (plan d3): the unchanged workflow still runs self-critique, so a RED round is not stopped — it simply
+  // is not a conflict round, and its cost and K count as today. A measurement failure is RED too (fail closed), never GREEN.
+  if (conflictScope != null) {
+    ranChecks.push("conflict-scope");
+    if (conflictScope.error) findings.push({ check: "conflict-scope", blocking: false, detail: `conflict scope could not be measured — ${conflictScope.error} (fail closed: counted as a normal round)` });
+    else for (const p of Array.isArray(conflictScope.outside) ? conflictScope.outside : []) findings.push({ check: "conflict-scope", blocking: false, detail: `conflict round changed ${p} outside the merge` });
+  }
+
   return { ok: !findings.some((f) => f.blocking), findings, ranChecks, skippedChecks };
 }
+
+/** #212 — the conflict-scope check ran and found nothing: the only state in which run-stage tags the round (cost, K). */
+export const conflictScopeGreen = (result) => Array.isArray(result?.ranChecks) && result.ranChecks.includes("conflict-scope")
+  && !(Array.isArray(result?.findings) ? result.findings : []).some((f) => f?.check === "conflict-scope");
 
 /**
  * ── #200 — `scope`: a path outside `files_expected` must carry a "Scope change (#<issue>)" line in the diff ───────────────

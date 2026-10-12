@@ -1040,3 +1040,27 @@ test("test_143_adopter_implement_checkout_does_not_scan_merge_markers", async ()
     expect(real.reason).toContain("factory/lib/x.js");
   } finally { engine.done(); }
 }, 120000); // 실제 git 픽스처(bare origin + clone): 이 Mac에서 13–27초, 기본 20초를 넘긴다 (1.4.42)
+
+// ── #253 — 오버레이 드리프트 사유는 미러의 주인이 러너임을 말한다 ─────────────────────────────────
+import { overlayDriftReason } from "../bin/run-stage.js";
+
+test("test_253_overlay_guard_reason_names_the_runner_as_mirror_owner", async () => {
+  const REMEDY = " — a builder must not write .factory/**; the self-mirror test is the runner's (it passes inside a builder session since #253)";
+  // 미러 가족의 경로가 하나라도 있으면: 바뀌지 않은 접두 + 처방.
+  const mirror = overlayDriftReason({ ok: false, paths: [".factory/lib/x.js", ".claude/settings.json"] });
+  expect(mirror).toBe(`factory config changed during the stage: .factory/lib/x.js, .claude/settings.json${REMEDY}`);
+  // 미러 밖의 경로만: 처방 없음(그 RED는 self-mirror와 무관하다).
+  expect(overlayDriftReason({ ok: false, paths: [".claude/settings.json", "docs/factory/CHARTER.md"] }))
+    .toBe("factory config changed during the stage: .claude/settings.json, docs/factory/CHARTER.md");
+  // git diff 실패(drift.reason)는 그대로.
+  expect(overlayDriftReason({ ok: false, paths: [".factory/lib/x.js"], reason: "overlay drift check failed: fatal: bad object" }))
+    .toBe("overlay drift check failed: fatal: bad object");
+
+  // assertStageBranch는 같은 빌더를 쓴다 — 같은 경로면 같은 사유.
+  const viaBranch = await assertStageBranch({ run: headStub({ drift: [".factory/lib/x.js"] }), cwd: "/repo", issue: 3, sha: SHA });
+  expect(viaBranch).toEqual({ ok: false, reason: `factory config changed during the stage: .factory/lib/x.js${REMEDY}` });
+  const nonMirror = await assertStageBranch({ run: headStub({ drift: [".claude/settings.json"] }), cwd: "/repo", issue: 3, sha: SHA });
+  expect(nonMirror.reason).toBe("factory config changed during the stage: .claude/settings.json");
+  const broken = await assertStageBranch({ run: headStub({ driftCode: 128 }), cwd: "/repo", issue: 3, sha: SHA });
+  expect(broken.reason).toBe("overlay drift check failed: fatal: bad object");
+});

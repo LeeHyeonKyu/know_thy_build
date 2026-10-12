@@ -2,15 +2,18 @@
 schema: factory.charter.v1
 status: draft
 tier_default: standard
-limits: { K: 3, M: 3, R: 2 }
+# 채택 저장소 기본값 (2026-10-11, 허점 원장 M-1·P-10): own-calendar·데모 54판정에서 architecture 단독 거부 0, 3라운드 승인 1/8 —
+# standard 로스터에서 architecture를 빼고 K=2 (docs/research/review-roster-evidence.md). 엔진 저장소(know-thy-build)는 자기 기록이
+# 반대(68라운드, architecture 단독 거부 4)라 architecture 유지·K=3을 쓴다 — 로스터는 저장소별 기록으로 정한다.
+limits: { K: 2, M: 3, R: 2 }
 roster:
   docs: [correctness, spec-conformance]
-  standard: [correctness, architecture, spec-conformance, qa]
+  standard: [correctness, spec-conformance, qa]
   load-bearing: [correctness, security, architecture, spec-conformance, qa]
 plan_roles:
   docs: [architect, skeptic]
   default: [product-advocate, architect, skeptic, operator]
-plan_rounds: { docs: 2, default: 3 }        # 토론 tier에서만 쓰인다 (아래 plan.mode)
+plan_rounds: { docs: 2, default: 2 }        # 토론 tier에서만 쓰인다 (아래 plan.mode). 2026-10-11 3→2 — own-calendar가 2로 통과(review-roster-evidence.md)
 plan: { mode: single, debate_tiers: [load-bearing], max_done_when: 6 }   # 감사 Task 9 — 기본은 단일 opus 1패스 + skeptic 1패스
 back_pressure: { awaiting_review_max: 4, queue_max: 8 }   # quarantine 상한은 두지 않는다 — harness.toml [gates.thresholds].quarantine_max가 유일한 출처(§5.1, Plan 1b 실행 판결). queue_max는 큐 진입 심사(설계 2026-09-30 §8.2)
 # 설계 2026-09-30 §8.2 — 공장이 스스로 만든 이슈(개선·하네스·flaky)의 상한. 큐 진입 심사가 센다: 진행 중인 자기생성 이슈 수(open_max),
@@ -45,14 +48,14 @@ retro: { every_merges: { initial: 1, min: 1, max: 20 }, light_on_merge: true }
 | tier | 판정 기준 | 리뷰 로스터 | gate 레벨 | 예산(토큰/이슈) — 참고값, 기본 미적용 |
 |---|---|---|---|---|
 | docs | diff가 `docs/**`, `*.md`만 | correctness, spec-conformance | fast | 100k |
-| standard | 기본 | correctness, architecture, spec-conformance, qa | full | 600k |
+| standard | 기본 | correctness, spec-conformance, qa (architecture는 54판정 중 단독 거부 0 — load-bearing에만) | full | 600k |
 | load-bearing | `harness.toml [load_bearing]` 경로 포함 | correctness, security, architecture, spec-conformance, qa | deep | 1.2M |
 
 ## Plan 로스터 (기본은 토론이 아니다)
 | tier | 모드 | 역할 | 라운드 |
 |---|---|---|---|
 | docs / standard | single | synthesizer(계획자, opus) + skeptic | 2 (계획 1패스 → 반박 1패스; 반박은 **추가만** 한다) |
-| load-bearing | debate | product-advocate, architect, skeptic, operator | 3 + 서명 (`plan_rounds`) |
+| load-bearing | debate | product-advocate, architect, skeptic, operator | 2 + 서명 (`plan_rounds`) |
 
 `plan.debate_tiers`에 이름이 있는 tier만 4역할 토론을 돈다. `plan.mode: debate`면 tier와 무관하게
 언제나 토론이다(되돌리는 스위치). `plan.max_done_when`은 계획이 스스로 만드는 결함 표면의 상한이고,
@@ -60,7 +63,7 @@ retro: { every_merges: { initial: 1, min: 1, max: 20 }, light_on_merge: true }
 근거는 `docs/factory/audit/response-task-9.md`.
 
 ## Hard limits
-- review rounds K = 3
+- review rounds K = 2 (3라운드 승인은 8건 중 1건 — 세 번째 라운드는 거의 언제나 사람 결정으로 끝났다)
 - same gate RED M = 3
 - runner retries R = 2
 - review 대기(awaiting-review) 이슈가 4개 이상이면 implement는 새 claim을 하지 않는다 (back-pressure)
