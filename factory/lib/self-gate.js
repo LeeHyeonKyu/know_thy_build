@@ -319,6 +319,8 @@ export async function runSelfGate({
     else if (Number.isInteger(reworkScope.round) && reworkScope.round >= REWORK_SCOPE_MIN_ROUND) {
       ranChecks.push("rework-scope");
       findings.push(...judgeReworkScope(reworkScope));
+      // Files and exports were judged; the test-id part needs the plan and the issue number, and its absence is recorded, not silent.
+      if (typeof reworkScope.idsSkipped === "string") skip("rework-scope", `skipped — test ids not judged — ${reworkScope.idsSkipped}`);
     }
   }
 
@@ -340,8 +342,9 @@ export async function runSelfGate({
  *   · `restartPaths` — the K-restart brief's paths when one is loaded (null otherwise).
  * A runner-written path (`runnerWrittenPath`, the rule #200 `scope` uses — the mirror commit's `.factory/lib|bin/**` copies, run
  * records) is never a builder addition: the builder cannot write it, so a finding on it could not be followed (#199 review cf1/qa1).
- * This function only judges. One cause, one finding: in a restart round `restart-brief` owns new files; an id inside a new file that
- * already has a file finding is not reported again. Edits and deletions never reach here.
+ * This function only judges. One cause, one finding: in a restart round `restart-brief` owns new files outside its brief; an export or
+ * an id inside a new file that already has a file finding is not reported again (a new file the brief allows still has its exports
+ * judged here). Edits and deletions never reach here.
  */
 export const REWORK_SCOPE_MIN_ROUND = 2;
 
@@ -361,7 +364,7 @@ export function judgeReworkScope({ round, where = [], newFiles = [], newExports 
     findings.push({ check: "rework-scope", blocking: true, detail: `new file outside the review findings: ${f} — ${rule}: ${how}` });
   }
   for (const e of Array.isArray(newExports) ? newExports : []) {
-    if (!(e && typeof e.path === "string" && typeof e.name === "string") || exempt(e.path)) continue;
+    if (!(e && typeof e.path === "string" && typeof e.name === "string") || exempt(e.path) || fileFinding.has(e.path)) continue;
     findings.push({ check: "rework-scope", blocking: true, detail: `new export outside the review findings: ${e.name} in ${e.path} — ${rule}: ${how}` });
   }
   for (const t of Array.isArray(newTestIds) ? newTestIds : []) {

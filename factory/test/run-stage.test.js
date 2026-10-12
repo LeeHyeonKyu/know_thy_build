@@ -10433,7 +10433,7 @@ async function reworkRepo199() {
   await git("init", "-q", "-b", "main");
   put("factory/lib/self-gate.js", lines("g") + "export function judge() { return 1; }\n");
   put("factory/lib/other.js", lines("o") + "export const oldValue = 1;\n");
-  put("factory/lib/old-parser.js", lines("p") + "export function parse() { return 0; }\n");
+  put("factory/lib/old-parser.js", lines("p") + "export function parse() { return 0; }\n  export const legacy = 0;\n");
   put("factory/lib/movable.js", lines("m") + "export const movable = 1;\n");
   put("factory/lib/doomed.js", lines("d"));
   put("factory/test/self-gate.test.js", 'test("test_199_kept_by_plan", () => { expect(1).toBe(1); });\n');
@@ -10480,6 +10480,8 @@ test("test_199_rework_round2_blocks_new_files_and_exports_outside_findings", asy
   repo.put("factory/lib/allowed-new.js", repo.lines("a") + "export const allowedNew = 1;\n");
   repo.append("factory/lib/other.js", "export const otherTwo = 2;\n");
   repo.put("factory/lib/old-parser.js", repo.read("factory/lib/old-parser.js").replace("export function parse() { return 0; }", "export function parse() { return 2; }"));
+  // A pre-existing export that was indented at the reviewed head and is re-indented now keeps its name: not a new export.
+  repo.put("factory/lib/old-parser.js", repo.read("factory/lib/old-parser.js").replace("  export const legacy = 0;", "export const legacy = 0;"));
   repo.put("factory/lib/round1.js", repo.read("factory/lib/round1.js").replace("const r0 = 0;", "const r0 = 100;"));
   await repo.git("rm", "-q", "factory/lib/doomed.js");
   await repo.commit("round 2: edits, deletions, additions inside the findings");
@@ -10535,10 +10537,16 @@ test("test_199_rework_round2_baseline_is_the_reviewed_head_not_the_merge_base", 
   // After the reviewed head, outside `where`: one new file and one new export in an old file → exactly one finding each.
   repo.put("factory/lib/late.js", repo.lines("l") + "export const lateA = 1;\nexport function lateB() {}\n");
   repo.append("factory/lib/other.js", "export async function lateExport() {}\n");
+  // The base-merged file, absent from the reviewed tree, is judged against the merge-base copy: its own export edited passes,
+  // an export added to it is new — and the whole round is still judged (no `cannot be read at` skip).
+  repo.put("factory/lib/from-main.js", repo.read("factory/lib/from-main.js").replace("export const fromMain = 1;", "export const fromMain = 2;") + "export const fromMainTwo = 2;\n");
   await repo.commit("round 2: late additions");
   const red = await dep({ gates: GREEN_199 });
   expect(red.ok).toBe(false);
+  expect(red.ranChecks).toContain("rework-scope");
+  expect(red.skippedChecks.filter((s) => s.check === "rework-scope")).toEqual([]);
   expect(rs199(red).map(head199).sort()).toEqual([
+    "new export outside the review findings: fromMainTwo in factory/lib/from-main.js",
     "new export outside the review findings: lateExport in factory/lib/other.js",
     "new file outside the review findings: factory/lib/late.js",
   ]);
@@ -10635,10 +10643,18 @@ test("test_199_new_done_when_in_rework_is_red", async () => {
 test("test_199_missing_findings_skips_with_a_record_line", async () => {
   const repo = await reworkRepo199();
   repo.put("factory/lib/extra.js", repo.lines("x") + "export const extra = 1;\n");
+  repo.append("factory/lib/other.js", "export const otherLate = 1;\n");
+  repo.append("factory/test/round1.test.js", 'test("test_199_late_guard", () => { expect(1).toBe(1); });\n');
   await repo.commit("an addition outside the findings");
   const good = reviewHandoff199({ head: repo.reviewed, where: ["factory/lib/self-gate.js"] });
   // With every input readable this round is RED — so each skip below really suppressed a judgement.
-  expect((await dep199(repo, ctx199({ review: good }))({ gates: GREEN_199 })).ok).toBe(false);
+  const judged = await dep199(repo, ctx199({ review: good }))({ gates: GREEN_199 });
+  expect(judged.ok).toBe(false);
+  expect(rs199(judged).map(head199).sort()).toEqual([
+    "new done_when id outside the plan: test_199_late_guard in factory/test/round1.test.js",
+    "new export outside the review findings: otherLate in factory/lib/other.js",
+    "new file outside the review findings: factory/lib/extra.js",
+  ]);
 
   const failGit = (pred) => async (cmd, args, opts) => (cmd === "git" && pred(args) ? { code: 128, stdout: "", stderr: "fatal: injected failure" } : realRun199(cmd, args, opts));
   const cases = [
@@ -10649,6 +10665,7 @@ test("test_199_missing_findings_skips_with_a_record_line", async () => {
     ["git diff fails", dep199(repo, ctx199({ review: good }), { run: failGit((a) => a.includes("--no-renames") && a.includes("--name-status") && !a.includes("-z")) }), /git diff --no-renames failed — fatal: injected failure/],
     ["round unreadable", dep199(repo, ctx199({ review: good }), { reviewRounds: async () => { throw new Error("HTTP 502: comments"); } }), /rework round count cannot be read — HTTP 502: comments/],
     ["diff truncated", dep199(repo, ctx199({ review: good }), { scopeMaxBytes: 64 }), /exceeds 64 bytes/],
+    ["reviewed copy of a changed file unreadable", dep199(repo, ctx199({ review: good }), { run: failGit((a) => a[0] === "show") }), /reviewed head [0-9a-f]{7} cannot be read at factory\/lib\/other\.js — fatal: injected failure/],
   ];
   const details = [];
   for (const [name, dep, why] of cases) {
@@ -10667,11 +10684,33 @@ test("test_199_missing_findings_skips_with_a_record_line", async () => {
     expect(recorded, name).toEqual([{ check: "rework-scope", reason: sk[0].reason, detail: sk[0].detail }]);
   }
   expect(new Set(details).size).toBe(cases.length);                         // each cause names itself
+
+  // No plan handoff, or no issue number: only the test-id judgement needs them. Files and exports are still judged (RED here),
+  // and the id part is recorded as skipped with its own reason — never a silent pass, never the whole check switched off.
+  const idCases = [
+    ["no plan handoff", { ...ctx199({ review: good }), handoffs: { review: good } }, /test ids not judged — no plan handoff with done_when/],
+    ["malformed plan", { ...ctx199({ review: good }), handoffs: { review: good, plan: { done_when: "dw1" } } }, /test ids not judged — no plan handoff with done_when/],
+    ["no issue number", { ...ctx199({ review: good }), issue: {} }, /test ids not judged — this run carries no issue number/],
+  ];
+  for (const [name, ctx, why] of idCases) {
+    const r = await dep199(repo, ctx)({ gates: GREEN_199 });
+    expect(r.ok, name).toBe(false);
+    expect(r.ranChecks, name).toContain("rework-scope");
+    expect(rs199(r).map(head199).sort(), name).toEqual([
+      "new export outside the review findings: otherLate in factory/lib/other.js",
+      "new file outside the review findings: factory/lib/extra.js",
+    ]);
+    const sk = r.skippedChecks.filter((s) => s.check === "rework-scope");
+    expect(sk, name).toHaveLength(1);
+    expect(sk[0].detail, name).toMatch(why);
+    const line = selfGateDetailLine199(r, { runId: "1", runnerId: "gha-1", ktbVersion: "1.4.0" });
+    expect(JSON.parse(line.slice(SGD_PREFIX_199.length)).skipped.filter((s) => s.check === "rework-scope"), name).toEqual([{ check: "rework-scope", reason: sk[0].reason, detail: sk[0].detail }]);
+  }
 });
 
 test("test_199_restart_round_does_not_double_report", async () => {
   const repo = await reworkRepo199();
-  const brief = { pr: 31, head: repo.reviewed, scope: K_RESTART_SCOPE, paths: ["factory/lib/self-gate.js"], findings: [] };
+  const brief = { pr: 31, head: repo.reviewed, scope: K_RESTART_SCOPE, paths: ["factory/lib/self-gate.js", "factory/lib/brief-new.js"], findings: [] };
   const review = reviewHandoff199({ head: repo.reviewed, where: ["factory/lib/self-gate.js:40"] });
   // The round after a K self-restart: the engine's counter is past K (restart transition included).
   const dep = dep199(repo, ctx199({ review, restart: brief }), { rounds: 4 });
@@ -10679,6 +10718,8 @@ test("test_199_restart_round_does_not_double_report", async () => {
   repo.append("factory/lib/old-parser.js", "export const parseTwo = 2;\n");
   // A new test file outside both, carrying an id the plan does not own: its one cause is the restart-brief file finding.
   repo.put("factory/test/restart-extra.test.js", 'test("test_199_restart_extra", () => { expect(1).toBe(1); });\n');
+  // A new file the restart brief allows but `where` does not name: restart-brief passes it, and its export is still rework-scope's.
+  repo.put("factory/lib/brief-new.js", repo.lines("b") + "export const briefOnly = 1;\n");
   await repo.commit("restart round: a new file and a new export outside both");
   const r = await dep({ gates: GREEN_199 });
   expect(r.ranChecks).toEqual(expect.arrayContaining(["restart-brief", "rework-scope"]));
@@ -10687,6 +10728,7 @@ test("test_199_restart_round_does_not_double_report", async () => {
   expect(blocking).toEqual([
     "restart-brief: new file outside the restart brief: factory/lib/second-parser.js",
     "restart-brief: new file outside the restart brief: factory/test/restart-extra.test.js",
+    "rework-scope: new export outside the review findings: briefOnly in factory/lib/brief-new.js",
     "rework-scope: new export outside the review findings: parseTwo in factory/lib/old-parser.js",
   ]);
 });
@@ -10695,7 +10737,7 @@ test("test_199_restart_round_does_not_double_report", async () => {
 // `.factory/lib|bin/**` before the self-gate runs. Those copies are runner-written (`runnerWrittenPath`, the rule #200 `scope` uses):
 // the builder cannot write them, so they are never a builder addition. An addition the builder made inside `where` must still pass
 // once the mirror has copied it; a builder path outside `where` is still judged.
-test("test_199_rework_round2_blocks_new_files_and_exports_outside_findings — runner mirror copies are not builder additions", async () => {
+test("test_199_rework_scope_exempts_runner_mirror_copies", async () => {
   const repo = await reworkRepo199();
   const mirror = (p) => repo.put(`.factory/${p.slice("factory/".length)}`, repo.read(p));
   mirror("factory/lib/self-gate.js");
