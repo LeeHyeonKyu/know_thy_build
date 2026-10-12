@@ -5,16 +5,23 @@ import { join, dirname } from "node:path";
 import { run as realRun } from "../lib/exec.js";
 import { integrityCheck } from "../lib/integrity.js";
 import { integrityCommand } from "../cli/integrity.js";
+import { loadHarness as realLoadHarness } from "../lib/config.js";
+import { main as cliMain } from "../cli/index.js";
 
 /**
  * #236 — `factory integrity <pr>`. The fixtures are a real git repository and the real `integrityCheck` producer: the CI
  * verdict is computed the way `factory/bin/integrity.js` computes it on the runner (PR head checked out, files read from the
  * working tree), and the CLI is then run from an operator checkout that sits somewhere else.
  *
+ * Both sides load the harness with the real `loadHarness` from the tree being judged: the CI bin reads the checked-out PR head's
+ * `.factory/harness.toml`, so the CLI must read the PR head's too — never the operator checkout's.
+ *
  * The skip pragma in the "violating" fixture is assembled at run time so this test file's own added lines carry no pragma.
  */
 const SKIP_CALL = `test.${"sk"}${"ip"}("later", () => {});\n`;
-const HARNESS = { project: { default_branch: "main" }, protected: { factory: [".factory/**"] }, test: { test_glob: ["test/**/*.test.js"] } };
+const HARNESS_TOML = "[project]\ndefault_branch = \"main\"\n\n[protected]\nfactory = [\".factory/**\"]\n\n[test]\ntest_glob = [\"test/**/*.test.js\"]\n";
+/** A looser harness: no protected globs, no test globs — a skip pragma in a test file is no violation under it. */
+const LOOSE_HARNESS_TOML = "[project]\ndefault_branch = \"main\"\n\n[test]\ntest_glob = []\n";
 
 const git = async (cwd, ...args) => {
   const r = await realRun("git", ["-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false", ...args], { cwd });
@@ -29,6 +36,7 @@ async function fixtureRepo() {
   await git(root, "init", "-q", "-b", "main");
   put(root, "src/a.js", "export const a = 1;\n");
   put(root, "test/a.test.js", "test(\"a\", () => {});\n");
+  put(root, ".factory/harness.toml", HARNESS_TOML);
   await git(root, "add", "-A");
   await git(root, "commit", "-q", "-m", "base");
   await git(root, "update-ref", "refs/remotes/origin/main", "HEAD");
@@ -50,12 +58,12 @@ async function fixtureRepo() {
   return { root, shas };
 }
 
-/** The CI bin's verdict for a PR head: that head checked out, the working tree read from disk (factory/bin/integrity.js). */
+/** The CI bin's verdict for a PR head: that head checked out, its harness and files read from disk (factory/bin/integrity.js). */
 async function ciVerdict(root, sha) {
   await git(root, "checkout", "-q", "--detach", sha);
   try {
     const base = await git(root, "merge-base", "origin/main", "HEAD");
-    return await integrityCheck({ run: realRun, cwd: root, base, harness: HARNESS, readFile: (p) => (existsSync(p) ? readFileSync(p, "utf8") : null) });
+    return await integrityCheck({ run: realRun, cwd: root, base, harness: realLoadHarness(root), readFile: (p) => (existsSync(p) ? readFileSync(p, "utf8") : null) });
   } finally { await git(root, "checkout", "-q", "main"); }
 }
 
@@ -65,9 +73,9 @@ const fakeGh = ({ sha, login = "alice" } = {}) => ({
   prView: vi.fn(async (n) => ({ number: Number(n), state: "OPEN", headRefOid: sha, baseRefName: "main" })),
   setStatus: vi.fn(async () => {}),
 });
-const integrity = ({ root, gh, env = {}, argv = ["17"], run = realRun }) => {
+const integrity = ({ root, gh, env = {}, argv = ["17"], run = realRun, loadHarness = realLoadHarness }) => {
   const { io: i, o } = io();
-  return integrityCommand({ root, argv, io: i, run, env, gh, loadHarness: () => HARNESS }).then((code) => ({ code, o }));
+  return integrityCommand({ root, argv, io: i, run, env, gh, loadHarness }).then((code) => ({ code, o }));
 };
 
 test("test_236_local_integrity_posts_the_same_verdict_as_ci_and_refuses_on_a_runner", async () => {
@@ -176,5 +184,110 @@ test("test_236_local_integrity_judges_the_pr_head_sha_not_the_worktree", async (
     const { code } = await integrity({ root, gh });
     expect(code).not.toBe(0);
     expect(gh.setStatus).not.toHaveBeenCalled();
+  }
+});
+
+// ── skeptic self-critique (#236): the harness, the content reads and the env are the PR head's / injected, or nothing is posted ──
+
+test("test_236_local_integrity_reads_the_harness_from_the_pr_head_not_the_checkout", async () => {
+  const { root, shas } = await fixtureRepo();
+  // The CI bin's verdict on the violating head, with the head's own harness (computed before the checkout is touched).
+  const ci = await ciVerdict(root, shas.violating);
+  expect(ci.ok).toBe(false);
+
+  // The operator's checkout carries a looser harness (no test globs) — under it the skip pragma would be no violation.
+  put(root, ".factory/harness.toml", LOOSE_HARNESS_TOML);
+  expect(realLoadHarness(root).test.test_glob).toEqual([]);
+  const loadHarness = vi.fn(realLoadHarness);
+  const gh = fakeGh({ sha: shas.violating });
+  const { code } = await integrity({ root, gh, loadHarness });
+  expect(code).not.toBe(0);
+  expect(gh.setStatus.mock.calls.map((c) => c[0])).toEqual([expect.objectContaining({ sha: shas.violating, state: "failure" })]);
+  // …and the harness that judged it was never the checkout's.
+  expect(loadHarness).toHaveBeenCalled();
+  for (const [r] of loadHarness.mock.calls) expect(r).not.toBe(root);
+  await git(root, "checkout", "-q", "-f", "main");
+
+  // A PR head with no .factory/harness.toml cannot be judged the way CI judges it → refused, nothing posted.
+  await git(root, "checkout", "-q", "-b", "pr-noharness", "main");
+  await git(root, "rm", "-q", ".factory/harness.toml");
+  await git(root, "commit", "-q", "-m", "drop harness");
+  const noHarness = await git(root, "rev-parse", "HEAD");
+  await git(root, "checkout", "-q", "main");
+  {
+    const gh2 = fakeGh({ sha: noHarness });
+    const r = await integrity({ root, gh: gh2 });
+    expect(r.code).not.toBe(0);
+    expect(r.o.err.join("\n")).toMatch(/harness\.toml/);
+    expect(gh2.setStatus).not.toHaveBeenCalled();
+  }
+});
+
+test("test_236_local_integrity_never_posts_success_when_pr_head_content_is_unread", async () => {
+  const { root, shas } = await fixtureRepo();
+  const states = (gh) => gh.setStatus.mock.calls.map((c) => c[0].state);
+  // Sanity: with every read working, the lessons head is a failure (its format rule fires on the content).
+  {
+    const gh = fakeGh({ sha: shas.lessons });
+    await integrity({ root, gh });
+    expect(states(gh)).toEqual(["failure"]);
+  }
+  // The CLI's own file listing fails while integrityCheck's --name-status works → never success.
+  {
+    const run = (cmd, args, opts) => (cmd === "git" && args[0] === "diff" && args.includes("--name-only")
+      ? Promise.resolve({ code: 128, stdout: "", stderr: "fatal: bad revision" })
+      : realRun(cmd, args, opts));
+    const gh = fakeGh({ sha: shas.lessons });
+    const { code } = await integrity({ root, gh, run });
+    expect(code).not.toBe(0);
+    expect(states(gh)).not.toContain("success");
+  }
+  // Reading the lessons file at the PR head fails → never success (an unread file is not a deleted file).
+  {
+    const run = (cmd, args, opts) => (cmd === "git" && args[0] === "show" && String(args[1]).startsWith(`${shas.lessons}:.factory/lessons/`)
+      ? Promise.resolve({ code: 128, stdout: "", stderr: "fatal: unable to read" })
+      : realRun(cmd, args, opts));
+    const gh = fakeGh({ sha: shas.lessons });
+    const { code } = await integrity({ root, gh, run });
+    expect(code).not.toBe(0);
+    expect(states(gh)).not.toContain("success");
+  }
+  // The listing "succeeds" but names nothing, while integrityCheck sees the lessons file → integrityCheck asks for a file the
+  // CLI never read from the head; that is not "the file is gone" → never success.
+  {
+    const run = (cmd, args, opts) => (cmd === "git" && args[0] === "diff" && args.includes("--name-only")
+      ? Promise.resolve({ code: 0, stdout: "", stderr: "" })
+      : realRun(cmd, args, opts));
+    const gh = fakeGh({ sha: shas.lessons });
+    const { code } = await integrity({ root, gh, run });
+    expect(code).not.toBe(0);
+    expect(states(gh)).not.toContain("success");
+  }
+});
+
+test("test_236_local_integrity_env_is_injected_not_read_from_process_env", async () => {
+  const { root, shas } = await fixtureRepo();
+  const saved = process.env.GITHUB_ACTIONS;
+  try {
+    // A caller that forgets `env` is refused even when the ambient process looks like an operator shell.
+    delete process.env.GITHUB_ACTIONS;
+    const gh = fakeGh({ sha: shas.clean });
+    const { io: i, o } = io();
+    const code = await integrityCommand({ root, argv: ["17"], io: i, run: realRun, gh, loadHarness: realLoadHarness });
+    expect(code).not.toBe(0);
+    expect(o.err.join("\n")).toMatch(/env/);
+    expect(gh.viewerLogin).not.toHaveBeenCalled();
+    expect(gh.setStatus).not.toHaveBeenCalled();
+
+    // The CLI entry passes the real env: on a runner, `factory integrity 17` is refused for being on a runner.
+    process.env.GITHUB_ACTIONS = "true";
+    const errs = [];
+    const spy = vi.spyOn(console, "error").mockImplementation((s) => { errs.push(String(s)); });
+    try {
+      expect(await cliMain(["integrity", "17"])).not.toBe(0);
+    } finally { spy.mockRestore(); }
+    expect(errs.join("\n")).toMatch(/GITHUB_ACTIONS is set/);
+  } finally {
+    if (saved === undefined) delete process.env.GITHUB_ACTIONS; else process.env.GITHUB_ACTIONS = saved;
   }
 });
