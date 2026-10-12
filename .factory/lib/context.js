@@ -1,4 +1,4 @@
-import { mkdirSync, writeFileSync, statSync } from "node:fs";
+import { mkdirSync, writeFileSync, statSync, readdirSync, readFileSync } from "node:fs";
 import { basename, join } from "node:path";
 import { loadHarness, loadCharter, loadRoles, rosterFor, planRoundsFor } from "./config.js";
 import { latestHandoff } from "./handoff.js";
@@ -243,7 +243,10 @@ export function explicitSubmission(comments) {
   return latest ? { explicit_submission: true, submitted_by: latest.by } : { explicit_submission: false, submitted_by: null };
 }
 
-export async function buildContext({ root, gh, issue, stage, run = null, base = null, setupDirty = null, planRepair = null, mergeConflicts = null }) {
+/** #238 — a JSON-object value (not null, not an array). The one test for "a rejected plan we can carry" (run-stage imports it). */
+export const isPlainObject = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
+
+export async function buildContext({ root, gh, issue, stage, run = null, base = null, setupDirty = null, planRepair = null, planRepairPrevious = null, mergeConflicts = null }) {
   const harness = loadHarness(root), charter = loadCharter(root), roles = loadRoles(root);
   const it = await gh.issue(issue);
   const comments = await gh.comments(issue);
@@ -312,6 +315,14 @@ export async function buildContext({ root, gh, issue, stage, run = null, base = 
      */
     ...(stage === "plan" && Array.isArray(planRepair) && planRepair.length ? { plan_repair: planRepair } : {}),
     /**
+     * #238 (P-14, M-8) — the WHOLE rejected `factory.plan.v1` the reasons above were raised against, so a workflow can fix that
+     * plan by rerunning synthesis only instead of the whole debate. A sibling key, never folded into `plan_repair`: the shipped
+     * workflow reads `Array.isArray(loaded.plan_repair)` and must keep seeing today's string[] (test_238_current_workflow_…).
+     * Carried whole or not at all — only next to `plan_repair`, only for a plain object (run-stage leaves it out otherwise).
+     * It lives in context.json / context.<role>.json (the file the planners read as `args.context`), never in `loaded.json` (dw1).
+     */
+    ...(stage === "plan" && Array.isArray(planRepair) && planRepair.length && isPlainObject(planRepairPrevious) ? { plan_repair_previous: planRepairPrevious } : {}),
+    /**
      * #143 (S3b) — 스테이지가 base 병합의 소스 충돌을 abort하지 않고 빌더에게 넘긴 라운드에서, 아직 충돌 중인 경로들
      * (`run-stage.js`의 `mergeBaseIntoBranch`). 병합을 이어 받는 쓰기 세션은 implement뿐이고, 넘긴 것이 없으면 키 자체가 없다.
      */
@@ -336,6 +347,9 @@ export async function buildContext({ root, gh, issue, stage, run = null, base = 
     try { manifests.push(contextManifest(projected)); } catch { /* 매니페스트의 실패가 컨텍스트의 실패는 아니다 */ }
   }
   ctx.context_manifests = manifests;
+  // #238 dw5 — a build that carries no rejected plan leaves none behind either: a context.<role>.json this build did not rewrite
+  // (a role of an earlier stage's roster) may still hold the one an earlier plan repair turn wrote.
+  if (!ctx.plan_repair_previous) scrubPlanRepairPrevious(root);
   // 디스패처가 Workflow의 `args.loaded`로 그대로 넘기는 작은 파일(M5) — 로더 에이전트의 대체물.
   // #207 — implement에서는 자유 텍스트를 자른 **사본**을 쓴다(ctx.loaded·context*.json은 전문 그대로). 크기는 ctx에 붙여 run-stage가 기록한다.
   ctx.loaded_json = writeLoadedJson({ root, stage, loaded: ctx.loaded, pointerHoldsFullText: roleBlock.builder != null && roleBlock.builder.cold_read !== true });
@@ -351,6 +365,31 @@ export async function buildContext({ root, gh, issue, stage, run = null, base = 
     catch { /* house rules는 편의 자료다 — 못 쓰면 그냥 없이 간다 */ }
   }
   return ctx;
+}
+
+/**
+ * #238 dw5 — removes `plan_repair_previous` (the rejected plan a plan repair turn carries) from every `context*.json` under
+ * `.factory/out` that still holds it, rewriting only those files, and returns their names. run-stage calls it when a repair
+ * turn could not run (its context was already written); buildContext calls it on every build that carries no rejected plan,
+ * so no later reader of the same `.factory/out` sees a stale one. Never throws — an unreadable file is left as it is.
+ */
+export function scrubPlanRepairPrevious(root) {
+  const dir = join(root, ".factory/out");
+  let names;
+  try { names = readdirSync(dir); } catch { return []; }
+  const scrubbed = [];
+  for (const name of names) {
+    if (!/^context(\..+)?\.json$/.test(name)) continue;
+    try {
+      const path = join(dir, name);
+      const obj = JSON.parse(readFileSync(path, "utf8"));
+      if (!isPlainObject(obj) || !Object.hasOwn(obj, "plan_repair_previous")) continue;
+      delete obj.plan_repair_previous;
+      writeFileSync(path, JSON.stringify(obj, null, 2));
+      scrubbed.push(name);
+    } catch { /* not ours to repair — leave it */ }
+  }
+  return scrubbed;
 }
 
 /**
@@ -544,6 +583,9 @@ async function loadedFor({ ctx, roleBlock, gh, comments = [] }) {
     // Task 9 (KTB-51): the plan validator reasons this repair turn must fix (factory-plan.js reads
     // them and hands them to the planner). Absent on a normal plan pass; present on the one repair turn.
     ...(Array.isArray(ctx.plan_repair) && ctx.plan_repair.length ? { plan_repair: ctx.plan_repair } : {}),
+    // #238 dw1: the rejected plan (`ctx.plan_repair_previous`) is deliberately NOT copied here. This file is hand-copied by the
+    // dispatcher into `args.loaded` under a 4096-byte soft limit and is not truncated on plan; a real plan is 8 KB+. The planners
+    // read it whole from `args.context` (context.json / context.<role>.json) — test_238_repair_turn_loaded_json_stays_within_…
     // #143 (S3b): the source paths still conflicted in the base merge the stage left to the builder. Absent when no merge is pending.
     ...(Array.isArray(ctx.merge_conflicts) && ctx.merge_conflicts.length ? { merge_conflicts: ctx.merge_conflicts } : {}),
     // #212: an approved PR's base conflict, resolution-only round (`conflictOnlyOf`). Absent unless all three runner facts hold.
