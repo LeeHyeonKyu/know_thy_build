@@ -50,6 +50,9 @@ const CONTRACT_ITEM = {
     rubric: { type: 'string' },
     level: { type: 'string', enum: ['unit', 'integration', 'e2e'] },
     covers: { type: 'array', items: { type: 'string' } },
+    // #243 (P-6) — which of the ISSUE's `## done_when` items this plan item answers (`test_…` id or `issue-dw<n>`).
+    // Declared so the structured output keeps it: verify-stage (#232) counts it as issue coverage.
+    covers_issue: { type: 'array', items: { type: 'string' } },
   },
 };
 
@@ -113,6 +116,16 @@ const PLAN_V1 = {
     },
     non_goals: { type: 'array', items: { type: 'string' } },
     open_risks: { type: 'array', items: { type: 'string' } },
+    // #243 (P-13) — a sign-off objection that survived the second vote, surfaced at the top of the handoff. The workflow
+    // writes it (from the same objection object as the `signoff-<role>` dissent_log line); optional, absent when clean.
+    signoff_objections: {
+      type: 'array',
+      items: {
+        type: 'object',
+        required: ['role', 'text'],
+        properties: { id: { type: 'string' }, role: { type: 'string' }, text: { type: 'string' } },
+      },
+    },
   },
 };
 
@@ -302,6 +315,14 @@ const planRules =
   `self-runnable check, reviewer-judged only) and the one-line bar a reviewer applies (\`rubric\`). ` +
   `An item with neither a check nor a rubric is rejected as an incomplete acceptance contract.`;
 
+// #243 (P-6, E-7) — the issue's own done_when is the source; the plan may add to it, never drop from it. verify-stage
+// (#232) rejects a plan that leaves an issue item uncovered. Told to whoever WRITES the plan (planner, synthesizer,
+// sign-off revision) — the skeptic only adds.
+const issueCoverRule =
+  `Cover every item under the issue body's \`## done_when\`: mark each plan item that answers one with ` +
+  `\`covers_issue: [<the issue item's test_… id, or issue-dw<n> for the n-th issue item that has no test id>]\`. ` +
+  `Adding items beyond the issue's is allowed (within the cap); omitting one is rejected by the validator.`;
+
 // Task 9 (Structure H, KTB-51) — the one-shot repair turn. When the deterministic validator rejected
 // the previous handoff, run-stage re-dispatches this workflow once with `loaded.plan_repair` set to
 // the exact reasons. The planner fixes precisely those (not a fresh re-plan) — this is the single
@@ -311,8 +332,44 @@ const repairDirective = planRepair.length
   ? `\n\nREPAIR TURN (KTB-51): your previous plan handoff was rejected by the deterministic validator ` +
     `for exactly these reasons:\n${planRepair.map((r) => `  - ${r}`).join('\n')}\n` +
     `Fix precisely these and keep everything the validator did not object to. This is the one repair ` +
-    `turn — a handoff that still breaks a rule goes to a human.`
+    `turn — a handoff that still breaks a rule goes to a human.\n` +
+    // #243 (P-14) — the rejected plan itself is not in the workflow's payload (loaded.json) and the workflow cannot read
+    // files; the writer reads it from its own context file and repairs THAT plan rather than writing a new one.
+    `The rejected plan is \`plan_repair_previous\` in \`${args.context}\` — start from it. Keep every dissent_log ` +
+    `entry and every signoff_objections entry it carries unless a reason above names it.`
   : '';
+// #243 (P-14) — what the handoff says it repairs. Nothing in the payload carries a head for the rejected plan, so this
+// names where it lives; run-stage records it as the agent's claim and never classifies on it (planRepairCostLine).
+const repairOf = planRepair.length ? `plan_repair_previous in ${args.context}` : null;
+const withRepairOf = (o) => (repairOf ? { ...o, repair_of: repairOf } : o);
+
+// #243 (P-15, M-9) — the single-mode merge never pushes done_when past `max_done_when`. The planner's items are never cut
+// (a planner over the cap is the validator's to reject); skeptic items take only the free slots. An item that is the
+// only cover of a medium-or-higher (or severity-less) skeptic dissent goes first — cutting it would orphan that risk —
+// then the rest in order; the kept items stay in the skeptic's order. A cut item is logged `low` under its own id;
+// the dissent it covered is never touched, so an orphaned risk keeps its severity and the validator names it.
+const SEVERITY_RANK = { low: 0, medium: 1, high: 2, critical: 3 };
+function capSkepticItems(plannerItems, skepticItems, dissent) {
+  const free = Math.max(0, maxDoneWhen - plannerItems.length);
+  const plannerCovers = new Set();
+  for (const d of plannerItems) if (d && Array.isArray(d.covers)) for (const c of d.covers) plannerCovers.add(String(c).trim().toLowerCase());
+  const risky = new Set(dissent
+    .filter((d) => d && typeof d.id === 'string' && d.id && !(SEVERITY_RANK[d.severity] < SEVERITY_RANK.medium))
+    .map((d) => d.id.trim().toLowerCase())
+    .filter((id) => !plannerCovers.has(id)));
+  const protects = (d) => Array.isArray(d.covers) && d.covers.some((c) => risky.has(String(c).trim().toLowerCase()));
+  const order = [...skepticItems.filter(protects), ...skepticItems.filter((d) => !protects(d))];
+  const keep = new Set(order.slice(0, free));
+  const kept = skepticItems.filter((d) => keep.has(d));
+  const notes = skepticItems.filter((d) => !keep.has(d)).map((d) => ({
+    id: `cap-${d.id}`,
+    severity: 'low',
+    role: 'workflow',
+    objection: `skeptic done_when ${d.id} not merged: max_done_when ${maxDoneWhen} reached — ${d.text || ''}`.trim(),
+    resolution: `cut at the single-mode merge; the planner's ${plannerItems.length} item(s) are never truncated`,
+  }));
+  return { kept, notes };
+}
 
 if (mode === 'single') {
   // One opus planner writes the whole plan; one skeptic gets one pass at it. No cross-examination,
@@ -333,7 +390,7 @@ if (mode === 'single') {
         `more. non_goals names what this issue will not do, so review cannot widen it later. ` +
         `open_risks is what you saw and are not gating on; dissent_log is where a risk you are ` +
         `knowingly not resolving goes, each entry with an \`id\`, the \`role\` that would raise it and ` +
-        `a \`severity\`.\n\n${planRules}${repairDirective}`,
+        `a \`severity\`.\n\n${planRules}\n${issueCoverRule}${repairDirective}`,
         { agentType: planner.agentType, model: planner.model, label: `plan:${planner.name}`, schema: PLAN_V1 },
       ))())
     : null;
@@ -343,7 +400,8 @@ if (mode === 'single') {
   // The skeptic's schema has no field for deleting or rewriting — it can only add. That is the
   // property that makes a second pass cheap: there is no negotiation to converge, so there is no R2.
   let added = null;
-  if (plan && sk) {
+  // #243 (P-14) — a repair turn is the planner's one pass over the rejected plan; the skeptic already had its turn.
+  if (plan && sk && !repairOf) {
     const add = await once(() => agent(
       `${reading(sk)}\n\n` +
       `Issue #${issue} (tier ${tier}). The plan, in full:\n${JSON.stringify(plan, null, 2)}\n\n` +
@@ -367,12 +425,15 @@ if (mode === 'single') {
       const risks = Array.isArray(plan.open_risks) ? [...plan.open_risks] : [];
       const newRisks = (Array.isArray(add.risks) ? add.risks : []).filter((r) => r && !risks.includes(r));
       const newDissent = (Array.isArray(add.dissent) ? add.dissent : []).filter(Boolean);
-      added = { done_when: newDw.length, risks: newRisks.length, dissent: newDissent.length };
+      const plannerDw = plan.done_when || [];
+      const mergedDissent = [...(Array.isArray(plan.dissent_log) ? plan.dissent_log : []), ...newDissent];
+      const { kept, notes } = capSkepticItems(plannerDw, newDw, mergedDissent);
+      added = { done_when: kept.length, risks: newRisks.length, dissent: newDissent.length };
       plan = boundToMaturity({
         ...plan,
-        done_when: [...(plan.done_when || []), ...newDw],
+        done_when: [...plannerDw, ...kept],
         open_risks: [...risks, ...newRisks],
-        dissent_log: [...(Array.isArray(plan.dissent_log) ? plan.dissent_log : []), ...newDissent],
+        dissent_log: [...mergedDissent, ...notes],
       });
     }
   } else {
@@ -381,7 +442,7 @@ if (mode === 'single') {
 
   phase('Sign-off');
 
-  return {
+  return withRepairOf({
     ...(plan || {}),
     issue,
     tier,
@@ -392,7 +453,7 @@ if (mode === 'single') {
     // Same digest slot as the debate, different shape: there was no room, so there is nothing to
     // summarise except who wrote the plan and how much the one challenge actually added.
     debate: { mode: 'single', planner: planner ? planner.name : null, skeptic: sk ? sk.name : null, skeptic_added: added },
-  };
+  });
 }
 
 phase('Positions');
@@ -457,7 +518,7 @@ let plan = r1.length > 0
       `names what this issue will not do, so review cannot widen it later. Every objection from round 2 ` +
       `that you did not resolve goes into dissent_log verbatim with the role that raised it (with an ` +
       `\`id\` and a \`severity\`) — deleting an objection is forging consensus, not reaching it.\n\n` +
-      `${planRules}${repairDirective}`,
+      `${planRules}\n${issueCoverRule}${repairDirective}`,
       { agentType: 'plan-synthesizer', model: 'opus', schema: PLAN_V1 },
     ))())
   : null;
@@ -489,8 +550,11 @@ if (plan) {
     if (attempt === 1) {
       const log = Array.isArray(plan.dissent_log) ? plan.dissent_log : [];
       const superseded = log.filter((d) => !objections.some((o) => d && d.role === o.role && d.objection === o.reason));
+      // #243 (P-13) — the same objection objects feed both the dissent_log line and the top-level signoff_objections
+      // entry, so the two can never say different things (same role, same text, same id).
       plan = {
         ...plan,
+        signoff_objections: objections.map((o) => ({ id: `signoff-${o.role}`, role: o.role, text: o.reason })),
         dissent_log: [
           ...superseded,
           // 1.4.43: a surviving sign-off objection is injected by the WORKFLOW, after synthesis — like the
@@ -515,14 +579,15 @@ if (plan) {
       `Issue #${issue} (tier ${tier}). The plan you produced:\n${JSON.stringify(plan, null, 2)}\n\n` +
       `Objections raised at sign-off:\n${JSON.stringify(objections, null, 2)}\n\n` +
       `Revise the plan to answer each objection, or — where you will not change the plan — keep the ` +
-      `objection in dissent_log with the reason you are overriding it. This is your only revision.`,
+      `objection in dissent_log with the reason you are overriding it. This is your only revision.\n\n` +
+      issueCoverRule,
       { agentType: 'plan-synthesizer', model: 'opus', schema: PLAN_V1 },
     ))();
     if (revised) plan = boundToMaturity(revised);
   }
 }
 
-return {
+return withRepairOf({
   ...(plan || {}),
   issue,
   tier,
@@ -540,4 +605,4 @@ return {
     r2_objections: r2.reduce((n, x) => n + (Array.isArray(x.objections) ? x.objections.length : 0), 0),
     votes,
   },
-};
+});
