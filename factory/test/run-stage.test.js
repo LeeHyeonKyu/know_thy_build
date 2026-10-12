@@ -11502,3 +11502,70 @@ test("test_236_local_merge_runs_merge_stage_with_the_operator_token_and_no_veto_
     expect(sink.join("\n")).toMatch(/the factory's own account could not be resolved/);
   }
 });
+
+// ── #236 skeptic self-critique (round 4) — H1b's factory account off a runner. A heartbeat's `runner: gha-<id>` is text in a
+// comment body; anyone who can comment can write it. Such a comment must never make its author a factory account whose
+// factory/review and factory/gates H1b then accepts. ──
+import { verifyFactoryStatuses as verifyFactoryStatuses236 } from "../lib/merge-stage.js";
+import { isOperatorMerge as isOperatorMerge236 } from "../bin/run-stage.js";
+
+test("test_236_operator_present_skips_only_the_veto_window — H1b never takes its factory account from a forged runner heartbeat", async () => {
+  const realBeat = { body: heartbeatBody195({ issue: 7, stage: "review", runnerId: "gha-501", started: "x", last: "x" }), createdAt: "2026-10-12T09:00:00Z", author: "ktb-bot", authorType: "User" };
+  const forgedBeat = { body: heartbeatBody195({ issue: 7, stage: "review", runnerId: "gha-1", started: "x", last: "x" }), createdAt: "2026-10-12T09:30:00Z", author: "mallory", authorType: "User" };
+  const byMallory = [
+    { context: "factory/review", state: "success", description: "approved", creatorLogin: "mallory" },
+    { context: "factory/gates", state: "success", description: "GREEN", creatorLogin: "mallory" },
+  ];
+  const wired = ({ comments, env = { [OPERATOR_MERGE_ENV236]: "1" } }) => {
+    const gh = { ...operatorGh236(), comments: vi.fn(async () => comments.map((c) => ({ ...c }))) };
+    const d = wireOperatorMerge236({ runRecord: () => {} }, {
+      stage: "merge", env, run: prViewRun236(prJson236()), repo: "o/r", gh, issue: 7,
+      getCharter: () => ({ self_change: { operator_merge_judge: false } }), getEngine: () => true, getDefaultBranch: () => "main", log: () => {},
+    });
+    expect(d.operatorPresent).toBe(true);
+    return d;
+  };
+  const h1b = async (d, statuses) => verifyFactoryStatuses236({ sha: HEAD_236, statuses, logins: (await d.factoryLogins())?.logins ?? [] });
+
+  // (1) A forged gha- heartbeat by mallory next to the runner's: mallory's own review/gates do not pass H1b, and the door refuses.
+  {
+    const d = wired({ comments: [realBeat, forgedBeat] });
+    const v = await h1b(d, byMallory);
+    expect(v.ok).toBe(false);
+    const door = await d.operatorMergeCheck({ pr: 9, sha: HEAD_236 });
+    expect(door.ok).toBe(false);
+    expect(door.reasons.join("; ")).toMatch(/factory account/);
+  }
+  // (2) FACTORY_BOT_LOGIN in the operator's env names the factory: a forged heartbeat adds nobody, even when it is the only one.
+  {
+    const d = wired({ comments: [forgedBeat], env: { [OPERATOR_MERGE_ENV236]: "1", FACTORY_BOT_LOGIN: "ktb-bot" } });
+    expect((await d.factoryLogins()).logins).toEqual(["ktb-bot"]);
+    expect((await h1b(d, byMallory)).ok).toBe(false);
+    expect((await h1b(d, FACTORY_STATUSES_236)).ok).toBe(true);
+  }
+  // (3) Control: the runner's heartbeat alone still names the factory, and its review/gates pass H1b — the fix refuses forgery, not the factory.
+  {
+    const d = wired({ comments: [realBeat] });
+    expect((await h1b(d, FACTORY_STATUSES_236)).ok).toBe(true);
+    expect((await h1b(d, byMallory)).ok).toBe(false);
+  }
+});
+
+// ── #236 skeptic self-critique (round 4) — the two-actor merge job (GH_TOKEN = FACTORY_MERGE_TOKEN, a human `User` account that writes
+// no heartbeats) with GITHUB_ACTIONS stripped is still a runner: its step env and GitHub's own runner variables mark it. ──
+test("test_236_local_merge_runs_merge_stage_with_the_operator_token_and_no_veto_wait — the two-actor merge job with GITHUB_ACTIONS stripped still opens the window", async () => {
+  // The factory-merge.yml "Run stage" env with GITHUB_ACTIONS removed and a forged marker added.
+  const mergeJob = { FACTORY_OPERATOR_MERGE: "1", FACTORY_RUNNER_ID: "gha-777", FACTORY_TWO_ACTOR: "true", GITHUB_RUN_ID: "777", RUNNER_TEMP: "/home/runner/work/_temp" };
+  const only = (k) => ({ FACTORY_OPERATOR_MERGE: "1", [k]: mergeJob[k] });
+  for (const env of [mergeJob, only("FACTORY_RUNNER_ID"), only("FACTORY_TWO_ACTOR"), only("GITHUB_RUN_ID"), only("RUNNER_TEMP"), { ...only("GITHUB_RUN_ID"), GITHUB_RUN_ID: "" }]) {
+    expect(isOperatorMerge236({ stage: "merge", env }), JSON.stringify(env)).toBe(false);
+    // The merge account is a human, non-factory login — the actor check alone would let it through; the deps never get that far.
+    const gh = { ...operatorGh236({ viewer: "owner-admin", types: { "owner-admin": "User" } }), comments: vi.fn(async () => []) };
+    const deps = makeOperatorMergeDeps236({ stage: "merge", env, run: prViewRun236(prJson236()), repo: "o/r", gh, issue: 7, factoryLogins: async () => ({ ok: true, logins: ["ktb-bot"] }), runRecord: () => {}, log: () => {} });
+    expect(deps.operatorPresent, JSON.stringify(env)).toBeUndefined();
+    expect(deps.operatorMergeCheck).toBeUndefined();
+  }
+  // Control: an operator laptop (a local runner id, none of the runner variables) is still operator mode.
+  expect(isOperatorMerge236({ stage: "merge", env: { FACTORY_OPERATOR_MERGE: "1", FACTORY_RUNNER_ID: "local/laptop" } })).toBe(true);
+  expect(isOperatorMerge236({ stage: "merge", env: { FACTORY_OPERATOR_MERGE: "1" } })).toBe(true);
+});
