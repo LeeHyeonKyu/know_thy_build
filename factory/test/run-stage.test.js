@@ -11270,3 +11270,67 @@ test("test_236_local_merge_one_run_through_run_stage_with_mains_wiring", async (
     expect(log).toEqual([]);
   }
 });
+
+// ── #236 skeptic self-critique (round 2) — main() does not inject factoryLogins: the operator deps resolve the factory login off
+// a runner the way the production wiring can (the issue's runner-written heartbeat, or FACTORY_BOT_LOGIN), never from a fake. ──
+test("test_236_local_merge_resolves_the_factory_login_off_a_runner_without_an_injected_fake", async () => {
+  // main()'s wiring passes the issue and no factoryLogins fake.
+  const src = readFileSync(new URL("../bin/run-stage.js", import.meta.url), "utf8");
+  const wireCall = src.slice(src.indexOf("\n  wireOperatorMerge(deps, {"), src.indexOf("\n  wireOperatorMerge(deps, {") + 400);
+  expect(wireCall).toMatch(/\bissue\b/);
+  expect(wireCall).not.toMatch(/factoryLogins/);
+
+  const beat = { body: heartbeatBody195({ issue: 42, stage: "review", runnerId: "gha-501", started: "x", last: "x" }), createdAt: "2026-10-12T09:00:00Z", author: "ktb-bot", authorType: "User" };
+  const ghOf = ({ viewer = "alice", comments = [beat] } = {}) => ({ ...operatorGh236({ viewer }), comments: vi.fn(async () => comments) });
+  const depsOf = ({ env = { [OPERATOR_MERGE_ENV236]: "1" }, gh }) => makeOperatorMergeDeps236({
+    stage: "merge", issue: 42, env, run: prViewRun236(prJson236()), repo: "o/r", gh,
+    getCharter: () => ({ self_change: { operator_merge_judge: false } }), getEngine: () => true, getDefaultBranch: () => "main", runRecord: () => {}, log: () => {},
+  });
+
+  // (1) An operator laptop: no FACTORY_BOT_LOGIN, no GITHUB_ACTIONS — the issue's heartbeat names the factory account, so a
+  // green fixture with a human actor opens, and the issue's comments were the ones read.
+  {
+    const gh = ghOf();
+    const v = await depsOf({ gh }).operatorMergeCheck({ pr: 9, sha: HEAD_236 });
+    expect(v).toEqual(expect.objectContaining({ ok: true, reasons: [], actor: "alice" }));
+    expect(gh.comments).toHaveBeenCalledWith(42);
+  }
+  // (2) The same resolution still tells the factory token apart: that account as the actor is refused.
+  {
+    const v = await depsOf({ gh: ghOf({ viewer: "ktb-bot" }) }).operatorMergeCheck({ pr: 9, sha: HEAD_236 });
+    expect(v.ok).toBe(false);
+    expect(v.reasons.join("; ")).toMatch(/the merging actor @ktb-bot is a factory account/);
+  }
+  // (3) No heartbeat and no FACTORY_BOT_LOGIN → the factory account is unknown → refused (fail closed)…
+  {
+    const v = await depsOf({ gh: ghOf({ comments: [] }) }).operatorMergeCheck({ pr: 9, sha: HEAD_236 });
+    expect(v.ok).toBe(false);
+    expect(v.reasons.join("; ")).toMatch(/factory account\(s\) could not be resolved/);
+  }
+  // …and FACTORY_BOT_LOGIN in the operator's env is the other source that opens it.
+  {
+    const v = await depsOf({ env: { [OPERATOR_MERGE_ENV236]: "1", FACTORY_BOT_LOGIN: "ktb-bot" }, gh: ghOf({ comments: [] }) }).operatorMergeCheck({ pr: 9, sha: HEAD_236 });
+    expect(v.ok).toBe(true);
+  }
+});
+
+// dw5 "the same gh pr view fields as operator-merge-check.js, not a copy": the local merge asks `gh pr view` for every field the
+// door bin asks for (read from the bin itself), and for every PR field the shared `operatorMergeVerdict` reads (read from its source).
+test("test_236_local_merge_asks_gh_for_every_field_the_door_reads", async () => {
+  const doorBin = readFileSync(new URL("../bin/operator-merge-check.js", import.meta.url), "utf8");
+  const binFields = /"--json",\s*"([^"]+)"/.exec(doorBin)?.[1]?.split(",") ?? [];
+  expect(binFields.length).toBeGreaterThan(0);
+  const lib = readFileSync(new URL("../lib/operator-merge.js", import.meta.url), "utf8");
+  const fnStart = lib.indexOf("export function operatorMergeVerdict(");
+  expect(fnStart).toBeGreaterThan(-1);
+  const param = /export function operatorMergeVerdict\(\s*(\w+)/.exec(lib)[1];
+  const body = lib.slice(fnStart);
+  const verdictFields = [...body.matchAll(new RegExp(`\\b${param}\\??\\.(\\w+)`, "g"))].map((m) => m[1]);
+  expect(verdictFields.length).toBeGreaterThan(0);
+
+  const { deps, run } = operatorDeps236({});
+  await deps.operatorMergeCheck({ pr: 9, sha: HEAD_236 });
+  const asked = run.calls[0].args[run.calls[0].args.indexOf("--json") + 1].split(",");
+  for (const f of new Set([...binFields, ...verdictFields])) expect(asked, f).toContain(f);
+  expect(asked).toContain("headRefOid");   // + the head this run merges
+});

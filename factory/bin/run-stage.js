@@ -4388,8 +4388,11 @@ export const OPERATOR_PR_FIELDS = "number,isDraft,mergeable,baseRefName,files,st
  *     팩토리 토큰은 운영자가 아니다.
  *   - `runRecord` — run 기록에 쓰는 줄을 stderr에도 낸다: 운영자가 거부 사유와 감사 줄을 그 자리에서 읽는다.
  */
-export function makeOperatorMergeDeps({ stage, env, run: runner, repo, gh, factoryLogins, getCharter = () => null, getEngine = () => false, getDefaultBranch = () => "main", runRecord, log = (l) => console.error(l) } = {}) {
+export function makeOperatorMergeDeps({ stage, env, issue, run: runner, repo, gh, factoryLogins: injectedFactoryLogins, getCharter = () => null, getEngine = () => false, getDefaultBranch = () => "main", runRecord, log = (l) => console.error(l) } = {}) {
   if (!isOperatorMerge({ stage, env })) return {};
+  // 팩토리 계정은 운영자의 노트북에서도 풀려야 한다(#236 skeptic): 러너 밖에서 `gh api user`는 운영자 자신이라 쓰지 않으므로
+  // (resolveFactoryLogins ②), 이 이슈의 하트비트 작성자(러너만 쓴다, ③④)와 env의 FACTORY_BOT_LOGIN(①)으로 푼다. 둘 다 없으면 ok:false → 거부.
+  const factoryLogins = injectedFactoryLogins ?? (async () => resolveFactoryLogins({ gh, env, comments: await gh.comments(issue) }));
   const operatorMergeCheck = async ({ pr, sha }) => {
     const reasons = [];
     let actor = null;
@@ -5033,7 +5036,7 @@ async function main() {
   };
   // #236 (ADR-044) — 운영 세션의 로컬 머지(러너가 아닐 때만; 아니면 `{}`라 deps는 그대로다).
   wireOperatorMerge(deps, {
-    stage, env: process.env, run, repo, gh, factoryLogins: () => resolveFactoryLogins({ gh, env: process.env }),
+    stage, env: process.env, run, repo, gh, issue,
     getCharter: () => charter, getEngine: () => engineAtBase, getDefaultBranch: () => harness?.project?.default_branch ?? "main",
   });
   // #179 (ADR-033) — merge의 자기 변경 deps. 게터(selfChange·engine)를 살리려고 펼치지 않고 속성 서술자로 옮긴다.
