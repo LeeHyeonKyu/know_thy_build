@@ -1,11 +1,19 @@
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync, statSync } from "node:fs";
 import { basename, join } from "node:path";
 import { loadHarness, loadCharter, loadRoles, rosterFor, planRoundsFor } from "./config.js";
 import { latestHandoff } from "./handoff.js";
 import { tierFloor, maxTier, normalizeTier } from "./gates.js";
 import { changedFiles } from "./changed-files.js";
 import { buildHouseRules } from "./house-rules.js";
-import { commentsSinceRequeue, latestSelfGateFindings, kRestartState, TRANSITION_TO } from "./retro/issue-comments.js";
+import { commentsSinceRequeue, latestSelfGateFindings, kRestartState, TRANSITION_TO, countedTransitionIndices, mergeConflictRework, conflictExemptionNote, conflictRoundsUsed } from "./retro/issue-comments.js";
+import { CONFLICT_ROUND_EXCLUDED_RUNS } from "./budget.js";
+
+/**
+ * #232 (E-7) — the issue body's done_when checklist as `[{id, text}]`. Re-exported here because this module is where the
+ * issue body is read for every stage; the parser itself lives beside `DONE_WHEN_RE` in verify-stage.js so admission and
+ * the plan validator share one definition of a done_when section (and verify-stage need not import this module).
+ */
+export { issueDoneWhenItems } from "./verify-stage.js";
 
 const ROSTER_STAGE = { plan: "plan", review: "review" };
 
@@ -235,10 +243,7 @@ export function explicitSubmission(comments) {
   return latest ? { explicit_submission: true, submitted_by: latest.by } : { explicit_submission: false, submitted_by: null };
 }
 
-/** #238 — a JSON-object value (not null, not an array). The one test for "a rejected plan we can carry" (run-stage imports it). */
-export const isPlainObject = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
-
-export async function buildContext({ root, gh, issue, stage, run = null, base = null, setupDirty = null, planRepair = null, planRepairPrevious = null, mergeConflicts = null }) {
+export async function buildContext({ root, gh, issue, stage, run = null, base = null, setupDirty = null, planRepair = null, mergeConflicts = null }) {
   const harness = loadHarness(root), charter = loadCharter(root), roles = loadRoles(root);
   const it = await gh.issue(issue);
   const comments = await gh.comments(issue);
@@ -307,19 +312,19 @@ export async function buildContext({ root, gh, issue, stage, run = null, base = 
      */
     ...(stage === "plan" && Array.isArray(planRepair) && planRepair.length ? { plan_repair: planRepair } : {}),
     /**
-     * #238 (P-14, M-8) — the WHOLE rejected `factory.plan.v1` the reasons above were raised against, so a workflow can fix that
-     * plan by rerunning synthesis only instead of the whole debate. A sibling key, never folded into `plan_repair`: the shipped
-     * workflow reads `Array.isArray(loaded.plan_repair)` and must keep seeing today's string[] (test_238_current_workflow_…).
-     * Carried whole or not at all — only next to `plan_repair`, only for a plain object (run-stage leaves it out otherwise).
-     */
-    ...(stage === "plan" && Array.isArray(planRepair) && planRepair.length && isPlainObject(planRepairPrevious) ? { plan_repair_previous: planRepairPrevious } : {}),
-    /**
      * #143 (S3b) — 스테이지가 base 병합의 소스 충돌을 abort하지 않고 빌더에게 넘긴 라운드에서, 아직 충돌 중인 경로들
      * (`run-stage.js`의 `mergeBaseIntoBranch`). 병합을 이어 받는 쓰기 세션은 implement뿐이고, 넘긴 것이 없으면 키 자체가 없다.
      */
     ...(stage === "implement" && Array.isArray(mergeConflicts) && mergeConflicts.length ? { merge_conflicts: [...mergeConflicts] } : {}),
   };
   ctx.loaded = await loadedFor({ ctx, roleBlock, gh, comments });
+  // #212 dw5 — the merge stage's reason was reworded: not a conflict-only round, and run-stage writes this line so it is not silent.
+  if (stage === "implement") { const note = conflictExemptionNote(commentsSinceRequeue(comments)); if (note) ctx.conflict_only_note = note; }
+  // #212 skeptic f5 — the bound is LIFETIME on both sides: once the issue has used it, a conflict round is a normal round, and it says so.
+  if (stage === "implement" && conflictBoundSpent(comments, ctx.issue?.number)
+    && conflictOnlyOf({ comments: commentsSinceRequeue(comments), mergeConflicts: ctx.merge_conflicts, review: ctx.handoffs?.review ?? null })) {
+    ctx.conflict_only_note = `conflict-only: not applied — this issue already used its CONFLICT_ROUND_EXCLUDED_RUNS=${CONFLICT_ROUND_EXCLUDED_RUNS} conflict round(s) (ADR-041); this round counts as a normal round (cost and K)`;
+  }
   mkdirSync(join(root, ".factory/out"), { recursive: true });
   writeFileSync(join(root, ".factory/out/context.json"), JSON.stringify(ctx, null, 2));
   // 역할별 파일(H4). 오케스트레이터만 `context.json`(전체)을 보고, 역할은 자기 이름이 붙은 파일만 본다.
@@ -332,7 +337,8 @@ export async function buildContext({ root, gh, issue, stage, run = null, base = 
   }
   ctx.context_manifests = manifests;
   // 디스패처가 Workflow의 `args.loaded`로 그대로 넘기는 작은 파일(M5) — 로더 에이전트의 대체물.
-  writeFileSync(join(root, ".factory/out/loaded.json"), JSON.stringify(ctx.loaded, null, 2));
+  // #207 — implement에서는 자유 텍스트를 자른 **사본**을 쓴다(ctx.loaded·context*.json은 전문 그대로). 크기는 ctx에 붙여 run-stage가 기록한다.
+  ctx.loaded_json = writeLoadedJson({ root, stage, loaded: ctx.loaded, pointerHoldsFullText: roleBlock.builder != null && roleBlock.builder.cold_read !== true });
   /**
    * Structure C (리뷰 효율 Task 2/3) — implement 스테이지에서 house-rules 다이제스트를 파일로 떨군다.
    * 빌더는 워크플로 스크립트가 아니라 **자기 세션**에서 이 파일을 읽는다(프롬프트가 경로로 가리킨다):
@@ -345,6 +351,109 @@ export async function buildContext({ root, gh, issue, stage, run = null, base = 
     catch { /* house rules는 편의 자료다 — 못 쓰면 그냥 없이 간다 */ }
   }
   return ctx;
+}
+
+/**
+ * ── #207 — `loaded.json`은 디스패처(LLM)가 Workflow `args`로 **손으로 옮겨 쓰는** 파일이다 ──────────────────────────────
+ *
+ * 2026-10-03 #195 rework 라운드 2(run 37140542370): 6,604바이트 페이로드가 6,231바이트에서 잘려 워크플로가 "context payload
+ * missing"으로 끝났다. rework 라운드가 쌓일수록 커지는 것은 자유 텍스트 다섯 필드(must_fix 항목은 claim과 함께 evidence·repro까지)다. 워크플로가 제어 흐름에 쓰는 것은 구조
+ * (`.length`·id·where·`guard.kind/ref`·status)이고, 전문은 빌더가 자기 세션에서 `context.builder.json`(= 전체 ctx, `loaded`·
+ * `handoffs.review` 포함)으로 읽는다. 그래서 **implement에서만**, **쓰는 사본에서만** 그 필드를 앞 N자 + 포인터로 자른다 —
+ * 포인터가 가리키는 파일이 이 런에 쓰이고 전문을 드는 유일한 스테이지가 implement다(builder 역할이 cold_read면 그 파일은
+ * `loaded`를 들지 않으므로 자르지 않는다). 첫 패스는 200자, 그래도 4096바이트를 넘으면 100자로 한 번 더(그 이상은 없다).
+ * 다른 스테이지는 바이트까지 예전 그대로 쓴다. 어느 스테이지든 디스크 위 크기를 돌려주고 run-stage가 `loaded.json: N bytes`로
+ * 기록한다 — 4096은 측정된 한계가 아니라 추정이므로, 넘었다는 사실은 숨기지 않는다.
+ */
+export const LOADED_JSON_LIMIT = 4096;
+export const LOADED_TRUNCATE_PASSES = [200, 100];
+export const LOADED_FULL_TEXT_POINTER = "… (full text: .factory/out/context.builder.json)";
+
+const cutText = (s, n) => {
+  if (typeof s !== "string") return s;
+  const chars = Array.from(s);                                       // 코드 포인트 단위 — 서로게이트 쌍을 가르지 않는다
+  return chars.length > n ? chars.slice(0, n).join("") + LOADED_FULL_TEXT_POINTER : s;
+};
+const cutEach = (arr, key, n) => (Array.isArray(arr)
+  ? arr.map((x) => (x && typeof x === "object" && typeof x[key] === "string" ? { ...x, [key]: cutText(x[key], n) } : x))
+  : arr);
+
+/** 자유 텍스트 필드(다섯 필드 + must_fix[].evidence·repro)만 n자로 자른 **새 객체**. 입력은 건드리지 않고, 키 순서·구조·배열 길이는 그대로다. */
+export function truncateLoadedFreeText(loaded, n) {
+  const out = { ...loaded };
+  // must_fix 항목은 리뷰 FINDING 그대로다(factory-review.js: claim·evidence 필수, repro 선택 — 셋 다 자유 텍스트). #195 라운드 2의
+  // 무게 대부분은 claim이 아니라 evidence·repro였다(실측: 4건 claim 1,114자 / evidence 2,390자 / repro 451자).
+  if ("must_fix" in out) out.must_fix = ["claim", "evidence", "repro"].reduce((arr, key) => cutEach(arr, key, n), out.must_fix);
+  if ("disputed" in out) out.disputed = cutEach(out.disputed, "reason", n);
+  if ("rework_pins" in out) out.rework_pins = cutEach(out.rework_pins, "text", n);
+  if ("self_gate_findings" in out) out.self_gate_findings = cutEach(out.self_gate_findings, "detail", n);
+  if (out.k_restart_brief && typeof out.k_restart_brief === "object" && Array.isArray(out.k_restart_brief.findings)) {
+    out.k_restart_brief = { ...out.k_restart_brief, findings: cutEach(out.k_restart_brief.findings, "claim", n) };
+  }
+  return out;
+}
+
+/**
+ * `loaded.json`을 쓰고 디스크 위 바이트 수를 돌려준다(→ `{ path, bytes, original_bytes, limit, truncated_to, over }`). `original_bytes`는
+ * 자르기 **전** 같은 직렬화의 UTF-8 바이트 수다(자르지 않았으면 `bytes`와 같다) — 런 기록 줄이 "N bytes (from M bytes; …)"로 남겨, 잘린
+ * 페이로드를 빠진 페이로드와 구별하게 한다(#226). 두 패스 뒤에도 넘을 수 있다: 구조(키·배열 원소·id)는 자르지 않으므로(dw1) 항목이 아주
+ * 많으면 구조만으로 4096을 넘는다 — 그때 상한은 "필드당 100자"이고, 넘었다는 사실은 `over`와 기록 줄이 숨기지 않는다.
+ * Scope (#226, dw2 rubric "carries a visible record of its original size"): b881484의 기록 줄은 N만 남겼다 — `original_bytes`는 그
+ * rubric 때문에 더한 것이다. 파일 자체에 키로 넣지 않는다: 키를 하나 더하면 dw1("every key … unchanged")을 깬다. 파일 안의 표식은
+ * 잘린 필드마다 붙는 `LOADED_FULL_TEXT_POINTER`이고, 원래 바이트 수는 같은 런의 기록 줄에 있다.
+ */
+function writeLoadedJson({ root, stage, loaded, pointerHoldsFullText }) {
+  const rel = ".factory/out/loaded.json";
+  const path = join(root, rel);
+  const write = (obj) => { writeFileSync(path, JSON.stringify(obj, null, 2)); return statSync(path).size; };
+  const originalBytes = Buffer.byteLength(JSON.stringify(loaded, null, 2), "utf8");
+  let bytes, truncatedTo = null;
+  if (stage === "implement" && pointerHoldsFullText) {
+    for (const n of LOADED_TRUNCATE_PASSES) {
+      truncatedTo = n;
+      bytes = write(truncateLoadedFreeText(loaded, n));
+      if (bytes <= LOADED_JSON_LIMIT) break;
+    }
+  } else {
+    bytes = write(loaded);
+  }
+  return { path: rel, bytes, original_bytes: originalBytes, limit: LOADED_JSON_LIMIT, truncated_to: truncatedTo, over: bytes > LOADED_JSON_LIMIT };
+}
+
+/** 런 기록의 한 줄. 크기를 모르면(배선 밖의 ctx) null — 지어내지 않는다. */
+export function loadedJsonLine(ctx) {
+  const m = ctx?.loaded_json;
+  if (!m || !Number.isInteger(m.bytes)) return null;
+  const from = m.truncated_to && Number.isInteger(m.original_bytes) ? `from ${m.original_bytes} bytes; ` : "";
+  const cut = m.truncated_to ? ` (${from}free text cut to ${m.truncated_to} chars)` : "";
+  const over = m.over ? ` — over the ${m.limit}-byte limit` : "";
+  return `loaded.json: ${m.bytes} bytes${cut}${over}`;
+}
+
+/**
+ * #212 (ADR-041) — **이 implement 라운드는 충돌 해소 전용인가.** 셋 다 러너의 사실일 때만 `{ approved_head }`, 아니면 null:
+ *   (i) 창(`commentsSinceRequeue`)의 마지막 rework 전이가 머지 스테이지의 CONFLICTING rework다(`mergeConflictRework` — 코멘트 전체 모양,
+ *       `by=` 러너; 사람의 전이·다른 글 안에 인용된 마커는 아니다). K 면제는 여기서 끄고 본다 — 면제된 전이도 "마지막 rework"다.
+ *   (ii) 러너가 base 병합에서 넘긴 충돌 경로(`merge_conflicts`, run-stage `pendingMerge.paths`)가 비어 있지 않다.
+ *   (iii) review 핸드오프가 `approved`이고 verdict가 하나 이상이며 전부 `approve`다. 승인된 head(`head_sha`, 40-hex)가 conflict-scope의 기준이다.
+ * 하나라도 아니면 키 자체가 없다 — `loaded`는 오늘과 바이트까지 같다. 위조된 마커만으로는 켜지지 않는다: (ii)는 진짜 git 충돌이어야 하고,
+ * 켜져도 비용·K 면제는 러너가 진짜 merge 커밋에서 잰 conflict-scope가 GREEN일 때만 쓴다(run-stage).
+ */
+/**
+ * skeptic f5 — 이 이슈가 평생 쓴 conflict 라운드(러너 마커, 재큐와 무관)가 상한에 닿았나. K의 창은 재큐마다 열리지만 비용 상한은 평생이다 —
+ * 그래서 **쓰는 쪽**이 평생으로 묶는다: 닿았으면 conflict-only를 켜지 않고, 그러면 마커(K)도 태그(비용)도 나가지 않는다(둘 다 또는 둘 다 아님).
+ */
+const conflictBoundSpent = (comments, issue) => conflictRoundsUsed(comments, issue) >= CONFLICT_ROUND_EXCLUDED_RUNS;
+
+export function conflictOnlyOf({ comments, mergeConflicts, review }) {
+  if (!(Array.isArray(mergeConflicts) && mergeConflicts.length)) return null;
+  const list = Array.isArray(comments) ? comments : [];
+  const idx = countedTransitionIndices(list, "factory:rework", { exemptConflictRounds: false });
+  if (!idx.length || !mergeConflictRework(list[idx[idx.length - 1]]?.body)) return null;
+  const verdicts = review?.verdicts;
+  if (review?.decision !== "approved" || !Array.isArray(verdicts) || !verdicts.length || !verdicts.every((v) => v?.verdict === "approve")) return null;
+  if (typeof review.head_sha !== "string" || !/^[0-9a-f]{40}$/.test(review.head_sha)) return null;
+  return { approved_head: review.head_sha };
 }
 
 /**
@@ -370,6 +479,8 @@ async function loadedFor({ ctx, roleBlock, gh, comments = [] }) {
    */
   const kRestartBrief = ctx.stage === "implement" ? kRestartState(commentsSinceRequeue(comments)).brief : null;
   const review = ctx.handoffs?.review ?? null;
+  const conflictOnly = ctx.stage === "implement" && !conflictBoundSpent(comments, ctx.issue?.number)
+    ? conflictOnlyOf({ comments: commentsSinceRequeue(comments), mergeConflicts: ctx.merge_conflicts, review }) : null;
   const mustFix = review?.decision === "rework"
     ? (Array.isArray(review.verdicts) ? review.verdicts : []).flatMap((v) => (Array.isArray(v?.must_fix) ? v.must_fix.filter(Boolean) : []))
     : [];
@@ -433,9 +544,9 @@ async function loadedFor({ ctx, roleBlock, gh, comments = [] }) {
     // Task 9 (KTB-51): the plan validator reasons this repair turn must fix (factory-plan.js reads
     // them and hands them to the planner). Absent on a normal plan pass; present on the one repair turn.
     ...(Array.isArray(ctx.plan_repair) && ctx.plan_repair.length ? { plan_repair: ctx.plan_repair } : {}),
-    // #238: the rejected plan those reasons were raised against (absent unless plan_repair is present). See buildContext.
-    ...(Array.isArray(ctx.plan_repair) && ctx.plan_repair.length && isPlainObject(ctx.plan_repair_previous) ? { plan_repair_previous: ctx.plan_repair_previous } : {}),
     // #143 (S3b): the source paths still conflicted in the base merge the stage left to the builder. Absent when no merge is pending.
     ...(Array.isArray(ctx.merge_conflicts) && ctx.merge_conflicts.length ? { merge_conflicts: ctx.merge_conflicts } : {}),
+    // #212: an approved PR's base conflict, resolution-only round (`conflictOnlyOf`). Absent unless all three runner facts hold.
+    ...(conflictOnly ? { conflict_only: true, approved_head: conflictOnly.approved_head } : {}),
   };
 }

@@ -4510,3 +4510,329 @@ merge `timeout-minutes: 90`도 템플릿에 처음 반영한다(테스트 표의
 doctor-ci의 토큰 검사는 `continue-on-error`라 잡을 죽이지 않지만 **WARN으로 남는다**(후속: App 토큰이면 그 검사를 "해당 없음"으로).
 `gh pr edit`류의 GraphQL `viewer` 조회가 App 토큰에서 어떻게 되는지는 #217(REST PATCH)이 비켜 간다. own-calendar는 다음 릴리스로
 업그레이드하고 같은 두 시크릿을 넣는다. `bot-hk`가 복구되면 숨겨진 PR·코멘트가 다시 보이고, 그 계정은 PAT 폴백으로만 남는다.
+
+### ADR-038 보정 — 머지 잡의 git 자격은 머지 배우의 것이다; 창은 토큰보다 짧아야 열린다 — 2026-10-11
+
+**실측(#249·#212, 머지 런 38160716604·38160719884).** ADR-039 뒤 처음으로 판정 경로 자동 머지가 창까지 갔다. 창은 17:42에 열려 18:42에
+닫혔고, 그 직후 리뷰 재검증의 `factory/records` fetch가 죽었다 — `fatal: could not read Username for 'https://github.com'`. 락 해제와
+run 기록 push도 같은 줄로 죽었다. 원인은 코드가 아니라 **자격증명의 수명**이다: ADR-038 뒤 체크아웃이 심는 토큰은 App 설치 토큰이고
+그것은 민팅 뒤 60분에 만료된다(GitHub 문서 "Generating an installation access token": *The installation access token will expire after
+1 hour*). ADR-033이 정한 창은 60분, **잡 안 대기**다. 그 둘은 양립하지 않았고, 만료는 401 뒤 사용자명 프롬프트로 나타나 "review evidence
+not bound to a factory run"으로 읽혔다 — 이슈는 needs-human이 됐고 PR head에는 pending `factory/veto-window` 상태가 남았다.
+
+**결정(운영 세션, ADR-021·ADR-033·ADR-038의 교차점이라 새 번호를 쓰지 않는다).**
+1. **체크아웃 자격은 바꾸지 않는다 — 엔진 자신의 git만 `GH_TOKEN`으로 인증한다.** 첫 안은 머지 잡의 체크아웃을 `FACTORY_MERGE_TOKEN`으로
+   하는 것이었고 대역 리뷰가 기각했다: 머지 잡은 거부권 창 **전에** PR head의 게이트 `[commands]`를 실행하며(`merge-stage.js` → `gates.js`
+   `scrubbedRunner`), `exec.js`의 env 스크럽은 `.git/config`에 심긴 체크아웃 헤더에 닿지 않는다 — admin PAT를 거기 두면 게이트 한 줄
+   (`git config --get http.….extraheader`, 또는 그냥 `git push origin HEAD:main`)로 분기 보호를 우회한다. 그래서 체크아웃은 App 설치
+   토큰 그대로 두고, run-stage `main`이 merge 스테이지에서만 `gitAuthEnv(GH_TOKEN)`을 **엔진 프로세스 env**에 얹는다: git의
+   `GIT_CONFIG_COUNT/KEY_n/VALUE_n`(프로세스 한정, `.git/config`에 쓰지 않음)로 체크아웃 헤더 목록을 **비우고**(빈 값 항목) 우리 헤더를
+   올린다. 비우지 않으면 두 `AUTHORIZATION` 헤더가 나가 GitHub이 400을 돌려준다(2026-10-11 스파이크: 가짜 헤더를 심은 bare 클론에서
+   리셋 + 실토큰은 fetch 성공, 리셋 없이는 400, 가짜 헤더만으로는 정확히 그 "could not read Username"). 그 다섯 키는 `MERGE_CAPABLE_ENV`에
+   들어가 게이트 자식에게는 가지 않는다. 두 배우 모드(이 저장소·own-calendar)에서 `GH_TOKEN`은 만료 없는 머지 PAT — 그 값을 이미 들고
+   있는 프로세스가 같은 값을 git에도 쓰는 것이므로 노출면은 그대로다.
+2. **단일 배우 App 모드는 fail-closed.** 거기서는 `GH_TOKEN`도 설치 토큰이라 같은 만료를 겪는다. 워크플로가 `FACTORY_GIT_TOKEN_TTL_MINUTES`
+   (머지 PAT면 `0`, App만이면 `60`)를 싣고, merge-stage의 창 열기는 잡 예산 검사와 같은 모양으로 "잡 시작 + 수명 − 지금 ≥ 창 + 10분
+   여유"를 묻는다. 모자라면 창을 열지 않고 blocked로 이유를 말한다(머지 PAT를 넣거나 `veto_minutes`를 낮추라고). 한 시간 뒤에 알 수 없는
+   이유로 죽는 것보다 지금 이유를 말하는 쪽이 낫다.
+3. **창을 잡 밖으로 내는 재진입 설계(ADR-037 토론 (1)의 stalled 팔 안)는 채택하지 않는다** — ADR-033의 소유자 결정("잡 안 대기")을
+   유지하고, 설치 토큰을 엔진이 재민팅하는 안(개인 키를 스텝 env로 — 노출면 확대)도, 머신 유저 PAT로 체크아웃하는 안(그 계정은 2026-10-06부터
+   shadow-flag 상태라 신뢰할 수 없다)도 택하지 않는다. 템플릿 사본도 같이 바꾼다.
+
+**남는 것**: #249·#212는 재큐로 다시 돈다(그 head에 남은 pending `factory/veto-window`는 새 런이 새 상태를 올리며 덮는다). 운영 door는
+pending 상태가 있는 PR을 머지하지 않으므로(`operator-merge-check`), 죽은 런이 남긴 창은 door로도 못 연다 — 그것이 맞다.
+
+**보정 2 — 후행 스텝은 토큰을 다시 민팅한다(2026-10-11, #249 재큐의 머지 런 38172268448).** 위 보정으로 창 뒤의 머지·records·락은
+살았고 #250이 공장 손으로 머지됐다. 그런데 잡은 `failure`로 끝났다: 마지막 `Sweep` 스텝의 `GH_TOKEN`이 첫 설치 토큰이라 만료돼 `gh`가
+빈 출력을 냈고 `sweep.js:37`의 `JSON.parse`가 죽었다("Token expired, skipping token revocation"이 같은 로그에 있다). `Aborted cleanup`도
+같은 토큰이다 — 90분 타임아웃 뒤의 정리가 만료 토큰으로 돌면 고아 락이 남는다(KTB-24가 막으려던 침묵의 재발). 머지 PAT로 바꾸지 않는
+이유: sweep의 `resolveFactoryLogins`는 Actions 안에서 뷰어를 공장 계정으로 세므로, 소유자의 PAT로 돌면 소유자가 적은 `human-decision`이
+"봇이 쓴 것"으로 기각된다(T5 MF-1). 그래서 다섯 스테이지 워크플로(+템플릿)는 아티팩트 업로드 **뒤**, 정리 스텝 **앞**에
+`actions/create-github-app-token`을 한 번 더 부르고(`id: factory-token-late`, `if: always() && FACTORY_APP_CONFIGURED`), 두 후행 스텝은
+`late || first || PAT` 순으로 쓴다. 업로드 뒤라 그 토큰은 어떤 아티팩트에도 실리지 않는다. `sweep.js`의 빈 `gh` 출력에 대한 명확한
+실패 메시지는 #279와 함께 후속이다.
+
+## ADR-039 소유자는 거부권이다 — 판정 경로 자동 머지 ON, 운영 세션이 자기 PR을 머지한다 — 2026-10-10 (소유자 결정)
+
+**소유자(원문)**: "이거 사람역할 하는 agent를 하나 띄워서 나한테 pr 검토 받지 않고 merge하도록 해. 이거 때문에 너무 블로커가 심하다."
+2026-10-04~10 일주일의 사람 머지 요청은 PR #193·#204·#192·#203·#190·#215·#216·#218·#219·#221·#222·#223·#225 — 열셋이었고, 그중
+사람의 판단이 든 것은 0건이었다(전부 "체크 GREEN이면 머지"). ADR-037 §6이 2주 두기로 한 `auto_merge_judge`의 유예는 그 2주가
+**사람 머지 대기**로 채워진다는 뜻이었다.
+
+**결정**:
+1. CHARTER `self_change.auto_merge_judge: true` — 공장이 만든 판정 경로 PR은 ADR-033의 조건(만장일치 + GREEN + 거부권 창 60분 +
+   차단기 닫힘)으로 공장이 머지한다. ADR-037 §6의 유예는 철회.
+2. CHARTER `self_change.operator_merge_judge: true`(새 키, 기본 false) — 운영 세션(소유자 계정의 Claude 세션)은 판정 경로가 든
+   **자기 PR**(`.github/**`·templates·CHARTER·엔진 핫픽스)도 운영 door(`operator-merge-check.js` → 운영 머지 명령 `--squash --admin`)로
+   머지한다. door의 나머지 자물쇠(draft·mergeable·기본 브랜치·체크 GREEN)는 그대로이고, 판정 경로 목록은 사유 줄에 소리내어 적힌다.
+3. **대역 리뷰어**: 운영 세션은 판정 경로 PR을 머지하기 전에 작성자와 다른 컨텍스트의 리뷰어 에이전트(fresh `general-purpose`,
+   읽기 전용)에게 PR diff·이슈·ADR을 cold read 시켜 `approve | reject(must_fix)`를 받는다. 기계적 검증(전체 스위트, 워크플로면
+   actionlint)은 그 앞이다. 이것은 훅이 검증하지 못하는 **절차 규칙**이다(`.claude/CLAUDE.md` "운영 머지").
+4. 소유자에게 남는 것은 거부권(revert·`factory:veto`·차단기 리셋)과 사람만 할 수 있는 일(토큰·시크릿·계정·GitHub Support)이다.
+
+**검증**: `test_adr039_operator_door_passes_judge_paths_only_when_the_charter_switch_is_on`(operator-merge.test.js) —
+스위치 꺼짐은 오늘과 같고, 켜짐은 판정 경로를 허용하되 목록을 돌려주며 다른 자물쇠는 그대로. `config.test.js`는 새 키의 기본값·
+불리언 검증을 핀한다. **되돌리기**: CHARTER의 두 값을 false로 — 코드는 그대로 두어도 ADR-032/033의 모양으로 돌아간다.
+
+**대역 리뷰 1회차(이 PR)**: fresh 리뷰어가 reject 2건을 냈다 — (1) 설치본 미러(`.factory/lib/config.js`)가 새 CHARTER 키를 모르면
+`loadCharter`가 던져 **모든 스테이지가 멈춘다** → 미러를 이 PR에서 재생성(러너와 같은 `regenerateMirror`); (2) bin의 새 경로에 테스트가
+없다 → 스위치 on/off·깨진 CHARTER·door 자기 파일을 bin 호출로 핀. 또한 **문은 자기 자신을 열지 못한다**(`DOOR_FILES`: door의 판정
+코드·양의 목록·bin·훅과 그 설치본)는 리뷰어의 blast-radius 지적에서 왔다. 이 PR 자체는 door 파일을 바꾸므로 마지막 사람 머지다.
+
+## ADR-040 큐로 들어오는 문은 하나다 — triage 진입 재심사, 로컬 진입 심사, retro 승격 이슈 — 2026-10-10 (#230, 재착륙 #247·#249)
+
+(#230 브랜치 `claude/fq-230`이 한 칸 앞 번호로 쓴 항목이다. ADR-039는 바로 위의 "소유자는 거부권이다" 결정이고, 그 항목을 착륙시킨 것이 PR #229(051cb7c)다 — 번호가 그쪽 것이므로 #247이 재착륙하며 040으로 바꿨다. #249는 #247 브랜치
+`claude/fq-247` @ 9f6dc7a를 그대로 가져왔다 — 이 항목이 S2b를 닫는다.)
+
+**사건**: 허점 원장(`docs/research/ktb-gap-ledger-2026-10-09.md` §1, E-1·E-2·E-3·E-8)에 따르면 `factory:queue`로 가는 정식 경로
+`transition()`(리허설 + 큐 진입 심사, ADR-025·S2)을 비켜 가는 길이 셋 있었다. ① 사람이 UI로 붙인 라벨과 라벨을 단 채 태어난
+이슈는 심사 없이 triage를 띄웠다. 심사는 전이하는 순간 한 번뿐이라, 러너를 기다리는 55~90분 동안 바뀐 본문도 보지 못했다.
+② `makeLocalEntry`(`factory run triage <n>`)는 리허설만 보고 라벨을 직접 썼다. ③ retro의 성숙도 승격 이슈는 `factory:queue` 라벨을 단 채
+태어났다.
+
+**결정** — 심사 규칙은 계속 `lib/admission.js` 한 곳에만 둔다. 세 자리는 main()이 만든 **같은 심사기**를 주입받아 부르기만 한다.
+1. **triage 진입 재심사**(`runStage`). 진입 라벨이 `factory:queue`로 정해진 뒤에 돈다. 로컬 진입과 blocked 재시도 hop 뒤, 에이전트를
+   띄우기 전이다. 판정은 `entryRecheck`가 구조화된 코드(`queueAdmission`의 `codes`)로 하고, 사유 문구를 정규식으로 되읽지 않는다.
+   **이슈 자신의 사실만 다시 판정한다**(예외: triage 진입의 `queue_max` — hop으로 복구된 진입 포함, #247·#249 sec1, 아래 "#247이 더한 것"):
+   - done_when 없음 → `factory:needs-info`. NEVER_AUTOMATE → `factory:wont-do`. 이슈 본문의 "needs-info"와 다르게 wont-do로 보내는 이유:
+     triage가 같은 사실을 만나면 스크립트가 강제하는 상태가 이미 wont-do다(감사 M1). 한 사실에는 끝 상태가 하나다.
+   - 거부는 `transition()`으로 한다. 코멘트는 그 전이 코멘트 하나이고, 사유는 큐 문이 같은 본문에 쓰는 문장
+     (`admissionRefusedReason`, 이제 `transition()`도 이 함수로 쓴다) 그대로다. claim을 풀고 exit 0. 새 마커는 만들지 않는다.
+   - **심사가 입력을 읽지 못했으면 판정이 아니다.** gh 장애, CHARTER 미적재, 심사기가 던진 경우가 그렇다. 진입 상태를 못 읽었을
+     때(감사 M13)와 같은 `factory:blocked`/`api-error`로 세우고 exit 2다. needs-info·wont-do·backlog로 보내지 않고, "부적격"이라고
+     말하지도 않는다. sweeper의 blocked 재시도는 hop(`blocked → queue`) 뒤에 이 자리를 다시 지난다. **그 hop은 다른 모든 큐 진입과 같은
+     문을 지난다**(#249 sec1 — `makeTransitionDep`는 triage의 `prerequisite` hop에도 심사기를 그대로 넘긴다): 이슈 자신의 사실, 읽기 실패,
+     그리고 상한(`queue_max`·`open_max`·`depth_max`) 모두 hop을 거부한다(심사기가 없으면 `transition()`이 `ADMISSION_UNWIRED`로 거부한다).
+     거부된 재시도는 hop에서 멈춰 blocked에 남고 exit 2, 런 기록에 `blocked retry hop refused`와 거부한 상한을 적는다(needs-info가 아니다 —
+     `blocked → needs-info`는 그래프에 없다). sweeper가 재시도 한도 뒤에 needs-human으로 올린다. hop 뒤의 이 재심사도 hop으로 복구된
+     진입에 `queue_max` 면제를 주지 않는다(아래 "#247이 더한 것").
+2. **로컬 진입 심사**(`makeLocalEntry`). 리허설 다음, `setFactoryLabel` 앞에서 같은 심사기를 부른다. 거부면 라벨도 코멘트도 쓰지
+   않고, `local entry refused: <큐 문과 같은 문장>`을 돌려주며 stderr에도 낸다. 상한도 여기서 판정한다(이슈가 아직 backlog라 자기
+   자신을 세지 않는다).
+3. **retro 승격 이슈**(`makeRetroCreateIssue`, main의 `createIssue` — 조립은 `retroMainDeps`로 main 밖에 꺼내 테스트가 그대로 부른다). 큐를 목적지로 든 요청이면 `backlog` + `factory:harness`로 만들고,
+   retro가 직접 조립한 `makeRehearsalChecker` + `makeQueueAdmission`을 실은 `transition()`으로 옮긴다(`skipRehearsal`은 쓰지 않는다).
+   flaky 수확·하네스 요청과 같은 모양이고 `by=script`다. 거부되거나 문이 던지면 이슈는 backlog에 남는다. 그때 retro 기록에 한 줄
+   (`retro: harness issue #N stays in backlog — not queued: …`)을 남기고, 이슈에는 사유와 다음 걸음을 적은 `factory-harness-not-queued`
+   코멘트를 하나 단다(피처 주차 문장은 뺀다). retro는 던지지 않고 나머지 단계를 마친다.
+
+**#247이 더한 것**(#247 계획 dw2 — 계획 토론의 네 역할이 모두 짚은 결함):
+- **`queueAdmission`은 심사받는 이슈 자신을 `queue_max`에 세지 않는다**(`open_max`가 이미 하던 자기 제외와 같은 규칙, `lib/admission.js`).
+  backlog·needs-info·needs-human·blocked에서 오는 이슈는 큐 목록에 없으므로 `transition()`·로컬 진입의 판정은 바뀌지 않는다.
+- 그래서 **triage 진입이 — blocked 재시도 hop으로 복구된 진입을 포함해 — `queue_max`를 다시 본다**(`entryRecheck(a, { queueMax: true })` — 기본값은 예전처럼 상한을 보지 않는다).
+  꽉 찬 큐(N/N)의 이슈는 자기 자신을 세어 쫓겨나지 않는다. 큐가 N을 넘겨 들고 있으면(문의 count-then-write 경합, 손 라벨 — hop은 같은 문의 상한을 지나므로 큐를 넘겨 채우지 않는다) 큐에 있는
+  이슈는 **번호가 자기보다 앞선 형제만** 센다: 번호 순 첫 N개는 언제나 통과하고 그 뒤에 선 (구성원 수 − N)개만 거부된다. 형제 전부를 세면
+  구성원 모두가 차례로 거부돼 큐가 통째로 비워진다. 번호는 도착 순서가 아니다(아래 `open_max` 항목) — 그래서 거부되는 것이 문을 비켜
+  들어온 그 이슈라는 보장은 없고, 보장은 "첫 N개는 쫓겨나지 않는다"까지다. backlog에서 오는 이슈는 목록에 없으므로 여전히 구성원 전부를 센다
+  (`test_247_queue_max_refuses_only_members_ranked_after_the_first_n`, `test_247_full_queue_triage_never_evicts_its_first_n_members`). blocked 재시도 hop의 복구로 정해진
+  진입도 똑같이 `queue_max`를 다시 잰다(#249 sec1 — hop을 허락하는 마커는 작성자를 확인하지 않으므로 "복구"라는 주장은 면제의 근거가 못 된다;
+  `test_249_hop_restored_entry_recheck_enforces_queue_max`). 상한만 걸린 거부의 끝 상태는 `factory:needs-human`이다 — 고칠 본문이 없으니 needs-info가 아니고, 끝낼 이유가 아니니
+  wont-do가 아니며, `factory:queue → backlog`는 그래프에 없다(새 엣지를 만들지 않는다). triage를 다시 띄우지 않고, 큐가 비면 사람이
+  `needs-human → queue`로 되돌린다(그 문이 상한을 다시 잰다). 이슈 자신의 사실이 함께 걸렸으면 그 사실의 상태(needs-info·wont-do)로 간다.
+  (`test_247_triage_reentry_does_not_count_itself_against_queue_max`, `test_247_entry_recheck_rejudges_queue_max_only_when_asked`,
+  `test_247_triage_refusal_leaves_a_terminal_label_and_one_comment`)
+- **flaky 수확도 같은 꼬리 하나를 부른다**(#247 dw5, 검증자 지적 4). `lib/gates.js`가 따로 갖고 있던 사본(자기 마커
+  `factory-flaky-not-queued`, 거부 종류와 무관하게 늘 "리허설을 돌리라"는 다음 걸음)을 지우고 `createBacklogIssueAndQueue`(`parkedFeature: false`)를
+  부른다. 보이는 변화: 거부·던짐이면 flaky 이슈에도 `factory-harness-not-queued` 코멘트 하나가 거부 종류에 맞는 다음 걸음을 싣고(코멘트 첫 줄은
+  "이 이슈는 `backlog`에 머물러…"로, 하네스 이슈만 가리키지 않게 고쳤다), 문이 배선되지 않은 게이트 런은 코멘트 없이 `flaky_issues_backlogged`에
+  `HARNESS_TRANSITION_UNWIRED`를 남긴다. 문이 던져도 수확 결과에 `error:` 줄이 더해지지 않는다(이슈 번호 그대로).
+  (`test_247_flaky_harvest_uses_the_single_backlog_queue_tail`)
+
+**이슈 본문과 다른 것**(#230 계획 토론에서 결정, 이견은 그 계획 handoff의 dissent d1·d2에 남아 있다):
+- **triage 진입에서 `open_max`·`depth_max`는 다시 보지 않는다.** `open_max` 형제는 서로를 센다(자기 제외를 해도 형제끼리 서로를
+  쫓아낸다). "앞선 이슈만 센다"는 대안에는 정의되지 않은 도착 순서가 필요하다. 이슈 번호는 그 순서가 아니다(`needs-info → queue` 재진입).
+  그 상한은 `transition()`과 로컬 진입의 문에 남는다. E-8 중 **`open_max` 절반**(손 라벨 홍수)은 열려 있고 **#245**가 이어받는다.
+  본문 변화 절반과 `queue_max`는 위 1과 #247이 닫는다.
+- **backlog로 내보내는 상한 거부는 만들지 않았다**(그래프에 엣지가 없다). needs-info를 상한 거부에 쓰는 일도 없다.
+- **로컬 진입은 심사기가 배선되지 않으면 거부한다 — 키를 생략한 호출도.** `admission`이 함수가 아니면(키 생략·`null`·`false`·객체)
+  라벨도 코멘트도 쓰지 않고, `transition()`이 같은 경우에 내는 `ADMISSION_UNWIRED` 문장으로 거부한다. #230 브랜치는 키를 **생략한**
+  호출만 예외로 두었다(`admission !== undefined`) — 리뷰 두 라운드가 그 예외를 거부했고(spec1), #247 계획 dw3이 그것을 닫는다
+  (`test_247_local_entry_without_admission_dep_writes_no_label`). 그래서 기존 테스트 `makeLocalEntry: backlog issue with no factory
+  label → sets factory:queue…`(run-stage.test.js)는 호출 한 줄에 통과하는 심사기를 넘긴다(단언은 그대로). #247 본문에는 `tests_changed_allowed:`가
+  없어 verifier가 이 한 줄로 거부했고, #249가 그 허용(`factory/test/run-stage.test.js`)을 본문에 적고 다시 착륙시켰다. 그 표식은 파일 단위라
+  "기존 테스트는 이 한 줄만"은 리뷰가 지킨다. 프로덕션 배선(main)은 언제나 심사기를 넘기고, 그것은
+  `test_249_local_entry_production_wiring_passes_admission`이 main()의 그 호출 인자를 그대로 돌려 고정한다(호출이 `admission`을 잃으면 실패한다).
+- **triage 진입 재심사도 심사기 dep이 없으면 거부하지 않고 기록한다.** `deps.admission`이 없는 런은 재심사를 건너뛰되, 에이전트를 띄우기
+  전에 런 기록에 `ADMISSION_UNWIRED` 문장 그대로 한 줄을 남긴다(조용히 지나가지
+  않는다). #247 — 그 줄은 자기 문장도 자기 상수도 갖지 않는다: 브랜치 테스트가 import하는 `TRIAGE_RECHECK_UNWIRED`는 `ADMISSION_UNWIRED`의 별칭 재수출이다("미배선"을 뜻하는 말은 그 하나다). 거부(fail closed)로 하지 않은 이유는 위와 같다:
+  기존 triage 테스트 넷(I2 두 건, KTB-20, KTB-15b — run-stage.test.js)이 심사기 없는 deps로 `factory:queue` 진입을 끝까지 돌리고, 거부로
+  바꾸면 그 넷이 깨진다(실측). 대신 두 가지가 그 틈을 좁힌다. main()의 `deps` 객체가 `admission` 키를 싣는다는 사실을 테스트가 고정하고,
+  blocked 재시도의 hop은 main의 전이 dep이 심사기 없이는 `blocked → queue`를 거부하고, 심사기가 있으면 이슈 자신의 사실을 hop에서
+  직접 판정하므로(위 1) `deps.admission`이 빠진 런에서도 부적격 이슈의 재시도는 에이전트에 닿지 않는다(`test_230_…_unreadable_…`).
+  남는 틈은 hop의 문까지 끈 모양(`skipRehearsal`, 테스트 전용)뿐이다.
+  같은 이유로 #230 dw3 루브릭("origin이 queue인 재시도는 심사를 통과해야만 에이전트에 닿는다")은 triage 진입의 생략 모양에서 문자 그대로는
+  지켜지지 않는다 — 위 넷을 바꿔야 하고, #247 계획은 그것을 요구하지 않았다. 로컬 진입의 생략 모양은 위 항목이 닫았다.
+- **retro의 요청 모양은 그대로다**: `runRetro`는 여전히 `labels: [QUEUE_LABEL, HARNESS_LABEL]`을 목적지 요청으로 넘긴다. 기존 테스트
+  (retro-bin.test.js ⓹)가 이 모양을 고정하기 때문이다. GitHub에 이슈를 만드는 dep(`makeRetroCreateIssue`)은 큐 라벨로 이슈를 만들지
+  않는다. 그래서 retro에는 큐 라벨을 달고 태어나는 길이 없다.
+
+**수용한 위험**:
+- ADR-025의 낡은 리허설 잠금이 이제 retro 승격 이슈에도 걸린다. 리허설이 낡으면 승격 이슈는 사람이 `factory rehearse`와 `:next`를
+  할 때까지 backlog에 선다.
+- retro 워크플로의 토큰이 런타임에 라벨을 옮길 수 있는지는 저장소에서 확인할 수 없다. 계약은 실패 경로뿐이다(backlog + 기록 한 줄 + 코멘트).
+- 큐에 든 이슈의 triage 진입마다 gh 읽기가 더 든다(심사 한 번).
+- 사람이 부적격 이슈를 거듭 재큐하면 주기마다 전이 코멘트가 하나씩 쌓인다(dedup은 만들지 않았다).
+- NEVER_AUTOMATE 글롭의 오탐은 wont-do(출구 없음)로 간다. triage 스크립트의 기존 강제와 같은 결과다.
+- **blocked 재시도 hop은 같은 문을 지난다**(#249 sec1). 그 hop을 허락하는 `factory-blocked-origin` 마커는 `blockedOrigin()`이 작성자를
+  확인하지 않으므로 이슈에 코멘트를 쓸 수 있는 누구나 위조할 수 있고, hop만의 상한 면제는 그 위조로 큐 상한을 비켜 가는 길이었다.
+  대가: 일시적 실패로 blocked에 간 진짜 재시도도, 그사이 큐가 `queue_max`에 찼거나 형제가 `open_max`에 있거나 `depth_max`를 넘은 이슈면
+  `factory:blocked`에 남고 exit 2, 런 기록에 그 상한이 적힌다(`test_249_blocked_retry_hop_is_refused_by_queue_caps`). sweeper가 재시도
+  한도 뒤에 needs-human으로 올리고, 큐가 비면 사람이 되돌린다. 마커 자체의 신뢰(위조 마커로 재시도 스테이지를 고르는 상태 되감기)는
+  이 항목이 닫지 않는다 — 후속 **#251**.
+  sweeper가 그 거부된 hop을 needs-human으로 올릴 때의 사유는 `blocked (API quota/outage)`(`lib/sweeper.js`)라 원인을 잘못 말한다(리뷰 cf-s3) —
+  이 항목은 고치지 않고 후속 **#280**으로 남긴다. 큐 상한 거부의 진짜 사유는 런 기록에만 있다.
+
+**배포 뒤 사람이 보는 변화**(소급 적용):
+- 이미 `factory:queue`에 있는 이슈도 **다음 triage 진입에서 다시 심사된다.** 손으로 큐 라벨을 붙였고 본문에 done_when이 없는 이슈는
+  배포 뒤 첫 triage에서 needs-info로 간다(전이 코멘트 하나, 사유는 큐 문의 문장 그대로). 큐가 `queue_max`를 넘겨 쌓여 있었다면
+  새로 triage에 들어오는 이슈 가운데 번호 순으로 첫 `queue_max`개 뒤에 선 이슈만 needs-human으로 간다. 일을 잃은 것이 아니다 — 본문을 고치거나 큐가 비면 문을 지나 돌아온다.
+- retro의 성숙도 승격 이슈는 **더는 자동으로 큐에 들어가지 않을 수 있다**: 문(리허설 + 심사)이 거부하면 backlog에 남고
+  `factory-harness-not-queued` 코멘트 하나가 그 사유를 말한다. 예전에는 거부될 일 없이 큐 라벨을 달고 태어났다.
+- 데몬 경쟁: 진입 재심사의 전이는 claim을 쥔 채로 끝난다. claim을 잃은 런은 이 자리에 오기 전에 exit 2로 끝난다(KTB-28).
+  이를 직접 고정하는 테스트는 없다.
+
+**되돌릴 때 남는 것**(이 변경을 revert해도 저장소·이슈에 남고 자동으로 치워지지 않는다 — 정리 도구는 #249 plan의 non_goals에 따라 만들지 않았다):
+- retro가 `backlog`로 만든 성숙도 승격 이슈 중 문이 거부한 것은 revert 뒤에도 `backlog`에 남고, 그 위의 `factory-harness-not-queued`
+  코멘트도 남는다. retro의 제목 dedup이 같은 제목의 새 이슈를 막으므로 revert된 retro가 그 이슈를 큐 라벨로 다시 만들지 않는다 —
+  사람이 큐에 넣거나 닫는다.
+- triage 진입 재심사·로컬 진입·blocked 재시도 hop이 이미 쓴 라벨(`factory:needs-info`·`factory:wont-do`·`factory:needs-human`, hop 거부로
+  남은 `factory:blocked`)과 그 `factory-transition:v1` 전이 코멘트는 그대로다. revert는 그 이슈들을 큐로 되돌리지 않는다.
+- retro `_retro.md` 이력의 하네스 단계에 실린 `queued: false`·`queue_reason` 필드는 기록으로 남는다.
+
+**이 항목이 대체하는 기존 기록**(옛 ADR 본문은 고치지 않는다 — 가리키는 방향은 여기서 그쪽이다):
+- Plan 4 retro 결정 "retro는 절대 라벨을 옮기지 않는다": 예외가 하나 생겼다. retro가 방금 만든 성숙도 승격 이슈의 `backlog → factory:queue`
+  한 걸음이고, 그 걸음은 리허설과 큐 진입 심사를 실은 `transition()`으로만 간다(`makeRetroCreateIssue`). 기존 이슈의 라벨은 여전히 옮기지 않는다.
+- #136 S2b 항목 "남은 우회 생산자는 retro의 성숙도 격차 이슈다": retro의 그 이슈도 `backlog`로 태어나 문을 지난다. 큐 라벨을 단 채 태어나는
+  생산자는 이제 없다.
+- 1.4.37 "문은 아직 하나가 아니다": retro 승격 이슈는 `backlog`로 태어나고 로컬 진입은 심사를 부른다. 손 라벨로 들어온 이슈는 triage 진입이
+  이슈 자신의 사실과 `queue_max`(자기 자신은 세지 않는다, #247)로 다시 본다. `open_max`를 triage 진입에서 다시 보는 일은 아직 없다(#245).
+- retro의 심사기(`makeRetroCreateIssue` 안의 `makeQueueAdmission`)는 run-stage main()의 심사기와 **다른 프로세스**(retro 워크플로)의 것이다.
+  한 프로세스 안에 심사기가 둘 생기는 것이 아니다. 규칙은 둘 다 `lib/admission.js` 한 곳에서 온다.
+
+**검증**: `test_230_triage_entry_reruns_admission_and_refuses_like_transition`(코멘트 = 진짜 `transition()`의 문장, 에이전트 0회, 통과
+경로의 dep 호출 순서가 같다), `test_230_triage_entry_admissible_issue_passes_when_queue_is_at_capacity`,
+`test_230_triage_entry_unreadable_admission_blocks_retryably_not_demotes`, `test_230_local_entry_refuses_inadmissible_issues_before_writing_the_label`,
+`test_230_retro_promotion_issue_is_born_backlog_and_transitioned`, `test_230_admission_codes_classify_per_issue_vs_capacity_refusals`;
+#247: `test_247_triage_refusal_leaves_a_terminal_label_and_one_comment`, `test_247_triage_reentry_does_not_count_itself_against_queue_max`,
+`test_247_local_entry_receives_production_admission_closure`(main과 같은 늦은 CHARTER 심사기로, runStage의 순서대로 로컬 진입이 여전히 큐에 넣는다);
+#249: `test_249_local_entry_production_wiring_passes_admission`(main()의 `localEntry: makeLocalEntry({ … })` 호출 인자 그대로 — 적격 이슈는 큐로, 부적격 이슈는 큐 문의 문장으로 거부), `test_249_retro_history_records_queued_false_with_the_refusal_reason`(retro의 `_retro.md` 이력 `applied`의 하네스 단계가 거부·던짐이면 `queued: false` + 기록 줄과 같은 `queue_reason`을, 통과면 둘 다 싣지 않는다), `test_249_retro_admission_uses_the_factory_logins_retro_resolves`(retro 심사기가 retro의 env에서 해석한 공장 로그인을 싣는다 — 마커만 있고 공장 라벨·done_when이 없는 요청은 작성자가 그 로그인일 때만 들어간다);
+#249 sec1: `test_249_blocked_retry_hop_is_refused_by_queue_caps`(작성자가 팩토리가 아닌 마커, 진짜 심사기 — `queue_max`·`depth_max`에서 hop 거부,
+blocked·exit 2·상한이 적힌 기록, 구성원 그대로), `test_249_blocked_retry_hop_with_room_still_reaches_triage`(자리가 있으면 hop이 같은 문으로 큐에 넣고
+에이전트에 닿는다), `test_249_hop_restored_entry_recheck_enforces_queue_max`(hop으로 복구된 진입도 `queue_max` 재심사에서 `transition()`과 같은 문장으로 거부).
+#249 main 병합(#278 위로): `test_249_merge_git_auth_survives_the_base_merge`(main()이 첫 git/gh 호출 전에 `mergeGitAuth({ stage, env: process.env })`를 `process.env`에 얹는 그 한 줄을 소스에서 읽어 그대로 실행한다 — merge + `GH_TOKEN`이면 `gitAuthEnv`의 extraheader 설정, 다른 스테이지면 아무것도 더하지 않는다. ADR-038 보정의 #278 단언은 고치지 않았다).
+
+**#249 main 병합(#261 위로)**: 거부 코드 `codes`는 거부 결과의 **열거되지 않는** 속성이다 — #231·#260 테스트가 `toEqual`로 핀한 거부 결과의 모양을 바꾸지 않고, 같은 프로세스의 `entryRecheck`는 그대로 읽는다(펼치거나 JSON을 지나면 코드가 사라지고 `unreadable`로 남는다 — 내보내지 않는 쪽). #231의 "factory logins could not be resolved" 거부는 `no-done-when`이 아니라 `unreadable`이다: 문은 같은 문장으로 거부하지만 triage 진입 재심사는 로그인 조회 한 번의 실패로 큐의 공장 이슈를 needs-info로 내리지 않는다. 검증: `test_249_unresolved_factory_logins_refusal_is_unreadable_at_the_entry_recheck`, `test_249_local_entry_production_wiring_passes_admission`(main()의 심사기 바인딩이 `factoryLogins: () => resolveFactoryLogins({ gh, env: process.env })` 그대로이고, App 모드에서 마커만 있는 공장 이슈는 들어가며 작성자만 공장인 이슈는 `open_max`에 세진다).
+
+## ADR-041 base가 움직여 생긴 충돌 해소 라운드는 평생 상한과 K에서 빠진다 — 러너가 잰 GREEN일 때만, 이슈당 두 번까지 — 2026-10-11 (#212)
+
+**질문**: 리뷰가 전원 승인한 PR이 base 이동으로 충돌해 `factory:rework`로 돌아오면(머지 스테이지 `merge conflict — rebase onto <base>`), 그
+라운드의 비용과 rework 한 칸을 누가 내는가. #196(2026-10-04)은 승인 뒤 충돌 재큐 라운드 하나로 평생 예산($62.38/117런)을 넘겨 needs-human이 됐다.
+
+**이 ADR이 고치는 것**: ADR-031("돈은 이슈의 평생을 센다")과 ADR-036("상한에서 빠지는 것은 엔진 결함의 닫힌 집합뿐")에 **두 번째 제외 범주**를
+더한다 — 사람도 에이전트도 고르지 않은, base가 움직여서 생긴 비용. 두 ADR의 나머지는 그대로다.
+
+**결정**
+1. **언제가 충돌 해소 전용 라운드인가 — 러너 사실 셋**(`lib/context.js` `conflictOnlyOf` → `loaded.conflict_only` + `approved_head`;
+   `test_212_conflict_only_is_derived_from_runner_facts`): (i) 창의 마지막 rework 전이가 진짜 `runMergeStage`가 CONFLICTING에서 내는 코멘트와
+   모양이 같다(`lib/retro/issue-comments.js` `mergeConflictRework` — 코멘트 전체, `by=` 러너); (ii) 러너가 base 병합에서 넘긴 `merge_conflicts`가
+   비어 있지 않다; (iii) review 핸드오프가 `approved`이고 verdict가 하나 이상이며 전부 `approve`다. 아니면 키가 없고 `loaded`는 오늘과 바이트까지 같다.
+2. **판정은 진짜 merge 커밋에서 잰다**(`bin/run-stage.js` `conflictScopeInput` → `lib/self-gate.js` `conflict-scope`;
+   `test_212_conflict_scope_against_a_real_merge`): HEAD^1 = 승인 head, HEAD^2 = 러너가 병합한 base, 그 뒤에는 이 런의 러너 미러 커밋만.
+   충돌 경로 밖에서 git 자신의 병합(`git merge-tree --write-tree`)과 다른 경로, 충돌 블록 밖의 줄을 바꾼 충돌 경로, merge 앞뒤의 빌더 커밋은
+   `conflict round changed <path> outside the merge`이다. 측정 실패도 RED다(GREEN이 아니다) — 어느 git 읽기든(`rev-list`·`diff-tree`·
+   `merge-base --is-ancestor`·`diff`·`ls-tree`·`show`) 실패하면 판정 불가다. modify/delete(한쪽이 지운 충돌 경로)는 트리가 그 경로를 나열하지
+   않을 때(`ls-tree`)만이고, 실패한 읽기에서 추론하지 않는다(`test_212_conflict_scope_fails_closed_on_every_git_read`). 러너가 같은 병합에서
+   푼 충돌 경로도 병합의 일부다: union 경로(DECISIONS.md)는 같은 충돌 블록 규칙을, 미러 경로는 러너가 쓴 그대로 **base의 사본과 바이트까지
+   같을 때**만 안이다(`resolveMirrorConflicts`는 base의 사본을 통째로 받아 브랜치의 다른 hunk를 의도적으로 버리고, 세션 뒤 미러 커밋이
+   다시 만든다 — 블록 규칙을 대면 올바른 라운드가 RED가 된다; `test_212_runner_mirror_copy_in_the_merge_is_not_outside_it`,
+   `test_212_conflict_round_with_a_runner_mirror_path_is_green_end_to_end`). 파일 통째의 해소는 modify/delete — 두 **편**(M^1·M^2)의 트리 중
+   하나에 그 경로가 없을 때 — 뿐이다. 두 편이 다 가진 경로(내용 충돌)를 M이 지우면 밖이고, git이 표지를 쓰지 않은 내용 충돌(바이너리)은
+   M이 한 편의 blob과 object id까지 같을 때만 안이다(`test_212_conflict_scope_deleting_or_rewriting_a_content_conflict_is_outside_the_merge`).
+3. **RED는 막지 않는다**(plan d3): 워크플로가 아직 self-critique를 돌리므로, 막으면 충돌을 만난 승인 PR이 오늘보다 나빠진다. RED 라운드는 그냥
+   충돌 라운드가 아니다 — 비용도 K도 오늘처럼 세고 리뷰도 오늘의 전체 리뷰다(`test_212_failed_conflict_round_falls_back_to_today`).
+4. **GREEN일 때만 둘을 쓴다, 둘 다 아니면 하나도 아니다**(`test_212_failed_conflict_round_falls_back_to_today`): 이슈 코멘트에 러너 마커
+   `<!-- factory-conflict-round:v1 … -->`, 그리고 그 런의 마지막 기록 섹션 첫 줄에 `conflict-round: stage=implement runner=… run_id=… approved=… head=…`
+   (`lib/usage.js` `conflictRoundLine`). 둘 다 **awaiting-review로의 전이가 성공한 뒤에만** 나간다 — 거부된 전이·사람에게 간 라운드는 끝난
+   충돌 라운드가 아니다(같은 테스트의 (5)). 순서는 **태그 먼저**다: 태그가 든 섹션은 실패를 삼키지 않는 쓰기로 나가고, 실패하면 마커도
+   나가지 않는다(섹션은 태그 없이 다시 쓴다). 그다음 마커를 게시하고, 그 게시가 실패하면 러너가 다음 섹션 첫 줄에
+   `conflict-round-revoked: stage=implement runner=… run_id=… —`(`conflictRoundRevokedLine`)를 써서 **자기 런의** 태그를 거둔다 — 비용은 다시
+   센다. 거두는 것은 같은 러너·같은 `run_id`의 가장 최근 태그 하나다(CI 밖의 모든 런은 `local/<host>`·`run_id=n/a`이고 GHA 재실행은
+   `GITHUB_RUN_ID`를 공유한다 — 러너 문자열만 맞추면 앞선 정당한 태그까지 거둬 budget 줄이 빠진 돈을 틀리게 말한다;
+   `test_212_tag_revocation_withdraws_only_the_latest_tag_of_its_run`). 취소 줄은 면제를 없앨 뿐 만들지 못하므로 위조는 세는 쪽으로만 간다(`test_212_tag_and_marker_are_both_or_neither`,
+   `test_212_tag_revocation_only_withdraws_its_own_runners_tag`). 남는 반쪽은 태그와 마커 사이의 프로세스 죽음(또는 취소 줄 쓰기의 두 번째
+   실패) 하나다: 태그만 있고 마커가 없다 — K는 오늘처럼 세고, 비용 면제는 6의 상수 안에 묶인다. usage 줄에 `conflict=true` 키를 붙이지 않는다 — 그 줄의 모양은 `USAGE_RE`가 소유하고, 키 하나는 ADR-036 2의
+   위조 방어를 다시 연다.
+5. **비용**(`lib/budget.js`; `test_212_conflict_round_cost_is_tagged_and_excluded_from_the_cap`): `parseRunRecord`는 자리가 맞는(implement 섹션의
+   첫 줄, 그 섹션의 러너) `conflict-round:` 줄에만 `conflict_round`를 세우고, `lifetimeCostOf`는 그 섹션을 `usd`·`runs`에서 빼 `conflictUsd`·`conflictRuns`로
+   돌려준다. `budgetCheck`는 `usd`로만 판정한다. 기록의 다른 자리·다른 러너·개행 뒤에 옮겨 적힌 같은 문구는 아무것도 빼지 않는다(쓰는 쪽
+   `quoteConflictRoundLines`·`neutralizeRecordLine`이 인용한다).
+6. **상한은 런 개수다 — `CONFLICT_ROUND_EXCLUDED_RUNS = 2`**(같은 테스트가 핀한다). 뜨거운 파일을 고친 PR은 "승인 → 충돌 → 해소 → 승인 → 다시 충돌"을
+   되풀이할 수 있고, 거기서 아무것도 세지 않으면 멈출 장치가 없다. 기록 순서로 앞의 두 섹션만 빠지고 그 뒤는 센다. 상한은 **평생**이다: K의
+   창은 재큐마다 다시 열리므로, 쓰는 쪽(`lib/context.js`)이 이슈의 평생 마커 수(`conflictRoundsUsed`)가 상한에 닿으면 conflict-only를 켜지
+   않는다 — 그 라운드는 마커도 태그도 없는 보통 라운드이고 기록에 `conflict-only: not applied — this issue already used …`가 남는다
+   (`test_212_conflict_round_bound_is_lifetime_across_a_requeue`). 거부로 취소된 라운드도 그 칸을 쓴다(보수적: 면제가 상한을 넘지 않는다).
+6b. **뒤따른 리뷰가 거부하면 면제는 취소된다**(dw6, 면제의 고리가 없다): 충돌 라운드 다음의 리뷰가 rework을 내면 그 라운드는 끝난 충돌
+   라운드가 아니다 — 비용은 그 섹션 뒤 다음 implement 섹션 전의 review 섹션에 러너의 `transition:` 줄이 `factory:approved` 아닌 곳으로 가면
+   (`factory:rework`, 그리고 #196 흐름의 재리뷰가 서는 라운드 K에서의 거부 — `reviewRoundsExhausted`가 보내는 `factory:needs-human` — 또는
+   #174 재시작 rework; `test_212_conflict_round_rejected_at_round_k_counts_as_today`) 다시 세고
+   (`budgetLine`: `conflict round run(s) … counted in the cap (the review that followed rejected it)`; `test_212_conflict_round_cost_is_revoked_when_the_next_review_rejects`),
+   K는 그 충돌 rework 다음의 rework 전이가 머지 스테이지의 것이 아니면 다시 센다(`test_212_conflict_marker_binds_to_its_round_and_a_rejecting_review_revokes_it`).
+   위조된 줄은 거부를 더할 수만 있고(세는 쪽) 숨길 수는 없다. #196 흐름 전체는 `test_212_failed_conflict_round_falls_back_to_today` (1b)가 오늘의
+   셈(K 4, $75.88)으로 핀한다.
+7. **사람이 읽는 줄**(`budgetLine`; `test_212_budget_line_names_excluded_conflict_cost`): 빠진 돈과 런 수를 적고, 상한을 넘어 다시 센 런도
+   `further conflict round run(s) … counted in the cap`으로 적는다. 충돌 섹션이 없는 기록의 값과 줄은 이 변경 전 코드와 같다.
+8. **K**(`lib/retro/issue-comments.js` `countedTransitionIndices`; `test_212_merge_conflict_rework_is_not_a_review_round`): 그 뒤에 러너 마커가
+   있는 머지 스테이지의 CONFLICTING rework는 K로 세지 않는다 — 같은 상수까지. 마커는 **그 라운드에 묶여야** 한다: 본문 맨 앞의 마커 코멘트
+   (`conflictRoundOf` — 다른 글 안에 인용된 마커는 아니다), 그 충돌 rework 뒤의 awaiting-review 전이 **뒤**, 다음 rework 전, 그리고 `approved=`·
+   `issue=`가 그 rework 앞의 승인 review 핸드오프의 head·이슈와 같아야 한다(`test_212_conflict_marker_binds_to_its_round_and_a_rejecting_review_revokes_it`). 규칙은 그 함수 하나라 `reviewRounds`와 #174 재시작의 `offset`이
+   같은 셈을 본다. 2K 천장의 셈(`attempts`, 취소를 따르지 않는 셈)은 면제하지 않는다 — 마커도 factory 계정의 코멘트라 위조할 수 있고, 위조는
+   많아야 두 칸만큼 K를 늦출 뿐 천장을 넘기지 못한다. 충돌 전이가 없는 창의 K·재시작·`reviewRoundOf`는 이 변경 전 규칙과 같다
+   (`test_212_windows_without_a_conflict_transition_count_as_before`). R(sweeper 재시도)은 이 경로에 없어 손대지 않는다.
+9. **조용히 꺼지지 않는다**(같은 dw5·dw1 테스트): 머지 스테이지의 문구가 바뀌면 그 rework는 보통 K 라운드로 세고, implement 런 기록에
+   `conflict-only: not applied — …` 한 줄이 남는다. 그 줄은 머지 스테이지가 낼 수 있는 전이(from=approved 또는 blocked의 머지 재시도,
+   `by=` 러너)에만 선다 — 사람의 rework(`by=human`)에는 서지 않아 거짓 경보가 되지 않는다
+   (`test_212_reworded_note_covers_the_blocked_retry_and_spares_human_reworks`). `merge-stage.js`는 이 이슈가 건드릴 수 없어 문구를 상수로 나눠 쓰지 못한다 — 그 결합은 남는다.
+
+**되돌리면**: 이 변경을 revert하면 옛 파서가 `conflict-round:` 줄을 모르는 줄로 읽고 그 런을 다시 센다 — 던지지 않는다
+(`test_212_budget_line_names_excluded_conflict_cost`가 이 변경 전 코드로 확인한다). 이미 남은 마커가 있는 창의 K도 옛 규칙으로 다시 센다 —
+세는 쪽으로 기우는 실패다.
+
+**미룬 것(이 ADR이 짓지 않는 것)**: 빌더 브리프를 "충돌만 푼다"로 바꾸고 self-critique·skeptic을 건너뛰는 것, 리뷰를 승인 head → 현재 head의
+diff로 좁히는 것은 `templates/factory/**`에 있고 #212의 must_not이다 — 그래서 이슈의 Why("사람은 머지 한 번")는 이 변경으로 충족되지 않는다.
+워크플로가 `loaded.conflict_only`를 읽기 전까지 대부분의 충돌 라운드는 self-critique가 코드를 더해 RED로, 곧 오늘의 경로로 간다.
+
+## ADR-042 서명 반박은 done_when 덮임을 요구하지 않는다 — 1.4.43 후반의 반전 · skeptic 상한 초과분 절단 · review-r1 줄 — 2026-10-12 (#239, 재착륙 #289; 허점 원장 M-2·M-7·M-9)
+
+**반전(1.4.43 후반을 대체한다)**: 1.4.43은 사인오프에서 살아남은 반대를 `signoff-<role>`·`medium`으로 주입해 "수리 턴이 `covers`로 덮고, 못 덮으면
+사람에게 간다"로 정했다. 원장 §4(M-7)가 그 결과를 재현했다: 덮을 수 없는 항목을 거부 조건으로 두면 "미해소인 채 진행"은 문장으로만 남고 실제로는
+`dissent without done_when` → 수리 턴 → 사람이다. #239부터 계획 검증기(`factory/lib/verify-stage.js` `validatePlanHandoff`)는 id가 정확히
+`signoff-<그 항목의 role>`(대소문자 무시, role 필수)인 dissent에 덮임을 요구하지 않는다(severity 무관). 그 사람 에스컬레이션을 **대신하는 것**은 셋이다:
+(1) run 기록 줄 `plan: unresolved sign-off objection from <role>: <objection 앞 120자>`, (2) 계획 핸드오프의 `signoff_objections[]`(`{id, role, text}`),
+(3) `dissent_log`에 그대로 남은 항목 — 계획 코멘트 본문의 **dissent** 블록에 렌더된다. 보통의 medium dissent와 role이 맞지 않는 `signoff-*`는 오늘처럼
+거부된다. 핀: `test_239_signoff_objections_do_not_require_a_covering_done_when`, `test_239_plan_notes_land_in_the_run_record_and_handoff`.
+
+**skeptic 상한(M-9)**: `done_when`이 `max_done_when`을 넘고 계획자 자신의 항목(`source: "skeptic"` 표시가 없는 것)이 상한 안이면, 넘친 skeptic 표시 항목(뒤쪽부터)을
+덮임 검사 **전에** 잘라 통과시키고 `plan: skeptic items beyond max_done_when dropped: <ids>`를 기록한다. 잘린 핸드오프가 그대로 게시된다. 표시 없는 초과는
+오늘처럼 거부한다(이슈의 "없으면 뒤쪽 항목"은 같은 이슈의 "계획자 7은 거부"와 모순이라 만들지 않았다). 잘린 항목만이 덮던 dissent는 이름으로 거부된다.
+핀: `test_239_skeptic_items_beyond_max_done_when_are_dropped_not_rejected`.
+
+**R1 판정(M-2)**: review 스테이지는 핸드오프의 `r1_verdicts: [{role, verdict}]`를 읽어 `review-r1: <role>=<verdict>,… r2_flipped=<n>`을 기록한다(없으면
+`review-r1: (not carried by this workflow)`). 이슈 문구와 달리 `review-evidence:` 줄은 **바꾸지 않는다** — 머지 게이트가 끝 고정 정규식(`run-record.js`)으로
+읽는 출처 줄이라 토큰 하나가 모든 승인 PR을 사람에게 보낸다. 핀: `test_239_review_record_carries_r1_verdicts_and_flip_count`,
+`test_239_review_evidence_line_still_parses_after_flip_count`.
+
+**이슈 문구와 의도적으로 다른 점(세 가지)**: (1) `review-evidence:` 줄에 `flipped=`를 붙이지 않는다 — 위 이유, 뒤집힌 수는 `review-r1:` 줄의
+`r2_flipped=`로만 읽힌다. (2) 이슈가 적은 `rounds[]` 필드는 **읽지 않는다** — 입력 이름은 `r1_verdicts`다(R1 판정만 필요하고, `rounds`는 plan 핸드오프에서
+이미 정수 라운드 수라는 다른 뜻으로 쓰인다). (3) 표시 없는 초과 항목의 위치 기반 절단(이슈의 "없으면 뒤쪽 항목")은 만들지 않는다 — 위 M-9 단락.
+
+**템플릿 PR이 내야 할 필드 이름(교차 PR 계약)**: plan 워크플로는 skeptic이 더한 done_when에 `source: "skeptic"`을, review 워크플로는 R2 전의 판정을
+`r1_verdicts: [{role, verdict}]`로 싣는다. 다른 이름(예: 이슈의 `rounds[]`)으로 내면 이 러너는 그것을 읽지 않는다 — M-9는 표시 없는 초과로 거부되고,
+`review-r1:`은 자리표시 줄로 남는다. 기록에 들어가는 에이전트 문자열(role·id·verdict)은 한 토큰으로, 반박 본문은 한 줄로 바뀌어 `review-evidence:`/
+`stage-settled:` 줄을 위조하지 못한다 — 핀: `test_239_agent_text_cannot_forge_a_record_line`.
+
+**접기는 한 곳에 있다(#289, arch1)**: 그 한 토큰 접기는 `factory/lib/verify-stage.js`의 export `recordToken` 하나다. `run-stage.js`의 `reviewR1Line`은
+기존 `../lib/verify-stage.js` import로 그것을 가져다 쓰고 자기 복사본을 두지 않는다 — 두 생산자의 토큰은 바이트 단위로 같다. 핀:
+`test_239_record_line_fold_is_single_sourced`(동작: 적대적 입력에서 세 기록 줄의 토큰이 `recordToken(input)`과 같다, 구조: import와 복사본 부재).
+
+**남는 것**: 템플릿이 `source: "skeptic"`과 `r1_verdicts`를 내기 전까지 M-9와 M-2의 채워진 경로는 운영에서 발화하지 않는다(템플릿 짝은 운영 세션 PR —
+`templates/**`는 이 이슈의 must_not). 그때까지 `templates/factory/claude/workflows/factory-plan.js:496-500`의 주석(과 `.claude` 사본)은 "못 덮으면 사람에게
+간다"고 말하는 **낡은 문장**이다. `{id:'signoff-x', role:'x'}`를 지어내는 합성자는 덮임 규칙을 피할 수 있고 그 흔적은 기록 줄 하나다(plan open_risks).
