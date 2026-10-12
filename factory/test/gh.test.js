@@ -836,6 +836,53 @@ test("test_201_gh_open_prs_by_head_prefix_filters_prefix_and_forks_with_an_expli
   expect(args[args.indexOf("--json") + 1].split(",")).toEqual(expect.arrayContaining(["number", "headRefName", "headRefOid", "isCrossRepository"]));
 });
 
+// ── #217 — the PR-body read and write use only the REST `pulls/<n>` resource (repo scope), never GraphQL ───────────────────────
+// The `gh pr edit` write failed with GraphQL's read:org error (run 37348881584). The recording run below refuses every `gh pr`
+// command and every `gh api graphql` call — not a claim about which of them needs read:org, only so that a regression back to the
+// old commands fails here on behaviour, not only on argv shape.
+test("test_217_gh_patch_pr_body_uses_repo_scope_only", async () => {
+  const denied = { code: 1, stdout: "", stderr: "GraphQL: Your token has not been granted the required scopes to execute this query. requires one of the following scopes: ['read:org']" };
+  const isPatch = (a) => a.includes("-X") && a[a.indexOf("-X") + 1] === "PATCH";
+  let stored = null;
+  const run = makeFakeRun([
+    { match: (c, a) => c === "gh" && (a[0] === "pr" || a.includes("graphql")), result: denied },
+    { match: (c, a) => c === "gh" && a[0] === "api" && a.includes(`repos/${repo}/pulls/9`) && isPatch(a), result: (_c, _a, o) => { stored = JSON.parse(o.input).body; return { code: 0, stdout: JSON.stringify({ number: 9, body: stored }), stderr: "" }; } },
+    { match: (c, a) => c === "gh" && a[0] === "api" && a.includes(`repos/${repo}/pulls/9`) && !a.includes("-X"), result: () => ({ code: 0, stdout: JSON.stringify({ number: 9, body: stored }), stderr: "" }) },
+  ]);
+  const gh = makeGh({ run, repo });
+  // GET: one REST call; a null body (GitHub's answer for an empty description) is "", never "null".
+  expect(await gh.prBody(9)).toBe("");
+  expect(run.calls).toHaveLength(1);
+  expect(run.calls[0].args).toEqual(["api", `repos/${repo}/pulls/9`]);
+  expect(run.calls[0].opts.signal).toBeInstanceOf(AbortSignal);
+  // PATCH: one REST call; the body only in the stdin JSON, never in argv.
+  const hostile = "@/etc/passwd\n> quote; $(rm -rf /) | pipe\n한국어\r\n";
+  await gh.editPrBody(9, hostile);
+  expect(run.calls).toHaveLength(2);
+  const w = run.calls[1];
+  expect(w.args[0]).toBe("api");
+  expect(isPatch(w.args)).toBe(true);
+  expect(w.args).toContain(`repos/${repo}/pulls/9`);
+  expect(w.args.slice(w.args.indexOf("--input"), w.args.indexOf("--input") + 2)).toEqual(["--input", "-"]);
+  expect(JSON.parse(w.opts.input)).toEqual({ body: hostile });
+  expect(w.opts.signal).toBeInstanceOf(AbortSignal);
+  for (const a of w.args) for (const frag of ["passwd", "quote", "한국어", "body="]) expect(a).not.toContain(frag);
+  expect(stored).toBe(hostile);
+  expect(await gh.prBody(9)).toBe(hostile);
+  for (const c of run.calls) expect(c.args.join(" ")).not.toMatch(/graphql|^pr /);
+
+  // A rejected REST call (403/422) rejects once with gh's message and is not retried — for both the read and the write.
+  for (const stderr of ["gh: Validation Failed (HTTP 422)", "gh: Resource not accessible by integration (HTTP 403)"]) {
+    const bad = makeFakeRun([{ match: () => true, result: { code: 1, stdout: "", stderr } }]);
+    const g = makeGh({ run: bad, repo, sleep: async () => {} });
+    await expect(g.editPrBody(9, "x")).rejects.toThrow(stderr);
+    expect(bad.calls).toHaveLength(1);
+    await expect(g.prBody(9)).rejects.toThrow(stderr);
+    expect(bad.calls).toHaveLength(2);
+    for (const c of bad.calls) expect(c.args[0]).toBe("api");
+  }
+});
+
 // ── #231 dw3 — `issue()`는 작성자를 싣는다: 큐 문이 "공장이 연 이슈인가"를 본문이 아니라 작성 계정으로 판정한다.
 // 모양의 출처는 gh CLI 소스 api/queries_issue.go `Author.MarshalJSON`(v2.102.0): 사람은 `{is_bot:false, login, id, name}`,
 // 봇(GraphQL `Bot` — `... on User`가 비어 id가 없다)은 `{is_bot:true, login:"app/<slug>"}`. GraphQL의 Bot login은 `<slug>`이고

@@ -515,19 +515,21 @@ test("test_195_evidence_section_is_idempotent", async () => {
     for (const s of signals) expect(s).toBeInstanceOf(AbortSignal);
   }
   // (c) A timeout leaves the PR body unwritten. This goes through the real gh.js adapter, so the bound is the adapter's own:
-  // `gh pr view` hangs, it is killed through its spawn signal, it is never retried, `gh pr edit` never runs, and the rejection
+  // the REST read hangs, it is killed through its spawn signal, it is never retried, the REST PATCH never runs, and the rejection
   // names the edit step. On the merge stage that rejection is the one FAIL line, and the merge still happens.
+  // #217 dw4 (plan: "the real-adapter hang case is moved to `gh api`") — the PR-body read/write moved from `gh pr view`/`gh pr edit`
+  // to REST `repos/<repo>/pulls/<n>` (only the `gh pr edit` write was observed failing), so the matchers and call pins follow that shape.
   {
     const childSignals = [];
     const run = makeFakeRun([
-      { match: (_c, a) => a[0] === "pr" && a[1] === "view", result: (_c, _a, o) => { childSignals.push(o?.signal); return new Promise(() => {}); } },
-      { match: (_c, a) => a[0] === "pr" && a[1] === "edit", result: { code: 0, stdout: "", stderr: "" } },
+      { match: (_c, a) => a[0] === "api" && a[1] === "repos/acme/app/pulls/31", result: (_c, _a, o) => { childSignals.push(o?.signal); return new Promise(() => {}); } },
+      { match: (_c, a) => a[0] === "api" && a.includes("PATCH"), result: { code: 0, stdout: "", stderr: "" } },
     ]);
     const adapter = makeGh({ run, repo: "acme/app", sleep: async () => {} });
     const gh = { comments: async () => commentsFixture(), prBody: adapter.prBody, editPrBody: adapter.editPrBody, viewerLogin: async () => "ktb-bot", comment: async () => {} };
     const deps = makePrEvidenceDeps({ gh, issue: ISSUE, readRecord: () => recordText(), env: { FACTORY_BOT_LOGIN: "ktb-bot" }, now: () => NOW, timeoutMs: 5 });
     await expect(deps.publishPrEvidence({ pr: 31, route: "merge", gates: LIVE_GATES })).rejects.toThrow(/^edit: .*timed out after 5 ms/);
-    expect(run.calls.map((c) => c.args.slice(0, 2).join(" "))).toEqual(["pr view"]);
+    expect(run.calls.map((c) => c.args.slice(0, 2).join(" "))).toEqual(["api repos/acme/app/pulls/31"]);
     expect(childSignals[0]).toBeInstanceOf(AbortSignal);
     expect(childSignals[0].aborted).toBe(true);
     const lines = [];
@@ -536,7 +538,7 @@ test("test_195_evidence_section_is_idempotent", async () => {
     expect(code).toBe(0);
     expect(moved).toEqual(["factory:merged"]);
     expect(lines.filter((l) => l.startsWith("evidence: "))).toEqual([expect.stringMatching(/^evidence: FAIL — edit: .*timed out after 5 ms/)]);
-    expect(run.calls.filter((c) => c.args[1] === "edit")).toEqual([]);
+    expect(run.calls.filter((c) => c.args.includes("PATCH"))).toEqual([]);
   }
 });
 
@@ -1280,4 +1282,164 @@ test("test_208_fixed_must_fix_renders_a_commit_link", async () => {
   await makePrEvidenceDeps({ gh: { ...gh, repo: "acme/app" }, issue: ISSUE, readRecord: () => recordText(), env: { FACTORY_BOT_LOGIN: "ktb-bot" }, now: () => NOW, timeoutMs: 1000 })
     .publishPrEvidence({ pr: 31, route: "merge", gates: null });
   expect(body).toContain(`([commit](${URL_}))`);
+});
+
+// ── #217 — the PR body is read and written over REST (`repos/<repo>/pulls/<n>`), which needs only `repo` scope ─────────────────
+// Run 37348881584 (#200's merge): the read step passed and the write failed at `edit:` with GraphQL's read:org error, so no PR
+// ever got its Factory evidence. The fake below refuses every `gh pr view`/`gh pr edit` and every `gh api graphql` call (not a
+// claim about which of them needs read:org — it is so that a regression back to any of them fails on behaviour), and only the
+// REST resource reads and stores the body (from the parsed stdin JSON).
+const READ_ORG_DENIED = { code: 1, stdout: "", stderr: "GraphQL: Your token has not been granted the required scopes to execute this query. The 'login' field requires one of the following scopes: ['read:org'], but your token has only been granted the: ['repo', 'workflow', 'write:discussion'] scopes." };
+const PULL_217 = /^repos\/acme\/app\/pulls\/(\d+)$/;
+function repoScopeOnlyGh217({ body, hangGet = false, patchFail = null } = {}) {
+  const state = { body, gets: 0, patches: 0, getSignals: [], settledLate: 0 };
+  const method = (a) => { const i = a.findIndex((x) => x === "-X" || x === "--method"); return i >= 0 ? String(a[i + 1]).toUpperCase() : "GET"; };
+  const pull = (a) => a.find((x) => PULL_217.test(x));
+  const run = makeFakeRun([
+    { match: (c, a) => c === "gh" && a[0] === "pr" && (a[1] === "edit" || a[1] === "view"), result: READ_ORG_DENIED },
+    { match: (c, a) => c === "gh" && a[0] === "api" && a.includes("graphql"), result: READ_ORG_DENIED },
+    {
+      match: (c, a) => c === "gh" && a[0] === "api" && pull(a) && method(a) === "PATCH" && a.includes("--input"),
+      result: (_c, a, o) => {
+        state.patches++;
+        if (patchFail) return { code: 1, stdout: "", stderr: patchFail };
+        state.body = JSON.parse(o.input).body;
+        return { code: 0, stdout: JSON.stringify({ number: Number(PULL_217.exec(pull(a))[1]), body: state.body }), stderr: "" };
+      },
+    },
+    {
+      match: (c, a) => c === "gh" && a[0] === "api" && pull(a) && method(a) === "GET" && !a.some((x) => ["--input", "-f", "-F", "--field", "--raw-field"].includes(x)),
+      result: (_c, a, o) => {
+        state.gets++;
+        if (hangGet === true) { state.getSignals.push(o?.signal); return new Promise(() => {}); }
+        // A real killed `gh` child does settle: "killed" → the exit a SIGTERM gives; "late-body" → the response arrives anyway,
+        // after the bound fired. Either way the read settles only once its signal aborts, so a chain that ignored the bound and
+        // kept waiting would see it and go on to PATCH.
+        if (hangGet) {
+          state.getSignals.push(o?.signal);
+          const late = { code: 0, stdout: JSON.stringify({ number: Number(PULL_217.exec(pull(a))[1]), body: state.body }), stderr: "" };
+          return new Promise((resolve) => o.signal.addEventListener("abort", () => { state.settledLate++; resolve(hangGet === "late-body" ? late : { code: 143, stdout: "", stderr: "signal: terminated" }); }, { once: true }));
+        }
+        return { code: 0, stdout: JSON.stringify({ number: Number(PULL_217.exec(pull(a))[1]), body: state.body }), stderr: "" };
+      },
+    },
+  ]);
+  const adapter = makeGh({ run, repo: "acme/app", sleep: async () => {} });
+  const gh = { comments: async () => commentsFixture(), prBody: adapter.prBody, editPrBody: adapter.editPrBody, viewerLogin: async () => "ktb-bot", comment: async () => {} };
+  return { state, run, gh };
+}
+const deps217 = (gh, timeoutMs = 1000) => makePrEvidenceDeps({ gh, issue: ISSUE, readRecord: () => recordText(), env: { FACTORY_BOT_LOGIN: "ktb-bot" }, now: () => NOW, timeoutMs });
+async function merge217(deps) {
+  const lines = [];
+  const moved = [];
+  const code = await runMergeStage({ issue: ISSUE, defaultBranch: "main", headSha: H2, d: { ...deps, ...mergeD195({ moved }) }, record: (ls) => lines.push(...ls), refusal: (t) => (t.ok ? [] : [`transition refused: ${t.reason}`]), postStatus: async () => {}, retryFromBlocked: false });
+  return { code, moved, evidence: lines.filter((l) => l.startsWith("evidence: ")) };
+}
+
+test("test_217_pr_evidence_is_written_with_rest_patch_not_gh_pr_edit", async () => {
+  const { state, gh } = repoScopeOnlyGh217({ body: "Closes #184\n" });
+  const { code, moved, evidence } = await merge217(deps217(gh));
+  expect(code).toBe(0);
+  expect(moved).toEqual(["factory:merged"]);
+  // The outcome the user sees: the section is in the stored PR body, after the author's text, exactly once.
+  expect(state.body.startsWith("Closes #184\n")).toBe(true);
+  expect(state.body).toContain(`${EVIDENCE_START}\n## Factory evidence`);
+  expect(state.body.split(EVIDENCE_START)).toHaveLength(2);
+  expect(state.body.endsWith(EVIDENCE_END)).toBe(true);
+  // And the record says so, with no FAIL line.
+  expect(evidence).toContain("evidence: published to PR #31 (merge)");
+  expect(evidence.filter((l) => l.startsWith("evidence: FAIL"))).toEqual([]);
+  expect(state.patches).toBe(1);
+});
+
+test("test_217_pr_body_round_trip_is_byte_exact_and_idempotent", async () => {
+  const starts = [null, "", "Closes #184", "Closes #184\n", "@/etc/passwd", "true", "123", "> quoted\n> second $(rm -rf /)\nCloses #184\n", "변경 요약: PR 본문 쓰기를 REST로 옮긴다.\nCloses #184\n", "Line one\r\nLine two\r\nCloses #184\r\n"];
+  const sections = [];
+  for (const start of starts) {
+    const name = JSON.stringify(start);
+    const { state, gh } = repoScopeOnlyGh217({ body: start });
+    const deps = deps217(gh);
+    await deps.publishPrEvidence({ pr: 31, route: "merge", gates: LIVE_GATES, gatesRerun: false });
+    const first = state.body;
+    const src = start ?? "";
+    expect(typeof first, name).toBe("string");
+    // Everything before the section is the author's text, byte for byte, plus only the blank-line separator; nothing after it.
+    const at = first.indexOf(EVIDENCE_START);
+    expect(at, name).toBeGreaterThanOrEqual(src.length);
+    expect(first.slice(0, src.length), name).toBe(src);
+    expect(first.slice(src.length, at), name).toMatch(/^\n{0,2}$/);
+    expect(first.endsWith(EVIDENCE_END), name).toBe(true);
+    expect(first.slice(0, at).includes("null"), name).toBe(false);
+    // dw2: the stored body never contains the literal text "null" anywhere — not before the section, not inside it, not after it.
+    expect(first.includes("null"), name).toBe(false);
+    // The section itself is the same bytes whatever the author's text was (a null start must not leak into it).
+    sections.push(first.slice(at));
+    // A second publish of the same evidence leaves the stored body exactly as it was.
+    await deps.publishPrEvidence({ pr: 31, route: "merge", gates: LIVE_GATES, gatesRerun: false });
+    expect(state.body, name).toBe(first);
+    expect(state.patches, name).toBe(2);
+  }
+  expect(new Set(sections).size).toBe(1);
+});
+
+test("test_217_hung_rest_read_is_killed_and_no_write_lands", async () => {
+  const { state, run, gh } = repoScopeOnlyGh217({ body: "Closes #184\n", hangGet: true });
+  const deps = deps217(gh, 5);
+  await expect(deps.publishPrEvidence({ pr: 31, route: "merge", gates: LIVE_GATES })).rejects.toThrow(/^edit: .*timed out after 5 ms/);
+  // The hung call really was the REST read (the matcher fired), its child was aborted, and it was not retried.
+  expect(state.gets).toBe(1);
+  expect(run.calls).toHaveLength(1);
+  expect(run.calls[0].args[0]).toBe("api");
+  expect(run.calls[0].args).toContain("repos/acme/app/pulls/31");
+  expect(state.getSignals[0]).toBeInstanceOf(AbortSignal);
+  expect(state.getSignals[0].aborted).toBe(true);
+  // On the merge stage: one FAIL line, the merge still happens, and no write lands afterwards.
+  const { code, moved, evidence } = await merge217(deps);
+  expect(code).toBe(0);
+  expect(moved).toEqual(["factory:merged"]);
+  expect(evidence).toEqual([expect.stringMatching(/^evidence: FAIL — edit: .*timed out after 5 ms/)]);
+  expect(state.gets).toBe(2);
+  await new Promise((r) => setImmediate(r));
+  expect(state.patches).toBe(0);
+  expect(state.body).toBe("Closes #184\n");
+});
+
+test("test_217_hung_rest_read_that_settles_after_the_timeout_writes_nothing", async () => {
+  for (const mode of ["late-body", "killed"]) {
+    const { state, run, gh } = repoScopeOnlyGh217({ body: "Closes #184\n", hangGet: mode });
+    const deps = deps217(gh, 5);
+    await expect(deps.publishPrEvidence({ pr: 31, route: "merge", gates: LIVE_GATES }), mode).rejects.toThrow(/^edit: .*timed out after 5 ms/);
+    // The read really was the REST GET, it was aborted, and — unlike a never-settling fake — it then settled.
+    expect(state.gets, mode).toBe(1);
+    expect(state.getSignals[0].aborted, mode).toBe(true);
+    expect(state.settledLate, mode).toBe(1);
+    // Let the late settlement propagate through anything still waiting on it; nothing may write afterwards.
+    for (let i = 0; i < 5; i++) await new Promise((r) => setImmediate(r));
+    expect(state.patches, mode).toBe(0);
+    expect(run.calls.filter((c) => c.args.includes("PATCH")), mode).toEqual([]);
+    expect(state.body, mode).toBe("Closes #184\n");
+    // The merge stage: one named FAIL line, the merge still happens, and still no write after the late settlement.
+    const { code, moved, evidence } = await merge217(deps);
+    expect(code, mode).toBe(0);
+    expect(moved, mode).toEqual(["factory:merged"]);
+    expect(evidence, mode).toEqual([expect.stringMatching(/^evidence: FAIL — edit: .*timed out after 5 ms/)]);
+    expect(state.settledLate, mode).toBe(2);
+    for (let i = 0; i < 5; i++) await new Promise((r) => setImmediate(r));
+    expect(state.patches, mode).toBe(0);
+    expect(state.body, mode).toBe("Closes #184\n");
+  }
+});
+
+test("test_217_rest_patch_failure_still_one_named_fail_line", async () => {
+  for (const reason of ["gh: Validation Failed (HTTP 422)", "gh: Resource not accessible by integration (HTTP 403)"]) {
+    const { state, gh } = repoScopeOnlyGh217({ body: "Closes #184\n", patchFail: reason });
+    const { code, moved, evidence } = await merge217(deps217(gh));
+    expect(code, reason).toBe(0);
+    expect(moved, reason).toEqual(["factory:merged"]);
+    expect(state.patches, reason).toBe(1);
+    expect(evidence, reason).toHaveLength(1);
+    expect(evidence[0], reason).toBe(`evidence: FAIL — edit: gh api PATCH repos/acme/app/pulls/31 failed (1): ${reason} (issue #${ISSUE})`);
+    expect(evidence[0], reason).not.toMatch(/read:org|gh pr edit/);
+    expect(state.body, reason).toBe("Closes #184\n");
+  }
 });
