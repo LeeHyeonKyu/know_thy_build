@@ -451,7 +451,7 @@ test("factory-plan.js: an objection that survives the re-synthesis is recorded i
   // 1.4.43: the injected entry carries a deterministic id and a severity (own-calendar #111 — an entry without
   // them is named by position by the validator and can never be covered).
   expect(result.dissent_log).toEqual([
-    { id: "signoff-skeptic", severity: "medium", role: "skeptic", objection: "the rollback path is still unspecified", resolution: "unresolved — proceeding" },
+    { id: "signoff-skeptic", severity: "low", role: "skeptic", objection: "the rollback path is still unspecified", resolution: "unresolved — proceeding; surfaced in signoff_objections" },
   ]);
   expect(validate("plan.v1", result).ok).toBe(true);
 });
@@ -592,7 +592,7 @@ test("factory-plan.js: an objection the synthesizer already logged is superseded
   expect(result.dissent_log.filter((d) => d.role === "skeptic" && d.objection === OBJECTION)).toHaveLength(1);
   expect(result.dissent_log).toEqual([
     { role: "architect", objection: "files_expected is too wide", resolution: "narrowed to two paths" },
-    { id: "signoff-skeptic", severity: "medium", role: "skeptic", objection: OBJECTION, resolution: "unresolved — proceeding" },
+    { id: "signoff-skeptic", severity: "low", role: "skeptic", objection: OBJECTION, resolution: "unresolved — proceeding; surfaced in signoff_objections" },
   ]);
 });
 
@@ -2448,7 +2448,8 @@ test("test_238_current_workflow_still_renders_repair_reasons_from_new_shape", as
       ? calls.find((c) => c.opts.agentType === "plan-synthesizer")
       : calls.find((c) => typeof c.opts.label === "string" && c.opts.label.startsWith("plan:"));
     expect(writer, `${mode}: the plan writer was dispatched`).toBeTruthy();
-    if (mode === "debate") expect(calls.some((c) => typeof c.opts.label === "string" && c.opts.label.startsWith("R1:")), "debate ran R1").toBe(true);
+    // #243 dw3 (P-14, M-8): a debate-mode repair turn is one synthesis over the rejected plan — R1 is no longer re-run.
+    if (mode === "debate") expect(calls.some((c) => typeof c.opts.label === "string" && c.opts.label.startsWith("R1:")), "debate repair runs no R1 (#243 dw3)").toBe(false);
     else expect(calls.some((c) => typeof c.opts.label === "string" && c.opts.label.startsWith("R1:")), "single runs no R1").toBe(false);
     expect(writer.prompt, mode).toContain("REPAIR TURN (KTB-51)");
     for (const reason of R1_REPAIR_REASONS) expect(writer.prompt, `${mode}: ${reason}`).toContain(reason);
@@ -2506,7 +2507,12 @@ test("test_243_plan_workflow_schema_carries_covers_issue_and_signoff_objections"
   // two failed sign-offs: the objection is in dissent_log once and in signoff_objections once, saying the same thing
   const entries = result.dissent_log.filter((d) => typeof d?.id === "string" && d.id.startsWith("signoff-"));
   expect(entries).toHaveLength(1);
-  expect(entries[0]).toMatchObject({ id: "signoff-skeptic", role: "skeptic", objection: SIGNOFF_OBJECTION_243 });
+  expect(entries[0]).toEqual({
+    id: "signoff-skeptic", severity: "low", role: "skeptic", objection: SIGNOFF_OBJECTION_243,
+    resolution: "unresolved — proceeding; surfaced in signoff_objections",
+  });
+  expect(result.dissent_log.filter((d) => /^signoff-/.test(d?.id || "") && d.severity === "medium")).toEqual([]);
+  expect(result.dissent_log.filter((d) => /^signoff-/.test(d?.id || "") && d.severity !== "low")).toEqual([]);
   expect(result.signoff_objections).toEqual([{ id: "signoff-skeptic", role: "skeptic", text: SIGNOFF_OBJECTION_243 }]);
   expect(result.signoff_objections[0].role).toBe(entries[0].role);
   expect(result.signoff_objections[0].text).toBe(entries[0].objection);
@@ -2641,10 +2647,19 @@ test("test_243_plan_repair_with_previous_reruns_synthesis_only", async () => {
     agent: planStub(),
     args: { issue: 42, context: ".factory/out/context.json", loaded: planLoaderFix({ plan_repair: R1_REPAIR_REASONS }) },
   });
+  // only the writer runs: no R1, no R2, no sign-off — exactly one call, and it is the synthesizer
+  expect(kinds(debateRepair.calls)).toEqual(["plan-synthesizer"]);
+  expect(labelled(debateRepair.calls, "R1:")).toHaveLength(0);
+  expect(labelled(debateRepair.calls, "R2:")).toHaveLength(0);
+  expect(labelled(debateRepair.calls, "sign:")).toHaveLength(0);
   const synth = debateRepair.calls.filter((c) => c.opts.agentType === "plan-synthesizer");
   expect(synth).toHaveLength(1);
+  for (const reason of R1_REPAIR_REASONS) expect(synth[0].prompt).toContain(reason);
   expect(synth[0].prompt).toContain("plan_repair_previous");
+  expect(synth[0].prompt).toContain(".factory/out/context.json");
+  expect("repair_of" in debateRepair.result).toBe(true);
   expect(debateRepair.result.repair_of).toContain("plan_repair_previous");
+  expect(debateRepair.result.summary).toBe(planFix().summary);                       // the writer's plan is the handoff
 });
 
 test("test_243_planner_prompt_requires_covering_issue_done_when", async () => {
@@ -2689,6 +2704,10 @@ test("test_243_signoff_objection_survives_verify_stage_normalization", async () 
     args: { issue: 42, context: ".factory/out/context.json", loaded: planLoaderFix() },
   });
   expect(result.signoff_objections?.length).toBe(1);
+  // the state dw5 is about: the dissent_log line is LOW, so verify-stage's own sign-off sweep skips it and the
+  // signoff_objections on the posted data can only be the one the workflow wrote
+  const line = result.dissent_log.find((d) => d.id === "signoff-skeptic");
+  expect(line.severity).toBe("low");
   const roster = PLAN_ROSTER.map((r) => r.name);
   const v = verifyStage243({
     stage: "plan",
@@ -2702,5 +2721,7 @@ test("test_243_signoff_objection_survives_verify_stage_normalization", async () 
   const entry = posted.find((o) => o.role === "skeptic");
   expect(entry).toBeTruthy();
   expect(entry.text).toBe(SIGNOFF_OBJECTION_243);
-  expect(v.data.dissent_log.some((d) => d.id === "signoff-skeptic" && d.objection === SIGNOFF_OBJECTION_243)).toBe(true);
+  expect(posted).toEqual(result.signoff_objections);
+  expect(v.data.dissent_log.some((d) => d.id === "signoff-skeptic" && d.severity === "low" && d.objection === SIGNOFF_OBJECTION_243)).toBe(true);
+  expect(v.reasons.filter((r) => /signoff-skeptic/.test(r))).toEqual([]);
 });
