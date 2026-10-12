@@ -1,6 +1,6 @@
 # Retro State
 
-- last retro: 2026-10-12T12:10:57.026Z
+- last retro: 2026-10-12T14:19:32.174Z
 - merges since last retro: 0
 - current N: 1
 
@@ -8,31 +8,38 @@
 
 | at | yield | n_before | n_after | needs_human_since |
 | --- | --- | --- | --- | --- |
-| 2026-10-12T03:57:13.672Z | 1 | 1 | 1 | 2 |
 | 2026-10-12T05:40:12.734Z | 0 | 1 | 2 | 0 |
 | 2026-10-12T08:34:05.316Z | 0 | 2 | 1 | 2 |
 | 2026-10-12T10:20:44.131Z | 0 | 1 | 2 | 0 |
 | 2026-10-12T12:10:57.026Z | 0 | 2 | 1 | 2 |
+| 2026-10-12T14:19:32.174Z | 0 | 1 | 1 | 2 |
 
 ## Stats
 
 | metric | this window | cumulative |
 | --- | --- | --- |
-| merged | 0 | 31 |
-| review rounds avg | 0 | 1.55 |
-| rounds/issue (plan/impl/review) | 0 / 0 / 0 | 1.22 / 2 / 1.55 |
-| escaped defects | 0 | 28 |
-| revert rate | 없음 | 0.00 (0/31) |
-| needs-human | 0 | 96 |
-| rejects by role | 없음 | spec-conformance 12, qa 4, correctness 14, architecture 7, security 5 |
-| reviewer overlap | 없음 | 0.50 (23/46, runs 68) |
-| unique findings by role | 없음 | spec-conformance 5, qa 4, correctness 6, architecture 4, security 4 |
-| qa na ratio | 없음 | 0.22 (75/338 claims, na-heavy 10/50 approvals) |
-| cost (usd) | 0.13 | 1465.47 |
-| tokens | input 26372 / output 302 | input 36808811 / output 3018863 |
-| retro cost (usd) | 0.00 | 20.68 |
-| retro tokens | input 0 / output 0 | input 62 / output 48045 |
-| full retros | — | 17 |
+| merged | 2 | 33 |
+| review rounds avg | 1.5 | 1.55 |
+| rounds/issue (plan/impl/review) | 1.5 / 2 / 1.5 | 1.24 / 2 / 1.55 |
+| escaped defects | 2 (#244×1, #199×1) | 30 |
+| revert rate | 0.00 (0/2) | 0.00 (0/33) |
+| needs-human | 2 | 98 |
+| rejects by role | correctness 2, qa 1 | spec-conformance 12, qa 5, correctness 16, architecture 7, security 5 |
+| reviewer overlap | 0.33 (1/3, runs 4) | 0.49 (24/49, runs 72) |
+| unique findings by role | correctness 1, qa 1 | spec-conformance 5, qa 5, correctness 7, architecture 4, security 4 |
+| qa na ratio | 0.67 (4/6 claims, na-heavy 1/1 approvals) | 0.23 (79/344 claims, na-heavy 11/51 approvals) |
+| cost (usd) | 31.53 | 1497.00 |
+| tokens | input 859675 / output 67777 | input 37668486 / output 3086640 |
+| retro cost (usd) | 1.05 | 21.73 |
+| retro tokens | input 4 / output 2808 | input 66 / output 50853 |
+| full retros | — | 18 |
+
+### Rounds per issue (this window)
+
+| issue | plan | implement | review | escaped |
+| --- | --- | --- | --- | --- |
+| #244 | 1 | 2 | 2 | 1 |
+| #199 | 2 | 2 | 1 | 1 |
 
 ### Phase-2 gate baseline (this session)
 
@@ -46,7 +53,7 @@
 ```json
 {
   "cursor": {
-    "last_retro_at": "2026-10-12T12:10:57.026Z",
+    "last_retro_at": "2026-10-12T14:19:32.174Z",
     "last_record_offsets": {}
   },
   "merges_since": 0,
@@ -974,6 +981,95 @@
         }
       ],
       "n_before": 2,
+      "n_after": 1
+    },
+    {
+      "at": "2026-10-12T14:19:32.174Z",
+      "yield": 0,
+      "needs_human_since": 2,
+      "applied": [
+        {
+          "step": "feedback-route",
+          "issues": [
+            244,
+            199
+          ],
+          "actions": [
+            {
+              "kind": "warning",
+              "step": "feedback-route",
+              "login": "LeeHyeonKyu",
+              "current": "ktb-factory[bot]",
+              "reason": "current factory identity: ktb-factory[bot] (machine user/app, FACTORY_BOT_LOGIN); older runs in this window ran under a shared identity (LeeHyeonKyu) — their human decisions are unverifiable, nothing to register"
+            },
+            {
+              "kind": "product",
+              "step": "feedback-route",
+              "issue": 244,
+              "count": 1
+            },
+            {
+              "kind": "product",
+              "step": "feedback-route",
+              "issue": 199,
+              "count": 2
+            }
+          ]
+        },
+        {
+          "step": "lessons:reviewer-correctness",
+          "added": [
+            "L-2026-10-12-01"
+          ],
+          "rejected": [],
+          "evicted": [],
+          "cited": []
+        },
+        {
+          "step": "lessons:factory-builder",
+          "added": [
+            "L-2026-10-12-01"
+          ],
+          "rejected": [],
+          "evicted": [],
+          "cited": []
+        },
+        {
+          "step": "role:reviewer-qa",
+          "added": [
+            {
+              "section": "### 좋은 발견",
+              "text": "위치: 엔진 체크아웃에서 diff 범위를 판정하는 self-gate·conflict 검사. 주장: 라운드 1에서 픽스처로만 확인하고 approve한 검사가 실제 git 위에서는 러너의 mirror 커밋(`.factory/lib|bin/**`)을 builder가 한 작업이나 'merge 밖' 경로로 세어 RED가 된다. builder는 그 경로를 쓸 수 없으니 그 finding을 고칠 방법도 없다. 근거: #199에서는 rework-scope가 mirror 사본을 round-2 추가분으로 잡았다(qa 스스로 '테스트가 아무것도 mi…"
+            }
+          ],
+          "skipped": [],
+          "deferred": []
+        },
+        {
+          "step": "role:reviewer-correctness",
+          "added": [
+            {
+              "section": "## Perspectives",
+              "text": "**끝단을 따라가는 사람**: 새로 생긴 필드·줄·반환값마다 '프로덕션에서 이걸 누가 읽는가'를 `rg`로 찾아 이름과 출처를 대조한다. 워크플로가 `rounds`를 내보내는데 소비자가 `r1_verdicts`를 읽거나(#244), 응답은 PR 코멘트로 가는데 증거는 이슈 코멘트를 읽거나(#195), 계산한 `planNotes`를 아무도 읽지 않으면(#232) 테스트가 전부 GREEN이어도 기능은 없다."
+            }
+          ],
+          "skipped": [],
+          "deferred": []
+        },
+        {
+          "step": "publish-lessons",
+          "pr": 224,
+          "merged": false,
+          "reason": "gh pr merge failed (1): X Pull request LeeHyeonKyu/know_thy_build#224 is not mergeable: the base branch policy prohibits the merge.\nTo have the pull request merged after all the requirements have been met, add the `--auto` flag.\nTo use administrator privileges to immediately merge the pull request, add the `--admin` flag.",
+          "files": [
+            ".factory/lessons/reviewer-correctness.md",
+            ".factory/lessons/factory-builder.md",
+            ".claude/agents/reviewer-qa.md",
+            ".claude/agents/reviewer-correctness.md"
+          ]
+        }
+      ],
+      "n_before": 1,
       "n_after": 1
     }
   ],
@@ -2002,6 +2098,22 @@
           243
         ],
         "source": "must_fix"
+      },
+      {
+        "role": "correctness",
+        "text": "rework-scope flags the runner's own mirror commit as an addition. In an engine checkout, a round-2 rework that adds an export to a file the review's `where` names (e.g. factory/lib/x.js) gets a blocking finding on the mirrored copy `.factory/lib/x.js`. The builder cannot write that path, so it cannot fix the finding, and the gate keeps going RED on a change dw1 says must pass. A new file added inside `where` under factory/lib or factory/bin fails the same way: its mirrored copy is flagged as `new file outside the review findings`.",
+        "runs": [
+          199
+        ],
+        "source": "must_fix"
+      },
+      {
+        "role": "qa",
+        "text": "In an engine checkout the runner's own mirror copy (.factory/lib|bin/**) counts as new work in rework round 2 or later. The builder cannot write that path, so it cannot satisfy the finding. This was not visible in my round-1 run, because the tests never mirror anything.",
+        "runs": [
+          199
+        ],
+        "source": "must_fix"
       }
     ],
     "examples": [
@@ -2355,6 +2467,15 @@
           254
         ],
         "source": "dissent"
+      },
+      {
+        "role": "architect",
+        "kind": "good",
+        "text": "test_243_plan_repair_with_previous_reruns_synthesis_only cannot be delivered as drafted. It is folded into covers of the item that replaces it, and that item's text states the departure in so many words. The branch's test of that name is removed, not re-pinned. A test named \"synthesis_only\" that asserts a full rerun would split the domain vocabulary, which fails my lens 7.",
+        "runs": [
+          299
+        ],
+        "source": "dissent"
       }
     ],
     "flaky": [],
@@ -2608,88 +2729,133 @@
         "issue": 244,
         "reason": "judge path needs a unanimous review — human merge required: the review roster tier is standard, not load-bearing (see PR #295)",
         "at": "2026-10-12T12:09:34Z"
+      },
+      {
+        "issue": 243,
+        "reason": "verifier rejected again after one retry: The round-1 dw3 finding is still open. Head 43b2fb2 only adds a 2-line comment (lines 349-351) that describes the confli | test_243_plan_repair_with_previous_reruns_synthesis_only still asserts the opposite of dw3 for the case dw3 describes, s | The contract has not been repaired. dw3's text still requires writer-only dispatch whenever plan_repair is non-empty, an | prove-test passes in prove mode and the new tests are deterministic. It checks per file, though, so it cannot fix the dw",
+        "at": "2026-10-12T13:38:02Z"
+      },
+      {
+        "issue": 199,
+        "reason": "blocked (gates undecided) — needs human",
+        "at": "2026-10-12T13:05:59Z"
       }
     ]
   },
   "stats": {
-    "merged": 0,
-    "review_rounds_avg": 0,
-    "plan_rounds_avg": 0,
-    "implement_rounds_avg": 0,
-    "rounds_per_issue": [],
-    "escaped_defects": 0,
-    "escaped_defects_detail": [],
+    "merged": 2,
+    "review_rounds_avg": 1.5,
+    "plan_rounds_avg": 1.5,
+    "implement_rounds_avg": 2,
+    "rounds_per_issue": [
+      {
+        "issue": 244,
+        "plan": 1,
+        "implement": 2,
+        "review": 2
+      },
+      {
+        "issue": 199,
+        "plan": 2,
+        "implement": 2,
+        "review": 1
+      }
+    ],
+    "escaped_defects": 2,
+    "escaped_defects_detail": [
+      {
+        "issue": 244,
+        "count": 1
+      },
+      {
+        "issue": 199,
+        "count": 1
+      }
+    ],
     "reverts": 0,
     "reverted_issues": [],
-    "revert_rate": null,
-    "rejects_by_role": {},
-    "review_runs": 0,
-    "findings_total": 0,
-    "overlapping_findings": 0,
-    "unique_findings_by_role": {},
-    "overlap_ratio": 0,
-    "needs_human": 0,
-    "qa_approvals": 0,
-    "qa_claims_total": 0,
-    "qa_na_total": 0,
-    "qa_na_ratio": 0,
-    "qa_na_heavy_approvals": 0,
+    "revert_rate": 0,
+    "rejects_by_role": {
+      "correctness": 2,
+      "qa": 1
+    },
+    "review_runs": 4,
+    "findings_total": 3,
+    "overlapping_findings": 1,
+    "unique_findings_by_role": {
+      "correctness": 1,
+      "qa": 1
+    },
+    "overlap_ratio": 0.33,
+    "needs_human": 2,
+    "qa_approvals": 1,
+    "qa_claims_total": 2,
+    "qa_na_total": 4,
+    "qa_na_ratio": 0.67,
+    "qa_na_heavy_approvals": 1,
     "usage": {
-      "cost_usd": 0.126211,
+      "cost_usd": 31.531539,
       "tokens": {
-        "input": 26372,
-        "output": 302
+        "input": 859675,
+        "output": 67777
+      }
+    },
+    "retro_usage": {
+      "cost_usd": 1.050361,
+      "tokens": {
+        "input": 4,
+        "output": 2808
       }
     }
   },
   "stats_total": {
-    "merged": 31,
+    "merged": 33,
     "review_rounds_avg": 1.55,
-    "plan_rounds_avg": 1.22,
+    "plan_rounds_avg": 1.24,
     "implement_rounds_avg": 2,
-    "escaped_defects": 28,
+    "escaped_defects": 30,
     "reverts": 0,
     "reverted_issues": [],
     "revert_rate": 0,
     "rejects_by_role": {
       "spec-conformance": 12,
-      "qa": 4,
-      "correctness": 14,
+      "qa": 5,
+      "correctness": 16,
       "architecture": 7,
       "security": 5
     },
-    "review_runs": 68,
-    "findings_total": 46,
-    "overlapping_findings": 23,
+    "review_runs": 72,
+    "findings_total": 49,
+    "overlapping_findings": 24,
     "unique_findings_by_role": {
       "spec-conformance": 5,
-      "qa": 4,
-      "correctness": 6,
+      "qa": 5,
+      "correctness": 7,
       "architecture": 4,
       "security": 4
     },
-    "overlap_ratio": 0.5,
-    "needs_human": 96,
-    "qa_approvals": 50,
-    "qa_claims_total": 263,
-    "qa_na_total": 75,
-    "qa_na_ratio": 0.22,
-    "qa_na_heavy_approvals": 10,
+    "overlap_ratio": 0.49,
+    "needs_human": 98,
+    "qa_approvals": 51,
+    "qa_claims_total": 265,
+    "qa_na_total": 79,
+    "qa_na_ratio": 0.23,
+    "qa_na_heavy_approvals": 11,
     "usage": {
-      "cost_usd": 1465.471563,
+      "cost_usd": 1497.003102,
       "tokens": {
-        "input": 36808811,
-        "output": 3018863
+        "input": 37668486,
+        "output": 3086640
       }
     },
     "retro_usage": {
-      "cost_usd": 20.675981,
+      "cost_usd": 21.726342,
       "tokens": {
-        "input": 62,
-        "output": 48045
+        "input": 66,
+        "output": 50853
       }
     },
-    "retros": 17
+    "retros": 18
   },
   "deferred_proposals": [],
   "deletion_candidates": []
