@@ -17,6 +17,10 @@ import { makeFakeRun } from "../lib/exec.js";
 import { parseProgressMarker } from "../lib/progress.js";
 import { appendRunRecord, appendRunRecordLine } from "../lib/run-record.js";
 import { parseRunRecord } from "../lib/usage.js";
+// #206 — the gates-RED finding carries the gate's own (scrubbed) reason; these are new imports, not changed ones.
+import { gateRedFindings, GATE_LOG_FINDING_MAX } from "../bin/run-stage.js";
+import { mustNotContract, mustNotViolations, addedLines } from "../lib/integrity.js";
+import { SECRET_ENV } from "../bin/scrub-artifacts.js";
 
 test("run-stage executes the §4.2.1 skeleton in order and transitions on success", async () => {
   const calls = [];
@@ -6587,6 +6591,391 @@ test("test_200_scope_check_fails_open_visibly_on_git_read_error", async () => {
     expect(r.findings.some((f) => f.check === "pin" && f.blocking && f.ids?.includes("p1")), name).toBe(true);
     expect(r.ok, name).toBe(false);
   }
+});
+
+/**
+ * ── #206 — a gates-RED self-gate finding carries the gate's own reason ──────────────────────────────────────────
+ * Gates that are not tests (must-not, lint, prove-test contract violations) have no failing ids, so the finding used to
+ * read `failing: (no test names; see the gate log)` and the retrying builder guessed (#195 attempt 1). The reason is the
+ * gate's `log` — scrubbed (it lands in a public issue comment), one line, head-cut to 300 characters.
+ */
+// #195 attempt 1, produced by the REAL must-not producer: the issue contract → integrity.js mustNotViolations over a -U0
+// diff (addedLines), composed with the byte-exact gates.js:647 `log` format.
+const mustNotLog195 = () => {
+  const contract = mustNotContract("must_not:\n- add: `agent(`\n");
+  const u0 = "diff --git a/factory/test/evidence.test.js b/factory/test/evidence.test.js\n--- a/factory/test/evidence.test.js\n+++ b/factory/test/evidence.test.js\n@@ -199,0 +200,1 @@\n+  expect(src).not.toContain(\"agent(\");\n";
+  const v = mustNotViolations({ contract, changed: ["factory/test/evidence.test.js"], added: addedLines(u0) });
+  const note = "";
+  return `issue must_not contract violated: ${v.map((x) => `${x.file}: ${x.rule}`).join("; ")}${note}`;
+};
+const redGates = (gates) => ({ schema: "factory.gates.v1", status: "RED", head_sha: "d".repeat(40), failing: Object.keys(gates), gates });
+const findingsVia = async (gates) => {
+  const retried = [];
+  const d = selfGateDeps({
+    gates: async () => redGates(gates),
+    verifyStage: () => ({ ok: false, reasons: ["gates RED"], data: null }),
+    selfGateRetry: async ({ head, findings }) => { retried.push({ head, findings }); return { attempt: 1, total: 1 }; },
+    transition: async ({ to }) => ({ ok: true, to }),
+  });
+  expect(await runStage({ stage: "implement", issue: 206, deps: d, runnerId: "r" })).toBe(0);
+  expect(retried).toHaveLength(1);
+  return retried[0].findings;
+};
+
+test("test_206_gate_red_finding_carries_the_gate_log_when_there_are_no_test_ids", async () => {
+  const log = mustNotLog195();
+  // the fixture really is #195's reason, as the producer writes it
+  expect(log).toBe("issue must_not contract violated: factory/test/evidence.test.js: must-not-add — the issue forbids adding `agent(` (line 200)");
+  const findings = await findingsVia({
+    "must-not": { status: "RED", code: null, duration_ms: 0, log },
+    unit: { status: "RED", failing_ids: ["test/a.test.js::one", "test/b.test.js::two"], parsed: true, code: 1, log: "unit log that must not be used" },
+  });
+  const mn = findings.find((f) => f.check === "gate:must-not");
+  expect(mn.blocking).toBe(true);
+  expect(mn.detail.startsWith("gate must-not RED — ")).toBe(true);
+  expect(mn.detail).toContain("factory/test/evidence.test.js");
+  expect(mn.detail).toContain("must-not-add");
+  expect(mn.detail).toContain("`agent(`");
+  expect(mn.detail).toContain("line 200");
+  expect(mn.detail).not.toContain("(no test names; see the gate log)");
+  expect(mn.detail).not.toContain("failing:");
+  // the gate WITH ids still lists its ids, not its log
+  expect(findings.find((f) => f.check === "gate:unit").detail).toBe("gate unit RED — failing: test/a.test.js::one, test/b.test.js::two");
+});
+
+test("test_206_retry_comment_and_brief_findings_show_the_gate_reason", async () => {
+  const head = "d".repeat(40);
+  const fenceLog = "lint: unexpected token near `{ a: 1 }` in docs block:\n```js\nconst x = { y: 2 } ```\nend } ```\nmore";
+  const findings = await findingsVia({
+    "must-not": { status: "RED", code: null, duration_ms: 0, log: mustNotLog195() },
+    lint: { status: "RED", code: 1, duration_ms: 3, log: fenceLog },
+  });
+  // what the operator reads (the issue comment) and what the next builder reads (latestSelfGateFindings → the brief)
+  const body = selfGateRetryComment({ issue: 206, head, attempt: 1, findings });
+  expect(body).toContain("factory/test/evidence.test.js");
+  const back = latestSelfGateFindings([{ body }], head);
+  expect(Array.isArray(back)).toBe(true);
+  expect(back).toHaveLength(2);
+  const mn = back.find((f) => f.check === "gate:must-not");
+  expect(mn.detail).toContain("factory/test/evidence.test.js");
+  expect(mn.detail).toContain("line 200");
+  // the log with a `} ``` ` sequence survived the round trip: the block was not cut, the detail came back whole
+  const lint = back.find((f) => f.check === "gate:lint");
+  expect(lint.detail).toBe(findings.find((f) => f.check === "gate:lint").detail);
+  expect(lint.detail).toContain("unexpected token near `{ a: 1 }`");
+  expect(lint.detail).toContain("more");
+  expect(back).toEqual(findings);
+});
+
+test("test_206_gate_red_finding_never_carries_an_unscrubbed_secret_into_the_issue_comment", () => {
+  const secret = "s3cr3t-Value-0123456789-abcdefXYZ";
+  const ghp = "ghp_" + "Q7".repeat(18);
+  expect(SECRET_ENV).toContain("FACTORY_BOT_TOKEN");
+  const env = { FACTORY_BOT_TOKEN: secret };
+  const log = `lint failed\nfetch https://api.example/x?token=${secret} → 401\nheader ${ghp}\n`;
+  expect(log).toContain(secret);
+  expect(log).toContain(ghp);
+  const gates = redGates({ lint: { status: "RED", code: 1, log } });
+  const [f] = gateRedFindings(gates, { env });
+  const body = selfGateRetryComment({ issue: 206, head: "d".repeat(40), attempt: 1, findings: [f] });
+  for (const out of [f.detail, body]) {
+    expect(out).not.toContain(secret);
+    expect(out).not.toContain(ghp);
+    expect(out).toContain("[REDACTED:env-value]");
+    expect(out).toContain("[REDACTED:gh-token]");
+  }
+  expect(f.detail).toContain("lint failed");
+
+  // scrub runs BEFORE the 300 cut: a secret straddling the boundary leaks no prefix
+  const lead = "x".repeat(GATE_LOG_FINDING_MAX - 10);
+  const [cut] = gateRedFindings(redGates({ lint: { status: "RED", code: 1, log: `${lead}${secret} tail` } }), { env });
+  expect(cut.detail).not.toContain(secret.slice(0, 6));
+  expect(cut.detail).toContain("[REDACTED:");
+
+  // the env path is load-bearing: with the variable unset the literal value is NOT known and passes through
+  // (shape rules still catch the ghp_ token) — so the redaction above came from the injected env, not from luck.
+  const [unset] = gateRedFindings(gates, { env: {} });
+  expect(unset.detail).toContain(secret);
+  expect(unset.detail).not.toContain(ghp);
+  expect(unset.detail).toContain("[REDACTED:gh-token]");
+});
+
+// The helper test above injects `env`; this one pins the PRODUCTION wiring — runStage's gates-RED branch must hand the
+// job's own env to gateRedFindings, or every real self-gate retry comment publishes literal secrets (only shape rules left).
+test("test_206_run_stage_gate_red_retry_scrubs_the_job_env_secret_end_to_end", async () => {
+  const secret = "j0b-Env-Secret-9876543210-qrstuvWXYZ";
+  expect(SECRET_ENV).toContain("FACTORY_BOT_TOKEN");
+  vi.stubEnv("FACTORY_BOT_TOKEN", secret);
+  try {
+    expect(process.env.FACTORY_BOT_TOKEN).toBe(secret);
+    const log = `lint failed\nPOST https://api.example/y?auth=${secret} → 403\n`;
+    expect(log).toContain(secret);
+    const findings = await findingsVia({ lint: { status: "RED", code: 1, duration_ms: 1, log } });
+    const [f] = findings;
+    expect(f.check).toBe("gate:lint");
+    expect(f.detail.startsWith("gate lint RED — lint failed")).toBe(true);
+    expect(f.detail).not.toContain(secret);
+    expect(f.detail).toContain("[REDACTED:env-value]");
+    const body = selfGateRetryComment({ issue: 206, head: "d".repeat(40), attempt: 1, findings });
+    expect(body).not.toContain(secret);
+  } finally {
+    vi.unstubAllEnvs();
+  }
+  expect(process.env.FACTORY_BOT_TOKEN).not.toBe(secret);
+});
+
+test("test_206_gate_log_in_finding_is_single_line_and_capped_at_300", async () => {
+  expect(GATE_LOG_FINDING_MAX).toBe(300);
+  const lines = Array.from({ length: 40 }, (_, i) => `L${String(i).padStart(2, "0")} problem in src/file${i}.js`);
+  const log = lines.join("\n");
+  expect(log.length).toBeGreaterThan(GATE_LOG_FINDING_MAX);
+  const [f] = await findingsVia({ lint: { status: "RED", code: 1, log } });
+  const prefix = "gate lint RED — ";
+  expect(f.detail.startsWith(prefix)).toBe(true);
+  const part = f.detail.slice(prefix.length);
+  expect(part).not.toMatch(/[\r\n]/);
+  expect(part.length).toBe(GATE_LOG_FINDING_MAX);
+  // a HEAD cut: the first lines are there, the last are not
+  expect(part.startsWith("L00 problem in src/file0.js L01 problem in src/file1.js")).toBe(true);
+  expect(part).not.toContain("L39");
+});
+
+test("test_206_gate_with_ids_or_without_log_keeps_the_existing_detail", async () => {
+  const ids = Array.from({ length: 12 }, (_, i) => `t${i}`);
+  const findings = await findingsVia({
+    unit: { status: "RED", failing_ids: ids, parsed: true, code: 1, log: "boom" },
+    e2e: { status: "RED", detail: { failing: ["e2e::a", "e2e::b"] }, code: 1, log: "boom" },
+    "prove-test": { status: "RED", code: 1, log: "" },
+    "new-test-repeat": { status: "RED", code: 1 },
+    green: { status: "GREEN", code: 0, log: "fine" },
+  });
+  const by = Object.fromEntries(findings.map((f) => [f.check, f.detail]));
+  expect(Object.keys(by)).toEqual(["gate:unit", "gate:e2e", "gate:prove-test", "gate:new-test-repeat"]);
+  expect(by["gate:unit"]).toBe("gate unit RED — failing: t0, t1, t2, t3, t4, t5, t6, t7, t8, t9");
+  expect(by["gate:e2e"]).toBe("gate e2e RED — failing: e2e::a, e2e::b");
+  expect(by["gate:prove-test"]).toBe("gate prove-test RED — failing: (no test names; see the gate log)");
+  expect(by["gate:new-test-repeat"]).toBe("gate new-test-repeat RED — failing: (no test names; see the gate log)");
+  // the ` — ${reason}` suffix rule is unchanged (a RED gate carrying a reason routes to blocked in runStage, so the
+  // finding builder is pinned directly): log + reason, and reason without a log
+  const withReason = gateRedFindings(redGates({
+    "must-not": { status: "RED", code: null, log: "issue must_not contract violated: a.js: must-not-touch — the issue forbids changes under `a.js`", reason: "contract" },
+    sec: { status: "RED", code: 1, reason: "timeout" },
+    unit: { status: "RED", failing_ids: ["t0"], reason: "r" },
+  }), { env: {} }).map((f) => f.detail);
+  expect(withReason).toEqual([
+    "gate must-not RED — issue must_not contract violated: a.js: must-not-touch — the issue forbids changes under `a.js` — contract",
+    "gate sec RED — failing: (no test names; see the gate log) — timeout",
+    "gate unit RED — failing: t0 — r",
+  ]);
+  // a whitespace-only log is no reason either
+  expect(gateRedFindings(redGates({ x: { status: "RED", log: " \n\t\n" } }), { env: {} })[0].detail).toBe("gate x RED — failing: (no test names; see the gate log)");
+});
+
+// sec1 (#206 rework): a command gate's `log` is the RAW tail `(stderr + stdout).slice(-2000)` (gates.js:384) — cut BEFORE
+// any scrub. Its head is that cut, so a token split there is a remnant no scrub rule can recognise. Produced here by the
+// REAL runGates over a fake command, at every cut offset across a line holding a ghp_ token and an env secret.
+test("test_206_gate_red_finding_drops_the_unscrubbable_head_of_a_tail_cut_command_log", async () => {
+  const secret = "s3cr3t-Value-0123456789-abcdefXYZ";
+  const ghp = "ghp_" + "Ab3dE6gH9jK2mN5pQ8sT1vW4yZ7bC0eF3hJ6";
+  const env = { FACTORY_BOT_TOKEN: secret };
+  const h = { harness: { maturity: "M1" }, commands: { lint: "lint" }, gates: { required: ["lint"], fast: ["lint"], thresholds: {} }, test: {} };
+  const viaRunGates = async (stderr) => {
+    const run = makeFakeRun([{ match: (c, a) => c === "bash" && a[1] === "lint", result: { code: 1, stdout: "", stderr } }]);
+    return runGates({ run, cwd: "/repo", harness: h, level: "fast", quarantine: { quarantined: [] }, readFile: () => null, now: "2026-10-11T00:00:00Z" });
+  };
+  const tokenLine = `Error: remote rejected https://x-access-token:${ghp}@github.com auth=${secret}`;
+  const reason = "src/a.js:3:1 error no-unused-vars 'x' is defined but never used\n";
+  const leaks = [], lost = [];
+  for (let k = 1; k < tokenLine.length; k++) {
+    const pad = 2000 - (tokenLine.length - k) - 1 - reason.length;
+    const out = `${"old output\n".repeat(30)}${tokenLine}\n${reason}${"y".repeat(pad - 1)}\n`;
+    const gates = await viaRunGates(out);
+    const log = gates.gates.lint.log;
+    expect(log.length).toBe(2000);
+    expect(log.startsWith(tokenLine.slice(k)), `k=${k}`).toBe(true); // the producer's cut really lands inside the line
+    const [f] = gateRedFindings(gates, { env });
+    const body = selfGateRetryComment({ issue: 206, head: "d".repeat(40), attempt: 1, findings: [f] });
+    for (const o of [f.detail, body]) if (o.includes(ghp.slice(-8)) || o.includes(secret.slice(-8))) leaks.push(k);
+    if (!f.detail.startsWith("gate lint RED — src/a.js:3:1 error no-unused-vars")) lost.push(k);
+  }
+  expect(leaks).toEqual([]); // no cut offset publishes any remnant of either secret
+  expect(lost).toEqual([]); // and the reason after the cut line still reaches the builder
+  // a tail-cut log with no line break at all has no safe head: the old wording, not a remnant
+  const [flat] = gateRedFindings(await viaRunGates(`${tokenLine} ${"z".repeat(3000)}`.slice(0, 2500).replace(/\n/g, " ")), { env });
+  expect(flat.detail).toBe("gate lint RED — failing: (no test names; see the gate log)");
+  // a short log (not cut by the producer) keeps its first line — the must-not reason is never dropped
+  const [short] = gateRedFindings(redGates({ "must-not": { status: "RED", code: null, log: mustNotLog195() } }), { env });
+  expect(short.detail).toContain("factory/test/evidence.test.js");
+});
+
+// skeptic (#206): the sec1 head drop belongs to the command gates' raw tail cut (gates.js:384) ONLY. A must-not log is built
+// in one piece (gates.js:647) — never tail-cut, one line ("; "-joined) — so a LONG one (40 `.github/**` touches, well past
+// 2000 chars) must still give its reason from the START of the log, head-cut to 300: not the blind old wording.
+test("test_206_long_single_line_must_not_log_keeps_its_reason_from_the_start", async () => {
+  const contract = mustNotContract("must_not:\n- touch: `.github/**`\n");
+  const changed = Array.from({ length: 40 }, (_, i) => `.github/workflows/w${String(i).padStart(2, "0")}-nightly-release-pipeline.yml`);
+  const v = mustNotViolations({ contract, changed, added: new Map() });
+  expect(v).toHaveLength(40);
+  const note = "";
+  const log = `issue must_not contract violated: ${v.map((x) => `${x.file}: ${x.rule}`).join("; ")}${note}`; // gates.js:647, byte-exact
+  expect(log.length).toBeGreaterThan(2000);
+  expect(log).not.toContain("\n");
+  const findings = await findingsVia({ "must-not": { status: "RED", code: null, duration_ms: 0, log } });
+  const mn = findings.find((f) => f.check === "gate:must-not");
+  expect(mn.detail).toBe(`gate must-not RED — ${log.slice(0, GATE_LOG_FINDING_MAX)}`);
+  expect(mn.detail).toContain(".github/workflows/w00-nightly-release-pipeline.yml");
+  expect(mn.detail).not.toContain("(no test names; see the gate log)");
+  // the same long synthetic log carrying a line break is still read from its start (no first line is dropped)
+  const [ml] = gateRedFindings(redGates({ "must-not": { status: "RED", code: null, log: log.replace("; ", "\n") } }), { env: {} });
+  expect(ml.detail).toBe(`gate must-not RED — ${log.replace("; ", " ").slice(0, GATE_LOG_FINDING_MAX)}`);
+});
+
+/**
+ * ── #271 arch1 — the gates-RED scrub list comes from ONE owner ─────────────────────────────────────────────────
+ * Which env values get redacted before text reaches a public comment is one rule. It lived in six hand-built
+ * `SECRET_ENV.map(...)` copies (run-stage, scrub-artifacts runCli, qa-evidence, gates ×2, progress); now it is
+ * scrub-artifacts.js `secretValues(env)` and nothing else under factory/bin or factory/lib touches SECRET_ENV in code.
+ */
+import { secretValues } from "../bin/scrub-artifacts.js";
+import { readdirSync as readdirSync271 } from "node:fs";
+
+// Code lines only: JSDoc/line comments and trailing `// …` are dropped (a comment NAMING the rule is documentation).
+const codeOnly271 = (src) => src.split("\n").map((line) => {
+  const t = line.trim();
+  if (t.startsWith("*") || t.startsWith("//") || (t.startsWith("/*") && !t.includes("*/"))) return "";
+  return line.replace(/\/\*.*?\*\//g, "").replace(/(^|[^:"'`\\])\/\/.*$/, "$1");
+}).join("\n");
+const engineSources271 = () => ["bin", "lib"].flatMap((dir) => {
+  const base = new URL(`../${dir}/`, import.meta.url);
+  const walk = (u, rel) => readdirSync271(u, { withFileTypes: true }).flatMap((e) => e.isDirectory()
+    ? walk(new URL(`${e.name}/`, u), `${rel}${e.name}/`)
+    : e.name.endsWith(".js") ? [{ path: `factory/${dir}/${rel}${e.name}`, src: readFileSync(new URL(e.name, u), "utf8") }] : []);
+  return walk(base, "");
+});
+
+test("test_271_gate_red_finding_scrub_list_comes_from_the_shared_collector", () => {
+  // behaviour: every SECRET_ENV name, each holding a distinct literal no shape rule recognises, is redacted
+  const env = Object.fromEntries(SECRET_ENV.map((k, i) => [k, `plainLiteral${i}-${k.toLowerCase()}-0x9f3e`]));
+  expect(SECRET_ENV.length).toBeGreaterThanOrEqual(5);
+  const log = `lint failed\n${SECRET_ENV.map((k) => `${k} leaked as ${env[k]} here`).join("\n")}\n`;
+  for (const v of Object.values(env)) expect(log).toContain(v);
+  const [f] = gateRedFindings(redGates({ lint: { status: "RED", code: 1, log } }), { env });
+  for (const [k, v] of Object.entries(env)) expect(f.detail, k).not.toContain(v);
+  expect(f.detail.split("[REDACTED:env-value]").length - 1).toBe(SECRET_ENV.length);
+  expect(f.detail.startsWith("gate lint RED — lint failed")).toBe(true);
+  // the shared collector is the one that knows these values (and the same env gives the same list)
+  expect(secretValues(env)).toEqual(SECRET_ENV.map((k) => env[k]));
+
+  // single owner: no module under factory/bin or factory/lib except scrub-artifacts.js names SECRET_ENV in code
+  const sources = engineSources271();
+  const runStageSrc = sources.find((s) => s.path === "factory/bin/run-stage.js");
+  expect(runStageSrc).toBeTruthy();
+  expect(sources.length).toBeGreaterThan(20);
+  const owners = sources.filter((s) => /\bSECRET_ENV\b/.test(codeOnly271(s.src))).map((s) => s.path);
+  expect(owners).toEqual(["factory/bin/scrub-artifacts.js"]);
+  expect(runStageSrc.src).not.toContain("SECRET_ENV.map(");
+  // run-stage takes the list from the collector, and the deleted private copies stay deleted
+  expect(codeOnly271(runStageSrc.src)).toMatch(/import\s*\{[^}]*\bsecretValues\b[^}]*\}\s*from\s*"\.\/scrub-artifacts\.js"/);
+  expect(codeOnly271(runStageSrc.src)).toMatch(/secrets\s*=\s*secretValues\(env\)/);
+  const helpers = sources.filter((s) => /\b(secretsFrom|toolSecrets)\b/.test(codeOnly271(s.src))).map((s) => s.path);
+  expect(helpers).toEqual([]);
+});
+
+/**
+ * #271 dw5 (skeptic self-critique) — the single-owner guard works per EXPRESSION, not per file, and not per identifier.
+ * A file-level "who names SECRET_ENV" check misses a seventh copy inside scrub-artifacts.js itself (runCli was one of the
+ * six), and an identifier check misses a renamed copy that lists the names inline. So a copy of the rule is any of:
+ *   ① a code line naming SECRET_ENV other than its declaration and the `secretValues` body (an alias `const L = SECRET_ENV`
+ *      or a hand-built `SECRET_ENV.map(...)` anywhere, scrub-artifacts.js included);
+ *   ② an array literal holding two or more SECRET_ENV names — inline or bound to a const of any name — whose
+ *      map/flatMap/filter/reduce callback indexes an object by its element (names → env values).
+ * Comments and factory/test are not engine code. exec.js MERGE_CAPABLE_ENV (a drop list, never looked up) is not a copy.
+ */
+const SECRET_NAME_RE271 = new RegExp(`["'\`](${SECRET_ENV.join("|")})["'\`]`, "g");
+const LIST_OPS271 = "(?:map|flatMap|filter|reduce)";
+/** Index of the bracket matching the opener at `i` (any of [ ( ), depth-counted; strings are not special — code only). */
+const closeOf271 = (s, i) => {
+  const open = s[i], close = open === "[" ? "]" : ")";
+  for (let d = 0, j = i; j < s.length; j++) {
+    if (s[j] === open) d++;
+    else if (s[j] === close && --d === 0) return j;
+  }
+  return -1;
+};
+/** Does the call whose `(` is at `i` look a list element up in an object (`obj[n]` / `obj?.[n]`)? */
+const callLooksUp271 = (code, i) => {
+  const end = closeOf271(code, i);
+  const body = code.slice(i, end < 0 ? undefined : end + 1);
+  const m = /^\(\s*(?:\(\s*)?(?:\w+\s*,\s*)?(\w+)\s*\)?\s*=>/.exec(body);
+  return Boolean(m) && new RegExp(`\\[\\s*${m[1]}\\s*\\]`).test(body.slice(m[0].length));
+};
+const secretListCopies271 = (sources) => sources.flatMap(({ path, src }) => {
+  const code = codeOnly271(src);
+  const out = [];
+  code.split("\n").forEach((l, i) => {
+    if (!/\bSECRET_ENV\b/.test(l)) return;
+    const t = l.trim();
+    const allowed = path === "factory/bin/scrub-artifacts.js"
+      && (/^export const SECRET_ENV = \[[^\]]*\];$/.test(t) || /^export const secretValues = \(env\) => SECRET_ENV\.map\(\(n\) => env\?\.\[n\]\)/.test(t));
+    if (!allowed) out.push(`${path}:${i + 1} names SECRET_ENV`);
+  });
+  for (let i = code.indexOf("["); i >= 0; i = code.indexOf("[", i + 1)) {
+    const end = closeOf271(code, i);
+    if (end < 0) continue;
+    if (new Set([...code.slice(i, end + 1).matchAll(SECRET_NAME_RE271)].map((m) => m[1])).size < 2) continue;
+    const line = code.slice(0, i).split("\n").length;
+    const direct = new RegExp(`^\\s*\\.${LIST_OPS271}\\(`).exec(code.slice(end + 1));
+    if (direct && callLooksUp271(code, end + direct[0].length)) out.push(`${path}:${line} inline secret-name list mapped to values`);
+    const bound = /(?:const|let|var)\s+(\w+)\s*=\s*$/.exec(code.slice(0, i));
+    if (!bound || bound[1] === "SECRET_ENV") continue; // every SECRET_ENV use is already judged line by line by ①
+    for (const u of code.matchAll(new RegExp(`\\b${bound[1]}\\s*\\.${LIST_OPS271}\\(`, "g"))) {
+      if (callLooksUp271(code, u.index + u[0].length - 1)) out.push(`${path}:${line} ${bound[1]} (secret-name list) mapped to values`);
+    }
+  }
+  return out;
+});
+
+test("test_271_single_owner_guard_catches_a_seventh_copy_in_the_owner_file_a_renamed_list_and_a_flatmap_copy", () => {
+  const sources = engineSources271();
+  expect(sources.length).toBeGreaterThan(20);
+  // the real engine: exactly one owner, no copy anywhere (scrub-artifacts.js is checked line by line, not exempted)
+  expect(secretListCopies271(sources)).toEqual([]);
+  const scrub = sources.find((s) => s.path === "factory/bin/scrub-artifacts.js");
+  expect(codeOnly271(scrub.src).split("\n").filter((l) => /\bSECRET_ENV\b/.test(l))).toHaveLength(2);
+  expect(sources.find((s) => s.path === "factory/lib/exec.js").src).toContain("MERGE_CAPABLE_ENV");
+
+  // the guard is not vacuous: each of these copies, planted into the REAL source text, is caught
+  const plant = (path, from, to) => {
+    const s = sources.find((x) => x.path === path);
+    expect(s, path).toBeTruthy();
+    const src = s.src.replace(from, to);
+    expect(src, `${path}: plant site not found`).not.toBe(s.src);
+    return secretListCopies271(sources.map((x) => (x.path === path ? { path, src } : x)));
+  };
+  const mutants = {
+    // ① a seventh copy beside secretValues, in the owner file (runCli)
+    runCliCopy: plant("factory/bin/scrub-artifacts.js", "const secrets = secretValues(env);",
+      "const secrets = SECRET_ENV.map((n) => env?.[n]).filter((v) => typeof v === \"string\" && v.length > 0);"),
+    // ① an alias of the list under a new name
+    alias: plant("factory/lib/gates.js", "const secrets = secretValues(process.env);",
+      "const NAMES = SECRET_ENV; const secrets = NAMES.map((n) => process.env[n]).filter(Boolean);"),
+    // ② a renamed copy with the names inline and no SECRET_ENV identifier (drops three of the five names)
+    inlineRenamed: plant("factory/lib/progress.js", "secrets: secretValues(env)",
+      "secrets: [\"FACTORY_BOT_TOKEN\", \"GITHUB_TOKEN\"].map((n) => env?.[n]).filter(Boolean)"),
+    // ② a const-bound, multi-line, flatMap copy under a name the helper check never heard of
+    flatMapBound: plant("factory/bin/run-stage.js", "const secrets = secretValues(env);",
+      "const TOKEN_NAMES = [\n    'FACTORY_BOT_TOKEN',\n    'ANTHROPIC_API_KEY',\n  ];\n  const secrets = TOKEN_NAMES.flatMap((k) => (env[k] ? [env[k]] : []));"),
+    // ② reduce with an accumulator
+    reduceInline: plant("factory/bin/qa-evidence.js", "scrubText(body, { secrets: secretValues(env) })",
+      "scrubText(body, { secrets: [\"CLAUDE_CODE_OAUTH_TOKEN\", \"FACTORY_MERGE_TOKEN\"].reduce((acc, k) => (env[k] ? [...acc, env[k]] : acc), []) })"),
+  };
+  for (const [name, found] of Object.entries(mutants)) expect(found.length, name).toBeGreaterThan(0);
+  expect(mutants.runCliCopy.join("|")).toMatch(/^factory\/bin\/scrub-artifacts\.js:\d+ names SECRET_ENV$/);
+  expect(mutants.inlineRenamed.join("|")).toMatch(/factory\/lib\/progress\.js:\d+ inline secret-name list/);
+  expect(mutants.flatMapBound.join("|")).toMatch(/factory\/bin\/run-stage\.js:\d+ TOKEN_NAMES \(secret-name list\)/);
+  // a comment that names the rule is documentation, not a copy
+  expect(plant("factory/lib/progress.js", "secrets: secretValues(env)",
+    "secrets: secretValues(env) /* not SECRET_ENV.map((n) => env[n]) */")).toEqual([]);
 });
 
 /**

@@ -1068,6 +1068,72 @@ test("implement: in KTB's own repo the runner-generated mirror paths are exclude
   } finally { rmSync(self, { recursive: true, force: true }); }
 });
 
+// #271 arch1 (dw6) — folding gates.js's two private copies into the shared `secretValues` must keep its process.env
+// fallback: with NO env argument, gateDetail and gatesDetailLines (the last gate before the never-expiring public records
+// branch) still redact a SECRET_ENV value set in process.env. The literal matches no shape rule, so only the env path can
+// redact it — a refactor that passes `env` (undefined) to the collector without `?? process.env` leaks it here.
+test("test_271_gate_detail_without_env_still_scrubs_a_process_env_secret", () => {
+  const secret = "plainLiteralProcEnv-7c41-value";
+  const prev = process.env.FACTORY_BOT_TOKEN;
+  process.env.FACTORY_BOT_TOKEN = secret;
+  try {
+    const stdout = [
+      `FAILED tests/test_auth.py::test_login[${secret}] - boom`,
+      `context ${secret} in the tail`,
+    ].join("\n");
+    // control: the literal is not a shape — with an env that lacks it, it survives (so redaction below is the env path)
+    expect(gateDetail({ gate: "unit", stdout, env: { FACTORY_BOT_TOKEN: "" } }).snippet).toContain(secret);
+    const d = gateDetail({ gate: "unit", stdout });
+    expect(d.failing.length).toBeGreaterThan(0);
+    expect(d.failing.join("|")).not.toContain(secret);
+    expect(d.failing.join("|")).toContain("[REDACTED:env-value]");
+    expect(d.snippet).not.toContain(secret);
+    expect(d.snippet).toContain("[REDACTED:env-value]");
+    // gatesDetailLines re-scrubs failing and reason itself (no env parameter at all): a raw detail still comes out clean
+    const raw = { gate: "unit", failing: [`tests/test_auth.py::test_login[${secret}]`], snippet: "" };
+    const [line] = gatesDetailLines({ gates: { unit: { status: "RED", detail: raw, reason: `main is red on ${secret}` } } });
+    expect(line).not.toContain(secret);
+    const parsed = JSON.parse(line.slice(GATES_DETAIL_PREFIX.length));
+    expect(parsed.failing[0]).toContain("[REDACTED:env-value]");
+    expect(parsed.reason).toContain("[REDACTED:env-value]");
+  } finally {
+    if (prev === undefined) delete process.env.FACTORY_BOT_TOKEN; else process.env.FACTORY_BOT_TOKEN = prev;
+  }
+});
+
+// #271 dw6 (skeptic self-critique) — EVERY gates.js scrub site keeps its own process.env fallback, proved site by site.
+// gateDetail hands gateFailureSnippet `{}` when env is falsy, so the snippet's destructuring default always fills the value
+// in and a `?? process.env` dropped from gateFailureSnippet was invisible through gateDetail. Here each exported site is
+// called directly with `env: null` — a destructuring default does NOT apply to null, so only the `?? process.env` at that
+// site can find the secret. The literal matches no shape rule; the control call proves the env path is what redacts it.
+import { gateFailureSnippet as gateFailureSnippet271, unhandledGateLog as unhandledGateLog271 } from "../lib/gates.js";
+test("test_271_every_gates_scrub_site_falls_back_to_process_env_on_a_null_env", () => {
+  const secret = "plainLiteralNullEnv-3b9d-value";
+  const prev = process.env.ANTHROPIC_API_KEY;
+  process.env.ANTHROPIC_API_KEY = secret;
+  try {
+    const out = `step 1 ok\nboom: ${secret} rejected\n`;
+    // control: an env that lacks the value leaves it in place at both direct sites
+    expect(gateFailureSnippet271(out, "", { env: { ANTHROPIC_API_KEY: "" } })).toContain(secret);
+    expect(unhandledGateLog271(out, "", { env: { ANTHROPIC_API_KEY: "" } })).toContain(secret);
+    const sites = {
+      gateFailureSnippet: gateFailureSnippet271(out, "", { env: null }),
+      unhandledGateLog: unhandledGateLog271(out, "", { env: null }),
+      unhandledGateLogStdout: unhandledGateLog271("", out, { env: null }),
+      gateDetailSnippet: gateDetail({ gate: "unit", stdout: out, env: null }).snippet,
+    };
+    for (const [site, text] of Object.entries(sites)) {
+      expect(text, site).not.toContain(secret);
+      expect(text, site).toContain("boom: [REDACTED:env-value] rejected");
+    }
+    // omitted env (the everyday call) still means process.env at the direct sites too
+    expect(gateFailureSnippet271(out, "")).not.toContain(secret);
+    expect(unhandledGateLog271(out, "")).not.toContain(secret);
+  } finally {
+    if (prev === undefined) delete process.env.ANTHROPIC_API_KEY; else process.env.ANTHROPIC_API_KEY = prev;
+  }
+});
+
 // #247 dw5 (verifier finding 4) — the flaky harvest goes to the queue through the same single tail that harness requests and
 // retro promotions use (`createBacklogIssueAndQueue`): a refused or throwing door leaves the issue in backlog with exactly one
 // `notQueuedComment` (its marker, its wording), never a second, gates.js-only `factory-flaky-not-queued` comment.

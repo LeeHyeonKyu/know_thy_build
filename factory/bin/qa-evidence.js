@@ -5,7 +5,7 @@ import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } 
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { latestHandoff } from "../lib/handoff.js";
 import { matchesAny } from "../lib/glob.js";
-import { isBinary, scrubText, SECRET_ENV } from "./scrub-artifacts.js";
+import { isBinary, scrubText, secretValues } from "./scrub-artifacts.js";
 import {
   DATA_PATH_RE, KINDS, QA_SCHEMA, SMOKE_CLAIM, TOOL_VERSION, coverageTable, evidenceFor, manifestPath,
   newManifest, probeEvidenceDir, qaDir, qaDirRel, readManifest, touchesDataPaths, validateManifest,
@@ -356,8 +356,6 @@ function saveManifest(root, issue, m) {
 /** 같은 claim id 아래 이미 몇 개의 **파일**이 있는가 → 다음 번호. 덮어쓰지 않는다. */
 const nextIndex = (m, claim) => m.claims.filter((c) => String(c.id) === String(claim) && c.file).length + 1;
 
-const secretsFrom = (env) => SECRET_ENV.map((n) => env[n]).filter((v) => typeof v === "string" && v.length > 0);
-
 // ── 하위 명령 ────────────────────────────────────────────────────────────────────────────────
 
 function cmdRecord({ root, issue, flags, rest, env, log, err, now, spawn, gate }) {
@@ -391,7 +389,7 @@ function cmdRecord({ root, issue, flags, rest, env, log, err, now, spawn, gate }
   ].join("\n");
   const m = loadOrOpenManifest(root, issue, { ...stageStamp(root, issue, spawn), now: at });
   const file = `${safeClaim(claim)}-${nextIndex(m, claim)}.log`;
-  writeFileSync(join(qaDir(root, issue), file), scrubText(body, { secrets: secretsFrom(env) }).text);
+  writeFileSync(join(qaDir(root, issue), file), scrubText(body, { secrets: secretValues(env) }).text);
   m.claims.push({ id: String(claim), kind: "command", file, cmd: cmdText, exit, summary });
   saveManifest(root, issue, m);
   log(`factory: qa evidence recorded — ${qaDirRel(issue)}/${file} (claim ${claim}, exit ${exit})`);
@@ -423,7 +421,7 @@ function cmdAttach({ root, issue, flags, env, log, err, now, spawn }) {
   const dest = join(qaDir(root, issue), file);
   // 바이너리(스크린샷)는 한 바이트도 건드리지 않는다 — 텍스트로 다시 쓰면 증거가 깨진다.
   if (isBinary(buf)) copyFileSync(source.abs, dest);
-  else writeFileSync(dest, scrubText(buf.toString("utf8"), { secrets: secretsFrom(env) }).text);
+  else writeFileSync(dest, scrubText(buf.toString("utf8"), { secrets: secretValues(env) }).text);
   m.claims.push({ id: String(claim), kind: k, file, summary });
   saveManifest(root, issue, m);
   log(`factory: qa evidence attached — ${qaDirRel(issue)}/${file} (claim ${claim}, ${k})`);

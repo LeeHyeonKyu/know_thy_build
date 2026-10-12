@@ -13,7 +13,7 @@ import { proveTest, repeatNewTests, proveModeFor, selfReferentialTests, proveFix
 import { runDiffCoverage } from "./diff-coverage.js";
 import { mutationGate } from "./mutation.js";
 import { scrubbedRunner } from "./exec.js";
-import { SECRET_ENV, scrubText } from "../bin/scrub-artifacts.js";
+import { secretValues, scrubText } from "../bin/scrub-artifacts.js";
 import { createBacklogIssueAndQueue } from "./harness-request.js";
 
 const LEVELS = ["fast", "full", "deep"];
@@ -65,8 +65,7 @@ export const unhandledReason = (code) => `command exited ${code} with 0 failing 
 export function unhandledGateLog(stderr, stdout, { env = process.env } = {}) {
   const text = String(stderr || "").trim() || String(stdout || "");
   const tail = text.split("\n").slice(-UNHANDLED_TAIL_LINES).join("\n");
-  const secrets = SECRET_ENV.map((n) => env?.[n]).filter((v) => typeof v === "string" && v.length > 0);
-  return scrubText(tail, { secrets }).text.slice(-2000);
+  return scrubText(tail, { secrets: secretValues(env ?? process.env) }).text.slice(-2000);
 }
 
 /**
@@ -98,8 +97,10 @@ export const DETAIL_MAX_SCAN_LINES = 2000;
 /** 런 레코드의 줄 접두사. 뒤는 **한 줄 JSON**이다 — Task 3의 harvester가 `/^gates-detail: (\{.*\})$/`로 읽는다. */
 export const GATES_DETAIL_PREFIX = "gates-detail: ";
 
-/** `scrub-artifacts.js`가 유일한 규칙 출처다 — 이 파일은 자기 정규식을 만들지 않는다. */
-const secretsFrom = (env) => SECRET_ENV.map((n) => (env ?? process.env)?.[n]).filter((v) => typeof v === "string" && v.length > 0);
+/**
+ * `scrub-artifacts.js`가 유일한 규칙 출처다 — 이 파일은 자기 정규식도 자기 시크릿 목록도 만들지 않는다(#271 arch1: 목록은
+ * `secretValues`). 이 파일의 기본값은 여기 남는다: env를 받지 못한 자리는 `env ?? process.env`로 잡의 env를 쓴다.
+ */
 const scrubOne = (text, secrets, max) => scrubText(String(text ?? ""), { secrets }).text.slice(0, max);
 
 /**
@@ -164,7 +165,7 @@ export function parseFailingTests(text) {
 export function gateFailureSnippet(stdout, stderr, { env = process.env } = {}) {
   const text = [String(stdout ?? ""), String(stderr ?? "")].filter((s) => s.trim()).join("\n");
   const tail = text.split("\n").slice(-DETAIL_TAIL_LINES).join("\n");
-  return scrubText(tail, { secrets: secretsFrom(env) }).text.slice(-DETAIL_MAX_CHARS);
+  return scrubText(tail, { secrets: secretValues(env ?? process.env) }).text.slice(-DETAIL_MAX_CHARS);
 }
 
 /**
@@ -178,7 +179,7 @@ export function gateFailureSnippet(stdout, stderr, { env = process.env } = {}) {
 export function gateDetail({ gate, stdout = "", stderr = "", env } = {}) {
   try {
     const text = [String(stdout ?? ""), String(stderr ?? "")].join("\n");
-    const secrets = secretsFrom(env);
+    const secrets = secretValues(env ?? process.env);
     return {
       gate,
       failing: parseFailingTests(text).map((n) => scrubOne(n, secrets, DETAIL_MAX_NAME)),
@@ -235,7 +236,7 @@ export function attachGateDetails(result) {
 export function gatesDetailLines(result, { runId = null, runnerId = null, round = null } = {}) {
   try {
     const out = [];
-    const secrets = secretsFrom();
+    const secrets = secretValues(process.env);
     /**
      * 1.4.18 (KTB #38) — **test-env re-up 실패도 이 채널로 나간다.** 재-업이 실패하면 게이트는 하나도 돌지 않고
      * (`status: BLOCKED`, `gates: {}`) run 기록에는 산문 한 줄(`test-env: re-up failed — …`)만 남았다 — 루프의 수확기는
