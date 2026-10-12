@@ -1,3 +1,4 @@
+// Scope change (#230): dw5 requires the retro maturity-promotion issue (also a `factory:harness` issue) to get a comment shaped like `notQueuedComment`; must_fix arch1 requires the create-in-backlog → transition → not-queued-comment tail to have one implementation (`createBacklogIssueAndQueue`) that both `ensureHarnessIssue` and retro's `makeRetroCreateIssue` call, with an option to drop the "a parked feature waits on this issue" sentence that is false for a retro promotion.
 import { HARNESS_LABEL } from "./label-catalog.js";
 
 /**
@@ -154,7 +155,7 @@ const stillInBacklog = (it) => { const ls = labelNames(it); return ls.includes("
 /** 재사용 경로의 사유: 이슈는 앞서 큐에 못 들어갔고, 이 경로는 문을 다시 두드리지 않는다. */
 export const stillBacklogReason = (n) => `harness issue #${n} already exists and is still in backlog — it was not queued earlier and reuse does not retry the queue door; a person's \`/know-thy-build:next\` on #${n} is needed`;
 
-/** 하네스 이슈가 큐에 들어가지 못했다는 기계 마커(flaky 수확의 `factory-flaky-not-queued`와 같은 모양). */
+/** 새로 만든 이슈(하네스 요청·retro 승격·flaky 수확 — `createBacklogIssueAndQueue`)가 큐에 들어가지 못했다는 기계 마커. */
 export const notQueuedMarker = (n) => `<!-- factory-harness-not-queued issue=${n} -->`;
 
 /** 심사 거부 사유 문구 → 발동한 상한의 이름. `lib/admission.js`가 쓰는 괄호 표기를 그대로 읽는다(import하지 않는다). */
@@ -176,9 +177,9 @@ const CAP_EXIT = {
  */
 const UNWIRED_RE = /^no (queue admission|rehearsal checker) is wired into this transition\b/;
 const REHEARSAL_RE = /rehears/i;
-export function notQueuedComment({ issue, reason, threw = false }) {
+export function notQueuedComment({ issue, reason, threw = false, parkedFeature = true }) {
   const why = String(reason ?? "unknown");
-  const head = `${notQueuedMarker(issue)}\n이 하네스 이슈는 \`backlog\`에 머물러 있습니다 — 큐 전이${threw ? "가 실패했습니다" : "가 거부됐습니다"}: ${why}`;
+  const head = `${notQueuedMarker(issue)}\n이 이슈는 \`backlog\`에 머물러 있습니다 — 큐 전이${threw ? "가 실패했습니다" : "가 거부됐습니다"}: ${why}`;
   let next;
   if (!threw && /^queue admission refused\b/.test(why)) {
     const caps = [...new Set([...why.matchAll(CAP_RE)].map((m) => m[1]))];
@@ -194,7 +195,8 @@ export function notQueuedComment({ issue, reason, threw = false }) {
   } else {
     next = "이슈의 상태 라벨이 큐로 가는 전이를 허락하지 않습니다(리허설이나 상한의 문제가 아닙니다) — 라벨을 확인해 `backlog`에 세운 뒤 `/know-thy-build:next`로 큐에 넣으세요.";
   }
-  return `${head}\n\n${next}\n\n이 이슈를 기다리는 피처는 이 이슈가 큐에 들어가 머지될 때까지 주차돼 있습니다(#136).`;
+  // #230 — retro의 성숙도 승격 이슈를 기다리는 피처는 없다(`parkedFeature: false`) — 그 문장은 거기서 거짓이다.
+  return `${head}\n\n${next}${parkedFeature ? "\n\n이 이슈를 기다리는 피처는 이 이슈가 큐에 들어가 머지될 때까지 주차돼 있습니다(#136)." : ""}`;
 }
 
 /**
@@ -226,21 +228,38 @@ export async function ensureHarnessIssue({ gh, issue, entries, pr = null, origin
     }
     return { issue: found.number, created: false, appended: 0, title: found.title ?? title, ...still };
   }
-  const number = await gh.createIssue({
-    title,
+  const made = await createBacklogIssueAndQueue({
+    gh, title,
     body: harnessIssueBody({ entries, issue, pr, origin }),
     labels: ["backlog", HARNESS_LABEL],
+    reason: `harness request for #${issue}`,
+    transitionIssue,
   });
+  return { issue: made.issue, created: true, title, queued: made.queued, ...(made.queued ? {} : { queue_reason: made.queue_reason }) };
+}
+
+/**
+ * #230 (리뷰 arch1) — "`backlog`로 이슈를 만들고 → 큐 문(`transitionIssue`)을 두드리고 → 거부·던짐이면 `backlog`에 둔 채
+ * `notQueuedComment`를 단다"의 **유일한** 구현. 하네스 요청(`ensureHarnessIssue`)과 retro의 성숙도 승격 이슈(retro.js
+ * `makeRetroCreateIssue`)가 둘 다 이것을 부른다 — 사본이 갈라지면 한쪽의 수정이 다른 쪽에 닿지 않는다.
+ *   gates.js의 flaky 수확도 이것을 부른다(#247 dw5 — 예전의 자기 마커 `factory-flaky-not-queued` 사본은 지웠다).
+ *   - `labels`는 호출자가 준 그대로(`backlog` 포함) 만든다. 번호가 없으면 던진다(만들어졌는지 모른다).
+ *   - 문이 없으면 `HARNESS_TRANSITION_UNWIRED`로 `queued:false` — 코멘트는 달지 않는다(예전 그대로).
+ *   - 큐에 들어가면 `{ issue, queued: true }`, 아니면 `{ issue, queued: false, queue_reason }` — 던지지 않는다(이슈는 이미 있다).
+ *   - `parkedFeature: false`면 코멘트에서 "이 이슈를 기다리는 피처" 문장을 뺀다(retro 승격 이슈에는 그런 피처가 없다).
+ */
+export async function createBacklogIssueAndQueue({ gh, title, body, labels, reason, transitionIssue = null, parkedFeature = true }) {
+  const number = await gh.createIssue({ title, body, labels });
   if (number == null) throw new Error("gh issue create returned no issue number");
-  if (typeof transitionIssue !== "function") return { issue: number, created: true, title, queued: false, queue_reason: HARNESS_TRANSITION_UNWIRED };
+  if (typeof transitionIssue !== "function") return { issue: number, queued: false, queue_reason: HARNESS_TRANSITION_UNWIRED };
   let t, threw = false;
-  try { t = await transitionIssue({ issue: number, to: "factory:queue", reason: `harness request for #${issue}` }); }
+  try { t = await transitionIssue({ issue: number, to: "factory:queue", reason }); }
   catch (e) { threw = true; t = { ok: false, reason: `queue transition threw — ${String(e?.message || e).split("\n")[0]}` }; }
-  if (t?.ok === true) return { issue: number, created: true, title, queued: true };
-  const reason = t?.reason || "unknown";
-  try { await gh.comment(number, notQueuedComment({ issue: number, reason, threw })); }
+  if (t?.ok === true) return { issue: number, queued: true };
+  const why = t?.reason || "unknown";
+  try { await gh.comment(number, notQueuedComment({ issue: number, reason: why, threw, parkedFeature })); }
   catch { /* 기록의 실패가 이슈 생성의 실패는 아니다 — 반환값이 사유를 싣는다 */ }
-  return { issue: number, created: true, title, queued: false, queue_reason: reason };
+  return { issue: number, queued: false, queue_reason: why };
 }
 
 /**

@@ -881,3 +881,145 @@ test("test_217_gh_patch_pr_body_uses_repo_scope_only", async () => {
     for (const c of bad.calls) expect(c.args[0]).toBe("api");
   }
 });
+
+// ── #231 dw3 — `issue()`는 작성자를 싣는다: 큐 문이 "공장이 연 이슈인가"를 본문이 아니라 작성 계정으로 판정한다.
+// 모양의 출처는 gh CLI 소스 api/queries_issue.go `Author.MarshalJSON`(v2.102.0): 사람은 `{is_bot:false, login, id, name}`,
+// 봇(GraphQL `Bot` — `... on User`가 비어 id가 없다)은 `{is_bot:true, login:"app/<slug>"}`. GraphQL의 Bot login은 `<slug>`이고
+// (gh api graphql로 확인: dependabot → "dependabot"), REST `user.login`은 `<slug>[bot]`이다 — resolveFactoryLogins가 쓰는 쪽.
+test("test_231_gh_issue_carries_author_in_factory_login_form", async () => {
+  const view = (author) => makeFakeRun([{ match: (c, a) => a[0] === "issue" && a[1] === "view", result: { code: 0, stdout: JSON.stringify({ number: 5, title: "T", body: "B", labels: [], ...(author === undefined ? {} : { author }) }), stderr: "" } }]);
+  const read = async (author) => { const run = view(author); const it = await makeGh({ run, repo }).issue(5); return { it, args: run.calls[0].args }; };
+
+  const human = await read({ id: "MDQ6VXNlcjE=", is_bot: false, login: "LeeHyeonKyu", name: "Lee" });
+  expect(human.args.slice(-2)).toEqual(["--json", "number,title,body,labels,author"]);
+  expect(human.it).toEqual({ number: 5, title: "T", body: "B", labels: [], author: "LeeHyeonKyu" });
+  // App 작성자 → resolveFactoryLogins가 내는 바로 그 `<slug>[bot]` 모양
+  const app = await read({ is_bot: true, login: "app/ktb-factory" });
+  expect(app.it.author).toBe("ktb-factory[bot]");
+  const lg = await resolveFactoryLogins({ gh: { repo, viewerLogin: async () => "ktb-factory[bot]", viewerType: async () => "Bot" }, env: { GITHUB_ACTIONS: "true" } });
+  expect(lg.logins).toContain(app.it.author);
+  // is_bot만 있고 접두사가 없는 모양도 같은 곳으로 접힌다(이중 접미사는 붙이지 않는다)
+  expect((await read({ is_bot: true, login: "ktb-factory" })).it.author).toBe("ktb-factory[bot]");
+  expect((await read({ is_bot: true, login: "app/ktb-factory[bot]" })).it.author).toBe("ktb-factory[bot]");
+  // 작성자가 없다(삭제된 계정 — gh가 null을 준다) / login이 비었다 → null. 지어내지 않는다.
+  expect((await read(null)).it.author).toBe(null);
+  expect((await read({ is_bot: false, login: "" })).it.author).toBe(null);
+  expect((await read({ is_bot: false })).it.author).toBe(null);
+  expect(typeof human.it.author).toBe("string");
+});
+
+// ── #260 cf1 — App 모드(ADR-038 §2): 설치 토큰은 `GET /user`를 부를 수 없다(403). 워크플로는 민팅 직후 `<app-slug>[bot]`을
+// `FACTORY_BOT_LOGIN`으로 넘긴다(factory-*.yml "Factory login" 스텝). 가짜는 `gh` 실행 경계에만 둔다 — `viewerLogin`은 진짜
+// `makeGh()`의 것이고, 실패는 gh CLI가 403에서 내는 종료 코드·stderr 그대로다. env는 언제나 명시 주입이다(process.env 아님).
+const APP_SLUG_260 = "ktb-factory";
+const appEnv260 = (...args) => {
+  const bot = args.length ? args[0] : `${APP_SLUG_260}[bot]`;   // appEnv260(undefined) = FACTORY_BOT_LOGIN 키 자체가 없다
+  return { GITHUB_ACTIONS: "true", ...(bot === undefined ? {} : { FACTORY_BOT_LOGIN: bot }) };
+};
+/** `gh api user`가 설치 토큰에서 내는 실패(403 — gh 2.102.0을 로컬 가짜 서버에 붙여 기록한 종료 코드·stdout·stderr 그대로) + `gh issue view`(작성자 모양은 gh CLI `Author.MarshalJSON`). */
+function appModeGh260({ issueAuthor = undefined } = {}) {
+  const run = makeFakeRun([
+    { match: (c, a) => c === "gh" && a[0] === "api" && a[1] === "user", result: { code: 1, stdout: JSON.stringify({ message: "Resource not accessible by integration", documentation_url: "https://docs.github.com/rest/users/users#get-the-authenticated-user", status: "403" }), stderr: "gh: Resource not accessible by integration (HTTP 403)" } },
+    { match: (c, a) => c === "gh" && a[0] === "issue" && a[1] === "view", result: () => ({ code: 0, stdout: JSON.stringify({ number: 5, title: "T", body: "B", labels: [], ...(issueAuthor === undefined ? {} : { author: issueAuthor }) }), stderr: "" }) },
+  ]);
+  return { run, gh: makeGh({ run, repo: "LeeHyeonKyu/know_thy_build" }) };
+}
+
+test("test_260_app_mode_viewer_403_resolves_from_factory_bot_login", async () => {
+  const { run, gh } = appModeGh260();
+  const r = await resolveFactoryLogins({ gh, env: appEnv260() });
+  // ①(FACTORY_BOT_LOGIN)이 ②(뷰어)의 403에 가려지지 않는다
+  expect(r.ok).toBe(true);
+  expect(r.logins).toEqual(["ktb-factory[bot]"]);
+  expect(r.current).toMatchObject({ login: "ktb-factory[bot]", source: "FACTORY_BOT_LOGIN" });
+  // 계정 종류를 말해 주는 사실이 없다(뷰어 403, 하트비트 없음) — 모른다는 null이지 false가 아니다
+  expect(r.identity).toEqual({ personal: null, login: "ktb-factory[bot]" });
+  // 뷰어 조회는 여전히 시도된다(두 배우 모드의 머지 배우가 거기서 온다 — 다음 테스트), 실패해도 ok를 바꾸지 않을 뿐이다
+  expect(run.calls.filter((c) => c.args[0] === "api" && c.args[1] === "user")).toHaveLength(1);
+
+  // 봇 로그인이 없거나 공백뿐이면 여전히 fail closed — 아무도 모르는 상태는 통과가 아니다
+  for (const bot of [undefined, "", "   "]) {
+    const none = await resolveFactoryLogins({ gh: appModeGh260().gh, env: appEnv260(bot) });
+    expect(none.ok, JSON.stringify(bot)).toBe(false);
+    expect(none.reason, JSON.stringify(bot)).toMatch(/gh api user failed/);
+    expect(none.logins, JSON.stringify(bot)).toBeUndefined();
+  }
+  // 403이 아닌 뷰어 실패(일시 장애)는 봇 로그인이 있어도 fail closed 그대로다 — 두 배우 모드의 머지 배우를 조용히 빼지 않는다
+  // (test_195_two_actor_forged_marker_through_the_bot_login_is_overwritten과 같은 규칙)
+  for (const stderr of ["gh: Bad Gateway (HTTP 502)", "gh: Bad credentials (HTTP 401)", "error connecting to api.github.com"]) {
+    const run = makeFakeRun([{ match: (c, a) => a[0] === "api" && a[1] === "user", result: { code: 1, stdout: "", stderr } }]);
+    const transient = await resolveFactoryLogins({ gh: makeGh({ run, repo: "LeeHyeonKyu/know_thy_build" }), env: appEnv260() });
+    expect(transient.ok, stderr).toBe(false);
+    expect(transient.reason, stderr).toMatch(/gh api user failed/);
+  }
+});
+
+test("test_260_two_actor_mode_keeps_viewer_login_when_viewer_succeeds", async () => {
+  // ADR-021 두 배우 모드(PAT): 잡 토큰은 머지 배우(`ktb-agent`)이고 FACTORY_BOT_LOGIN은 에이전트 배우다 — 둘 다 팩토리 로그인이다.
+  // 봇 로그인이 있다고 뷰어 조회를 건너뛰면 머지 배우가 목록에서 빠진다.
+  let asked = 0;
+  const gh = { viewerLogin: async () => { asked += 1; return "ktb-agent"; } };
+  const r = await resolveFactoryLogins({ gh, env: { GITHUB_ACTIONS: "true", FACTORY_BOT_LOGIN: "factory-bot" } });
+  expect(asked).toBe(1);
+  expect(r.ok).toBe(true);
+  expect(r.logins).toEqual(["factory-bot", "ktb-agent"]);
+  expect(r.identity.login).toBe("ktb-agent");
+  expect(r.current).toMatchObject({ login: "factory-bot", source: "FACTORY_BOT_LOGIN" });
+});
+
+test("test_260_gh_issue_app_author_matches_workflow_factory_bot_login", async () => {
+  // 워크플로가 넘기는 값: `${APP_SLUG}[bot]`. 그 값과 `gh.issue().author`가 대소문자 무시로 같아야 "공장이 연 이슈"다.
+  const env = appEnv260();
+  const sameLogin = (a, b) => typeof a === "string" && typeof b === "string" && a.toLowerCase() === b.toLowerCase();
+  const lg = await resolveFactoryLogins({ gh: appModeGh260().gh, env });
+  expect(lg.ok).toBe(true);
+  // gh CLI가 App 작성자에게 실제로 내는 모양(`is_bot:true`, `login:"app/<slug>"`)과, 접두사가 없는 slug·이미 접미사가 붙은 모양
+  for (const author of [{ is_bot: true, login: `app/${APP_SLUG_260}` }, { is_bot: true, login: APP_SLUG_260 }, { is_bot: true, login: `${APP_SLUG_260}[bot]` }]) {
+    const it = await appModeGh260({ issueAuthor: author }).gh.issue(5);
+    expect(sameLogin(it.author, env.FACTORY_BOT_LOGIN), JSON.stringify(author)).toBe(true);
+    expect(lg.logins.some((l) => sameLogin(l, it.author)), JSON.stringify(author)).toBe(true);
+  }
+  // 사람 작성자는 그대로 지나가고, slug와 같은 이름의 사람 계정도 봇으로 맞춰지지 않는다
+  for (const login of ["LeeHyeonKyu", APP_SLUG_260]) {
+    const it = await appModeGh260({ issueAuthor: { id: "MDQ6VXNlcjE=", is_bot: false, login, name: login } }).gh.issue(5);
+    expect(it.author).toBe(login);
+    expect(sameLogin(it.author, env.FACTORY_BOT_LOGIN), login).toBe(false);
+    expect(lg.logins.some((l) => sameLogin(l, it.author)), login).toBe(false);
+  }
+});
+
+test("test_260_viewer_403_is_tolerated_only_for_the_app_install_token", async () => {
+  // 뷰어 403을 견디는 문은 **App 설치 토큰의 403**만이다: ①이 `<slug>[bot]`(App만 갖는 로그인 모양 — 사람·머신 유저 로그인에는
+  // `[`가 올 수 없다)이고, gh가 낸 오류가 설치 토큰의 문구 "Resource not accessible by integration"과 HTTP 403을 함께 실을 때.
+  // stderr는 gh 2.102.0이 실제로 낸 것이다: 로컬 가짜 서버가 `GET /user`에 403 + 그 JSON을 돌려주게 하고
+  // (GH_HOST=github.localhost, HTTP_PROXY로 127.0.0.1에 묶음) `gh api user`를 돌려 받은 stdout·stderr·종료 코드 1 그대로다.
+  const body403 = JSON.stringify({ message: "Resource not accessible by integration", documentation_url: "https://docs.github.com/rest/users/users#get-the-authenticated-user", status: "403" });
+  const viewerFails = (stderr, stdout = "") => makeGh({ run: makeFakeRun([{ match: (c, a) => a[0] === "api" && a[1] === "user", result: { code: 1, stdout, stderr } }]), repo: "LeeHyeonKyu/know_thy_build" });
+  const INSTALL_403 = "gh: Resource not accessible by integration (HTTP 403)";
+
+  // App 모드: 통과한다
+  const app = await resolveFactoryLogins({ gh: viewerFails(INSTALL_403, body403), env: { GITHUB_ACTIONS: "true", FACTORY_BOT_LOGIN: "ktb-factory[bot]" } });
+  expect(app.ok).toBe(true);
+  expect(app.logins).toEqual(["ktb-factory[bot]"]);
+
+  // PAT(두 배우 모드, ADR-021)의 403 — SAML SSO·2차 rate limit·권한 없는 토큰 — 은 설치 토큰이 아니다: 머지 배우를 조용히 빼지 않는다
+  for (const stderr of [
+    "gh: Resource protected by organization SAML enforcement. You must grant your Personal Access token access to this organization. (HTTP 403)",
+    "gh: You have exceeded a secondary rate limit. Please wait a few minutes before you try again. (HTTP 403)",
+    INSTALL_403,
+  ]) {
+    const pat = await resolveFactoryLogins({ gh: viewerFails(stderr), env: { GITHUB_ACTIONS: "true", FACTORY_BOT_LOGIN: "factory-bot" } });
+    expect(pat.ok, stderr).toBe(false);
+    expect(pat.reason, stderr).toMatch(/gh api user failed/);
+  }
+  // ①이 App 모양이어도 설치 토큰의 문구가 아닌 403(예: App 폴백 뒤 PAT 머지 토큰의 SSO 403)은 fail closed다
+  for (const stderr of [
+    "gh: Resource protected by organization SAML enforcement. You must grant your Personal Access token access to this organization. (HTTP 403)",
+    "gh: You have exceeded a secondary rate limit. Please wait a few minutes before you try again. (HTTP 403)",
+    "gh: Resource not accessible by integration (HTTP 404)",
+  ]) {
+    const mixed = await resolveFactoryLogins({ gh: viewerFails(stderr), env: { GITHUB_ACTIONS: "true", FACTORY_BOT_LOGIN: "ktb-factory[bot]" } });
+    expect(mixed.ok, stderr).toBe(false);
+    expect(mixed.reason, stderr).toMatch(/gh api user failed/);
+  }
+});

@@ -148,14 +148,19 @@ test("test_178_self_change_config_defaults_and_validation", async () => {
   const withBlock = (block) => writeFileSync(charterPath, base.replace("budget: {}\n", `budget: {}\n${block}`));
 
   // 없음 → 기본값 { false, false, 60 }. 실제 CHARTER 경로로 읽힌다.
-  expect(SELF_CHANGE_DEFAULTS).toEqual({ auto_merge_non_judge: false, auto_merge_judge: false, veto_minutes: 60 });
-  expect(loadCharter(root).self_change).toEqual({ auto_merge_non_judge: false, auto_merge_judge: false, veto_minutes: 60 });
+  expect(SELF_CHANGE_DEFAULTS).toEqual({ auto_merge_non_judge: false, auto_merge_judge: false, operator_merge_judge: false, veto_minutes: 60 });
+  expect(loadCharter(root).self_change).toEqual({ auto_merge_non_judge: false, auto_merge_judge: false, operator_merge_judge: false, veto_minutes: 60 });
 
   // 올바른 덮어쓰기(블록 맵) — 쓴 키만 바뀌고 나머지는 기본값.
   withBlock("self_change:\n  auto_merge_non_judge: true\n  veto_minutes: 20\n");
-  expect(loadCharter(root).self_change).toEqual({ auto_merge_non_judge: true, auto_merge_judge: false, veto_minutes: 20 });
+  expect(loadCharter(root).self_change).toEqual({ auto_merge_non_judge: true, auto_merge_judge: false, operator_merge_judge: false, veto_minutes: 20 });
   withBlock("self_change: { auto_merge_judge: true }\n");
-  expect(loadCharter(root).self_change).toEqual({ auto_merge_non_judge: false, auto_merge_judge: true, veto_minutes: 60 });
+  expect(loadCharter(root).self_change).toEqual({ auto_merge_non_judge: false, auto_merge_judge: true, operator_merge_judge: false, veto_minutes: 60 });
+  // ADR-039 — 운영 door의 판정 경로 스위치. 기본 꺼짐, 불리언만.
+  withBlock("self_change: { operator_merge_judge: true }\n");
+  expect(loadCharter(root).self_change.operator_merge_judge).toBe(true);
+  withBlock("self_change:\n  operator_merge_judge: \"true\"\n");
+  expect(() => loadCharter(root)).toThrow(/self_change\.operator_merge_judge/);
 
   // 불리언이 아닌 스위치 → 설정 오류(어느 키인지 말한다). 기본값으로 조용히 접지 않는다.
   withBlock("self_change:\n  auto_merge_non_judge: yes-please\n");
@@ -177,8 +182,8 @@ test("test_178_self_change_config_defaults_and_validation", async () => {
 
 test("test_178_self_change_config_defaults_and_validation — parseSelfChange rejects every malformed shape", async () => {
   const { parseSelfChange } = await import("../lib/config.js");
-  expect(parseSelfChange(undefined)).toEqual({ auto_merge_non_judge: false, auto_merge_judge: false, veto_minutes: 60 });
-  expect(parseSelfChange({ auto_merge_non_judge: false, auto_merge_judge: true, veto_minutes: 1 })).toEqual({ auto_merge_non_judge: false, auto_merge_judge: true, veto_minutes: 1 });
+  expect(parseSelfChange(undefined)).toEqual({ auto_merge_non_judge: false, auto_merge_judge: false, operator_merge_judge: false, veto_minutes: 60 });
+  expect(parseSelfChange({ auto_merge_non_judge: false, auto_merge_judge: true, veto_minutes: 1 })).toEqual({ auto_merge_non_judge: false, auto_merge_judge: true, operator_merge_judge: false, veto_minutes: 1 });
   for (const [raw, key] of [
     [{ auto_merge_non_judge: "true" }, "auto_merge_non_judge"], [{ auto_merge_non_judge: null }, "auto_merge_non_judge"],
     [{ auto_merge_judge: 0 }, "auto_merge_judge"],
