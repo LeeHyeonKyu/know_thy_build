@@ -219,7 +219,9 @@ test("factory-triage.js: a missing args.loaded fails the stage closed with a nam
     args: { issue: 11, context: ".factory/out/context.json", loaded: null },
   });
 
-  expect(calls).toEqual([]);
+  // #288 dw3 — rewritten (plan done_when dw3) to the 'reader fails' case: args.loaded is missing, so the workflow now tries the reader, once() re-spawns it, and nothing else ever runs.
+  expect(calls.filter((c) => c.opts.label !== "load:reader")).toEqual([]);
+  expect(calls.map((c) => c.opts.label)).toEqual(["load:reader", "load:reader"]);
   expect(phases).toEqual(["Load"]);
   expect(calls.filter((c) => c.opts.agentType === "factory-triage")).toHaveLength(0);
   expect(result).toEqual({ issue: 11, error: "context payload missing", orchestration: "workflow", guarantee: "structural" });
@@ -561,7 +563,9 @@ test("factory-plan.js: a missing args.loaded fails the stage closed — no debat
     args: { issue: 42, context: ".factory/out/context.json", loaded: null },
   });
 
-  expect(calls).toEqual([]);
+  // #288 dw3 — rewritten (plan done_when dw3) to the 'reader fails' case: args.loaded is missing, so the workflow now tries the reader, its answer has no loaded_json string (unparseable — a non-null answer is not re-spawned), and nothing else ever runs.
+  expect(calls.filter((c) => c.opts.label !== "load:reader")).toEqual([]);
+  expect(calls.map((c) => c.opts.label)).toEqual(["load:reader"]);
   expect(phases).toEqual(["Load"]);
   expect(result).toEqual({ issue: 42, error: "context payload missing", orchestration: "workflow", guarantee: "structural" });
   expect(validate("plan.v1", result).ok).toBe(false);
@@ -1475,7 +1479,9 @@ test("factory-implement.js: a missing args.loaded fails the stage closed — not
     args: { issue: 42, context: ".factory/out/context.json", loaded: null },
   });
 
-  expect(calls).toEqual([]);
+  // #288 dw3 — rewritten (plan done_when dw3) to the 'reader fails' case: args.loaded is missing, so the workflow now tries the reader, its answer has no loaded_json string (unparseable — a non-null answer is not re-spawned), and nothing else ever runs.
+  expect(calls.filter((c) => c.opts.label !== "load:reader")).toEqual([]);
+  expect(calls.map((c) => c.opts.label)).toEqual(["load:reader"]);
   expect(phases).toEqual(["Load"]);
   expect(result).toEqual({ issue: 42, error: "context payload missing", orchestration: "workflow", guarantee: "structural" });
   expect(validate("implement.v1", { ...result, gates: { status: "GREEN" } }).ok).toBe(false);
@@ -1880,7 +1886,9 @@ test("factory-review.js: a missing args.loaded fails the stage closed — no rev
     args: { issue: 42, context: ".factory/out/context.json", loaded: null },
   });
 
-  expect(calls).toEqual([]);
+  // #288 dw3 — rewritten (plan done_when dw3) to the 'reader fails' case: args.loaded is missing, so the workflow now tries the reader, its answer has no loaded_json string (unparseable — a non-null answer is not re-spawned), and nothing else ever runs.
+  expect(calls.filter((c) => c.opts.label !== "load:reader")).toEqual([]);
+  expect(calls.map((c) => c.opts.label)).toEqual(["load:reader"]);
   expect(phases).toEqual(["Load"]);
   expect(result).toEqual({ issue: 42, error: "context payload missing", orchestration: "workflow", guarantee: "structural" });
   expect(validate("review.v1", result).ok).toBe(false);
@@ -2126,7 +2134,9 @@ test("a missing args.loaded fails every stage closed — no role runs, and the e
   for (const file of WORKFLOW_FILES) {
     const stub = async () => null;
     const { result, calls, phases } = await runWorkflow(file, { agent: stub, args: { issue: 5, context: ".factory/out/context.json" } });
-    expect(calls, file).toEqual([]);
+    // #288 dw3 — rewritten (plan done_when dw3) to the 'reader fails' case: args.loaded is missing, so the workflow now tries the reader, once() re-spawns it, and nothing else ever runs.
+    expect(calls.filter((c) => c.opts.label !== "load:reader"), file).toEqual([]);
+    expect(calls.map((c) => c.opts.label), file).toEqual(["load:reader", "load:reader"]);
     expect(phases, file).toEqual(["Load"]);
     expect(result, file).toEqual({ issue: 5, error: "context payload missing", orchestration: "workflow", guarantee: "structural" });
   }
