@@ -2454,3 +2454,253 @@ test("test_238_current_workflow_still_renders_repair_reasons_from_new_shape", as
     for (const reason of R1_REPAIR_REASONS) expect(writer.prompt, `${mode}: ${reason}`).toContain(reason);
   }
 });
+
+/*
+ * --- #243 (gap P-6 / P-13 / P-14 / P-15, template side) ---
+ * The plan workflow's half of the validator changes in #232 / #238 / #239: issue done_when coverage is asked for and
+ * carried (`covers_issue`), a surviving sign-off objection is surfaced as a top-level `signoff_objections` entry that
+ * says the same thing as its dissent_log line, the single-mode skeptic merge never pushes done_when past
+ * `max_done_when`, and a single-mode repair turn is one planner pass. Every assertion runs the shipped template.
+ */
+import { verifyStage as verifyStage243, validatePlanHandoff as validatePlanHandoff243 } from "../lib/verify-stage.js";
+
+const dw243 = (id, over = {}) => ({ id, text: `TEXT-${id}`, check: { kind: "test", ref: `test_42_${id}` }, rubric: `bar for ${id}`, level: "unit", ...over });
+const SIGNOFF_OBJECTION_243 = "the rollback path is still unspecified";
+
+// debate stub whose skeptic objects at both sign-offs (the objection survives the re-synthesis).
+const objectingDebateStub243 = () => async (prompt, opts) => {
+  if (opts.label?.startsWith("R1:")) return posFix(roleOf(opts));
+  if (opts.label?.startsWith("R2:")) return xexFix(roleOf(opts));
+  if (opts.agentType === "plan-synthesizer") return planFix();
+  if (opts.label?.startsWith("sign:")) {
+    return roleOf(opts) === "skeptic" ? { vote: "object", reason: SIGNOFF_OBJECTION_243 } : { vote: "accept", reason: "ok" };
+  }
+  return null;
+};
+
+test("test_243_plan_workflow_schema_carries_covers_issue_and_signoff_objections", async () => {
+  // the schema each writer answers in — debate synthesizer and single-mode planner — declares both fields
+  const schemas = [];
+  const capture = (inner) => async (prompt, opts) => { if (opts.schema) schemas.push({ who: opts.label || opts.agentType, schema: opts.schema }); return inner(prompt, opts); };
+  const { result } = await runWorkflow(FACTORY_PLAN_WORKFLOW, {
+    agent: capture(objectingDebateStub243()),
+    args: { issue: 42, context: ".factory/out/context.json", loaded: planLoaderFix() },
+  });
+  await runWorkflow(FACTORY_PLAN_WORKFLOW, {
+    agent: capture(async (prompt, opts) => (opts.label === "plan:synthesizer" ? singlePlanFix() : opts.label === "skeptic:skeptic" ? { risks: [], done_when: [] } : null)),
+    args: { issue: 42, context: ".factory/out/context.json", loaded: singleLoaderFix() },
+  });
+  const writers = schemas.filter((s) => s.who === "plan-synthesizer" || s.who === "plan:synthesizer");
+  expect(writers.length).toBeGreaterThanOrEqual(2);
+  for (const { who, schema } of writers) {
+    expect(schema.properties.done_when.items.properties.covers_issue, who).toEqual({ type: "array", items: { type: "string" } });
+    expect(schema.required, who).not.toContain("signoff_objections");                     // optional: a clean plan has none
+    const so = schema.properties.signoff_objections;
+    expect(so?.type, who).toBe("array");
+    expect(so.items.properties.role, who).toEqual({ type: "string" });
+    expect(so.items.properties.text, who).toEqual({ type: "string" });
+    expect(schema.required, who).not.toContain("covers_issue");
+    expect(schema.properties.done_when.items.required, who).not.toContain("covers_issue");
+  }
+
+  // two failed sign-offs: the objection is in dissent_log once and in signoff_objections once, saying the same thing
+  const entries = result.dissent_log.filter((d) => typeof d?.id === "string" && d.id.startsWith("signoff-"));
+  expect(entries).toHaveLength(1);
+  expect(entries[0]).toMatchObject({ id: "signoff-skeptic", role: "skeptic", objection: SIGNOFF_OBJECTION_243 });
+  expect(result.signoff_objections).toEqual([{ id: "signoff-skeptic", role: "skeptic", text: SIGNOFF_OBJECTION_243 }]);
+  expect(result.signoff_objections[0].role).toBe(entries[0].role);
+  expect(result.signoff_objections[0].text).toBe(entries[0].objection);
+  expect(validate("plan.v1", result).ok).toBe(true);
+
+  // a clean sign-off adds no field at all (existing handoffs keep their shape)
+  const { result: clean } = await runWorkflow(FACTORY_PLAN_WORKFLOW, {
+    agent: planStub(),
+    args: { issue: 42, context: ".factory/out/context.json", loaded: planLoaderFix() },
+  });
+  expect("signoff_objections" in clean).toBe(false);
+});
+
+const runSingle243 = async ({ planner, skeptic, max = 6 }) => runWorkflow(FACTORY_PLAN_WORKFLOW, {
+  agent: async (prompt, opts) => {
+    if (opts.label === "plan:synthesizer") return singlePlanFix({ done_when: planner, dissent_log: [] });
+    if (opts.label === "skeptic:skeptic") return skeptic;
+    return null;
+  },
+  args: { issue: 42, context: ".factory/out/context.json", loaded: singleLoaderFix({ plan: { mode: "single", max_done_when: max } }) },
+});
+
+test("test_243_single_mode_merge_caps_skeptic_items_at_max_done_when", async () => {
+  // 6 planner + 2 skeptic, cap 6 → the planner's 6, unchanged; both skeptic items cut and logged low under their own id
+  const planner6 = ["p1", "p2", "p3", "p4", "p5", "p6"].map((id) => dw243(id));
+  const { result: full } = await runSingle243({ planner: planner6, skeptic: { risks: ["r"], done_when: [dw243("s1"), dw243("s2")] } });
+  expect(full.done_when).toEqual(planner6);
+  const cut = full.dissent_log.filter((d) => d.severity === "low" && /s[12]/.test(d.id));
+  expect(cut.map((d) => d.id)).toEqual(["cap-s1", "cap-s2"]);
+  for (const d of cut) {
+    expect(d.objection).toContain(d.id.slice(4));                                       // names the original id
+    expect(d.role).toBeTruthy();
+    expect(typeof d.resolution).toBe("string");
+  }
+  expect(full.dissent_log).toHaveLength(2);
+  expect(validatePlanHandoff243(full, { maxDoneWhen: 6 })).toEqual([]);
+
+  // 4 planner + 3 skeptic → the first two skeptic items fill the two free slots in order; the third is cut and logged low
+  const planner4 = ["p1", "p2", "p3", "p4"].map((id) => dw243(id));
+  const { result: part } = await runSingle243({ planner: planner4, skeptic: { risks: [], done_when: [dw243("s1"), dw243("s2"), dw243("s3")] } });
+  expect(part.done_when.map((d) => d.id)).toEqual(["p1", "p2", "p3", "p4", "s1", "s2"]);
+  expect(part.done_when.slice(0, 4)).toEqual(planner4);
+  expect(part.dissent_log.map((d) => [d.id, d.severity])).toEqual([["cap-s3", "low"]]);
+  expect(part.debate.skeptic_added.done_when).toBe(2);
+
+  // a planner that alone is over the cap is never truncated by the workflow — every skeptic item is cut instead
+  const planner7 = ["p1", "p2", "p3", "p4", "p5", "p6", "p7"].map((id) => dw243(id));
+  const { result: over } = await runSingle243({ planner: planner7, skeptic: { risks: [], done_when: [dw243("s1")] } });
+  expect(over.done_when).toEqual(planner7);
+  expect(over.dissent_log.map((d) => d.id)).toEqual(["cap-s1"]);
+
+  // under the cap nothing is cut and nothing is logged
+  const { result: room } = await runSingle243({ planner: planner4.slice(0, 2), skeptic: { risks: [], done_when: [dw243("s1")] } });
+  expect(room.done_when.map((d) => d.id)).toEqual(["p1", "p2", "s1"]);
+  expect(room.dissent_log).toEqual([]);
+});
+
+test("test_243_single_mode_cap_never_downgrades_orphaned_skeptic_dissent", async () => {
+  const medium = { id: "k1", role: "skeptic", severity: "medium", objection: "the cache is never invalidated", resolution: "gated by s3" };
+  // 4+3: the third skeptic item is the only cover of a medium dissent → it takes a free slot ahead of an item covering nothing
+  const planner4 = ["p1", "p2", "p3", "p4"].map((id) => dw243(id));
+  const { result: kept } = await runSingle243({
+    planner: planner4,
+    skeptic: { risks: [], done_when: [dw243("s1"), dw243("s2"), dw243("s3", { covers: ["k1"] })], dissent: [medium] },
+  });
+  expect(kept.done_when.slice(0, 4)).toEqual(planner4);
+  expect(kept.done_when).toHaveLength(6);
+  expect(kept.done_when.map((d) => d.id)).toContain("s3");
+  expect(kept.done_when.map((d) => d.id)).toContain("s1");                              // the other free slot keeps order
+  expect(kept.dissent_log.find((d) => d.id === "k1")).toEqual(medium);
+  expect(kept.dissent_log.filter((d) => d.severity === "low").map((d) => d.id)).toEqual(["cap-s2"]);
+  expect(validatePlanHandoff243(kept, { maxDoneWhen: 6 })).toEqual([]);
+
+  // 6+1: the covering item is cut — the dissent it covered stays medium, and the validator names it
+  const planner6 = ["p1", "p2", "p3", "p4", "p5", "p6"].map((id) => dw243(id));
+  const { result: orphan } = await runSingle243({
+    planner: planner6,
+    skeptic: { risks: [], done_when: [dw243("s3", { covers: ["k1"] })], dissent: [medium] },
+  });
+  expect(orphan.done_when).toEqual(planner6);
+  expect(orphan.dissent_log.find((d) => d.id === "k1")).toEqual(medium);
+  expect(orphan.dissent_log.find((d) => d.id === "cap-s3")?.severity).toBe("low");
+  const reasons = validatePlanHandoff243(orphan, { maxDoneWhen: 6 });
+  expect(reasons.find((r) => r.startsWith("dissent without done_when"))).toMatch(/^dissent without done_when: k1\b/);
+});
+
+test("test_243_plan_repair_with_previous_reruns_synthesis_only", async () => {
+  const kinds = (calls) => calls.map((c) => c.opts.label || c.opts.agentType);
+  const singleStub = async (prompt, opts) => {
+    if (opts.label === "plan:synthesizer") return singlePlanFix();
+    if (opts.label === "skeptic:skeptic") return { risks: [], done_when: [] };
+    return null;
+  };
+
+  // single mode, repair turn → exactly one writer call; no skeptic; the prompt has the reasons and points at the rejected plan
+  const repair = await runWorkflow(FACTORY_PLAN_WORKFLOW, {
+    agent: singleStub,
+    args: { issue: 42, context: ".factory/out/context.json", loaded: singleLoaderFix({ plan_repair: R1_REPAIR_REASONS }) },
+  });
+  expect(kinds(repair.calls)).toEqual(["plan:synthesizer"]);
+  const writer = repair.calls[0];
+  for (const reason of R1_REPAIR_REASONS) expect(writer.prompt).toContain(reason);
+  expect(writer.prompt).toContain("plan_repair_previous");
+  expect(writer.prompt).toContain(".factory/out/context.json");
+  expect("repair_of" in repair.result).toBe(true);
+  expect(typeof repair.result.repair_of).toBe("string");
+  expect(repair.result.repair_of).toContain("plan_repair_previous");
+  expect(validate("plan.v1", repair.result).ok).toBe(true);
+
+  // single mode, no repair → planner + skeptic exactly as today, and no repair_of key
+  const normal = await runWorkflow(FACTORY_PLAN_WORKFLOW, {
+    agent: singleStub,
+    args: { issue: 42, context: ".factory/out/context.json", loaded: singleLoaderFix() },
+  });
+  expect(kinds(normal.calls)).toEqual(["plan:synthesizer", "skeptic:skeptic"]);
+  expect("repair_of" in normal.result).toBe(false);
+  expect(normal.calls[0].prompt).not.toContain("plan_repair_previous");
+
+  // debate mode, no repair → today's call pattern (4 R1, 4 R2, 1 synthesis, 4 sign-off), no repair_of
+  const debate = await runWorkflow(FACTORY_PLAN_WORKFLOW, {
+    agent: planStub(),
+    args: { issue: 42, context: ".factory/out/context.json", loaded: planLoaderFix() },
+  });
+  expect(labelled(debate.calls, "R1:")).toHaveLength(4);
+  expect(labelled(debate.calls, "R2:")).toHaveLength(4);
+  expect(labelled(debate.calls, "sign:")).toHaveLength(4);
+  expect(debate.calls.filter((c) => c.opts.agentType === "plan-synthesizer")).toHaveLength(1);
+  expect("repair_of" in debate.result).toBe(false);
+
+  // debate mode, repair turn → the synthesizer is pointed at the rejected plan and the handoff names what it repairs
+  const debateRepair = await runWorkflow(FACTORY_PLAN_WORKFLOW, {
+    agent: planStub(),
+    args: { issue: 42, context: ".factory/out/context.json", loaded: planLoaderFix({ plan_repair: R1_REPAIR_REASONS }) },
+  });
+  const synth = debateRepair.calls.filter((c) => c.opts.agentType === "plan-synthesizer");
+  expect(synth).toHaveLength(1);
+  expect(synth[0].prompt).toContain("plan_repair_previous");
+  expect(debateRepair.result.repair_of).toContain("plan_repair_previous");
+});
+
+test("test_243_planner_prompt_requires_covering_issue_done_when", async () => {
+  const RULE = /cover every item under the issue body's `## done_when`/i;
+  const mustSay = (prompt, who) => {
+    expect(prompt, who).toMatch(RULE);
+    expect(prompt, who).toContain("covers_issue");
+    expect(prompt, who).toContain("issue-dw<n>");
+    expect(prompt, who).toMatch(/adding items[^.]*is allowed/i);
+    expect(prompt, who).toMatch(/omitting one is rejected/i);
+  };
+
+  // single mode — the planner's prompt
+  const single = await runWorkflow(FACTORY_PLAN_WORKFLOW, {
+    agent: async (prompt, opts) => (opts.label === "plan:synthesizer" ? singlePlanFix() : opts.label === "skeptic:skeptic" ? { risks: [], done_when: [] } : null),
+    args: { issue: 42, context: ".factory/out/context.json", loaded: singleLoaderFix() },
+  });
+  mustSay(single.calls.find((c) => c.opts.label === "plan:synthesizer").prompt, "single planner");
+
+  // debate — the initial synthesis and the sign-off revision both carry it
+  const debate = await runWorkflow(FACTORY_PLAN_WORKFLOW, {
+    agent: objectingDebateStub243(),
+    args: { issue: 42, context: ".factory/out/context.json", loaded: planLoaderFix() },
+  });
+  const synth = debate.calls.filter((c) => c.opts.agentType === "plan-synthesizer");
+  expect(synth).toHaveLength(2);
+  mustSay(synth[0].prompt, "debate synthesis");
+  mustSay(synth[1].prompt, "debate sign-off revision");
+  expect(synth[1].prompt).toContain(SIGNOFF_OBJECTION_243);
+
+  // the synthesizer's agent file states the same rule
+  const md = readFileSync(new URL("../../templates/factory/claude/agents/plan-synthesizer.md", import.meta.url).pathname, "utf8");
+  expect(md).toContain("covers_issue");
+  expect(md).toMatch(/## done_when/);
+  expect(md).toMatch(/issue-dw<n>/);
+});
+
+test("test_243_signoff_objection_survives_verify_stage_normalization", async () => {
+  // the workflow's REAL return value (two failed sign-offs), wrapped the way run-stage hands it to verifyStage
+  const { result } = await runWorkflow(FACTORY_PLAN_WORKFLOW, {
+    agent: objectingDebateStub243(),
+    args: { issue: 42, context: ".factory/out/context.json", loaded: planLoaderFix() },
+  });
+  expect(result.signoff_objections?.length).toBe(1);
+  const roster = PLAN_ROSTER.map((r) => r.name);
+  const v = verifyStage243({
+    stage: "plan",
+    out: { is_error: false, result: "The workflow returned:\n```json\n" + JSON.stringify({ schema: "factory.plan.v1", ...result }) + "\n```" },
+    agentsLog: { starts: [], stops: [], completed: [...roster.map((r) => `plan-${r}`), "plan-synthesizer"], orphans: [] },
+    roster, rolePrefix: "plan-", expectedRounds: 3, orchestration: "workflow", planLimits: { max_done_when: 6 }, issueBody: "",
+  });
+  expect(v.data).toBeTruthy();
+  const posted = v.data.signoff_objections;
+  expect(Array.isArray(posted)).toBe(true);
+  const entry = posted.find((o) => o.role === "skeptic");
+  expect(entry).toBeTruthy();
+  expect(entry.text).toBe(SIGNOFF_OBJECTION_243);
+  expect(v.data.dissent_log.some((d) => d.id === "signoff-skeptic" && d.objection === SIGNOFF_OBJECTION_243)).toBe(true);
+});
