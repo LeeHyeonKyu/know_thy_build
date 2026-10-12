@@ -1,3 +1,4 @@
+// Scope change (#286): dw3 requires the merge dep to decide mirror applicability from the BASE revision; the marker list moves to `MIRROR_MARKERS` here so `mirrorApplicable` (working tree) and `mirrorApplicableAtRev` (git revision) share one definition instead of run-stage.js re-listing the markers (plan open_risks: concept duplication).
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -36,7 +37,24 @@ export const isUnionMergePath = (p) => UNION_MERGE_PATHS.includes(p);
  * @returns {{ok:boolean, applicable:boolean, changed:string[], reason?:string}}
  */
 /** 이 저장소에서 미러 단계가 성립하는가 — 소스 `factory/cli/**`와 설치본 `.factory/`가 함께 있을 때(= KTB 자신). */
-export const mirrorApplicable = (root) => existsSync(join(root, "factory/cli/manifest.js")) && existsSync(join(root, "factory/cli/install.js")) && existsSync(join(root, ".factory"));
+export const MIRROR_MARKERS = Object.freeze(["factory/cli/manifest.js", "factory/cli/install.js", ".factory"]);
+export const mirrorApplicable = (root) => MIRROR_MARKERS.every((m) => existsSync(join(root, m)));
+
+/**
+ * #286 — 같은 판정을 **한 revision에서** 한다(`git cat-file -e <rev>:<marker>`). merge 스테이지는 PR head를 체크아웃한 트리 위에서
+ * 돌기 때문에 워킹 트리로 판정하면 PR이 표지 파일을 더해 자기 `.factory/**` 편집을 must_not에서 면제받을 수 있다 — 그래서 base
+ * revision을 묻는다. 어떤 실패(종료 코드 ≠ 0, 예외)도 `false`다(fail closed: 면제 없음 = 오늘의 판정).
+ */
+export async function mirrorApplicableAtRev({ run, cwd, rev }) {
+  if (!rev) return false;
+  try {
+    for (const m of MIRROR_MARKERS) {
+      const r = await run("git", ["cat-file", "-e", `${rev}:${m}`], { cwd });
+      if (r?.code !== 0) return false;
+    }
+    return true;
+  } catch { return false; }
+}
 
 /** 생성기와 가족 항목을 읽는다. 실패는 `{reason}`으로 돌려준다 — 호출자 둘(재생성·HEAD 대조)이 같은 실패 문장을 낸다. */
 async function loadMirrorGenerators({ root, importer }) {
