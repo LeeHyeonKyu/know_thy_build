@@ -22,6 +22,10 @@ const MISSING_TEST_FILES = { ok: false, misconfigured: true, detail: "commands.t
 export function baseInstallCommand(harness, tmp, exists = existsSync) {
   const setup = harness?.runtime?.setup;
   if (typeof setup === "string" && setup.trim()) return setup;
+  // #257 — 워크트리 경로가 비면 설치 명령을 고르지 않는다. `join("", "package-lock.json")`은 프로세스 cwd — 곧 저장소
+  // 루트 — 에 대해 풀리고, 거기에는 이 저장소의 lockfile이 있다: base 워크트리가 아니라 저장소가 설치를 정하게 된다.
+  // `runtime.setup`은 탐침이 필요 없으므로 위에서 먼저 이긴다(순서는 그대로다).
+  if (!tmp) return null;
   if (exists(join(tmp, "package-lock.json"))) return "npm ci";
   if (exists(join(tmp, "package.json"))) return "npm install --no-audit";
   return null;

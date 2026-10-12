@@ -3,7 +3,7 @@ import { mkdirSync, writeFileSync, readFileSync, existsSync, realpathSync, rmSyn
 import { homedir, hostname, tmpdir } from "node:os";
 import { dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { run } from "../lib/exec.js";
+import { run, gitAuthEnv } from "../lib/exec.js";
 import { makeGh, allChecksGreen, resolveFactoryLogins, PR_BODY_TIMEOUT_MS, bounded } from "../lib/gh.js";
 import { buildEvidence, applyEvidenceSection, evidenceComment, hasEvidenceComment, PR_BODY_MAX_CHARS } from "../lib/evidence.js";
 import { loadCharter, loadHarness, loadRoles, breakerThresholds } from "../lib/config.js";
@@ -21,36 +21,35 @@ import { STAGE_OF_TARGET, ENTRY_LABELS, BLOCKED_RETRY, factoryLabelOf, STATES, T
 import { HARNESS_LABEL, VETO_LABEL } from "../lib/label-catalog.js";
 import { harnessNeeded, ensureHarnessIssue, parkedReason, findOpenHarnessIssueFor } from "../lib/harness-request.js";
 import { makeRehearsalChecker } from "../lib/rehearsal.js";
-import { makeQueueAdmission } from "../lib/admission.js";
+import { makeQueueAdmission, entryRecheck, admissionRefusedReason, ADMISSION_CODES } from "../lib/admission.js";
 import { mirrorStep, mirrorMatchesHead, inMirrorFamily, regenerateMirror, mirrorApplicable, isUnionMergePath, MIRROR_FAMILIES } from "../lib/mirror.js";
-import { REHEARSAL_UNWIRED } from "../lib/transition.js";
+import { REHEARSAL_UNWIRED, ADMISSION_UNWIRED } from "../lib/transition.js";
 export { HARNESS_LABEL };   // 재수출 — retro.js와 이 값이 같은 소스에서 왔다는 것을 테스트가 import equality로 확인한다
-import { buildContext, resolveTier, contextManifestLines } from "../lib/context.js";
+import { buildContext, resolveTier, contextManifestLines, isPlainObject, loadedJsonLine, scrubPlanRepairPrevious } from "../lib/context.js";
 import { resolveReviewRoster } from "../lib/review-roster.js";
 import { startHeartbeat } from "../lib/heartbeat.js";
 import { readProgress, progressMarker } from "../lib/progress.js";
 import { readAgentsLog } from "../lib/agents-log.js";
-import { verifyStage, hitMaxTurns, hitApiError, isNonTransientApiError, qaEvidenceUnusable, deriveReworkPins } from "../lib/verify-stage.js";
+import { verifyStage, hitMaxTurns, hitApiError, isNonTransientApiError, qaEvidenceUnusable, deriveReworkPins, recordToken } from "../lib/verify-stage.js";
 import { readTranscript, extractStageArtifact } from "../lib/stage-artifact.js";
 import { matchesAny } from "../lib/glob.js";
 import { aggregateReview } from "../lib/aggregate.js";
 import { renderHandoff, latestHandoff, parseHandoffs } from "../lib/handoff.js";
 import { validate } from "../lib/schemas.js";
-import { blockedOrigin, commentsSinceRequeue, commentsSinceCycleStart, countTransitionsTo, TRANSITION_TO, countSelfGateRetries, countAllSelfGateRetries, SELF_GATE_RETRY_BACKSTOP, selfGateRetryComment, kRestartState, kRestartComment, kRestartBriefOf, sameKRestartBrief, wherePaths } from "../lib/retro/issue-comments.js";
+import { blockedOrigin, commentsSinceRequeue, commentsSinceCycleStart, countTransitionsTo, TRANSITION_TO, countSelfGateRetries, countAllSelfGateRetries, SELF_GATE_RETRY_BACKSTOP, selfGateRetryComment, kRestartState, kRestartComment, kRestartBriefOf, sameKRestartBrief, wherePaths, conflictRoundComment } from "../lib/retro/issue-comments.js";
 import { transition } from "../lib/transition.js";
-import { appendRunRecord, appendRunRecordLine, runRecordPath, reviewEvidenceLine, parseReviewEvidence, runIdOfRunner } from "../lib/run-record.js";
-import { engineCrashLine, quoteEngineCrashLines } from "../lib/usage.js";
+import { appendRunRecord, appendRunRecordLine, runRecordPath, reviewEvidenceLine, parseReviewEvidence, runIdOfRunner, normalizeVerdicts } from "../lib/run-record.js";
+import { engineCrashLine, quoteEngineCrashLines, conflictRoundLine, conflictRoundRevokedLine, quoteConflictRoundLines } from "../lib/usage.js";
 import { parseHeartbeatComment } from "../lib/board.js";
 import { syncRecords, hydrateRecord, readRecordsDetailed } from "../lib/records-branch.js";
 import { budgetCheck, budgetLine } from "../lib/budget.js";
 import { trustWorkspace } from "./trust-workspace.js";
-import { scrubText, secretValues } from "./scrub-artifacts.js";
 import { runMergeStage, idlessFailedSuites, VETO_WINDOW_CONTEXT } from "../lib/merge-stage.js";
 import { readBreaker, makeRecordsUploadGuard, makeMergeAbortVouch, persistSelfMergeEvidence } from "../lib/breaker.js";
 import { isEngineCheckout } from "../lib/non-judge-paths.js";
 import { HARNESS_OPENS } from "../lib/protected-paths.js";
 import { claimCountsLabel, evidenceFor, probeEvidenceDir, qaDirRel, touchesDataPaths } from "../lib/qa-evidence.js";
-import { runSelfGate, summarizeFindings, advisoryFindings, harnessFinding, selfGateDetailLine, scopeSkipReason } from "../lib/self-gate.js";
+import { runSelfGate, summarizeFindings, advisoryFindings, harnessFinding, selfGateDetailLine, scopeSkipReason, conflictScopeGreen } from "../lib/self-gate.js";
 import { loadInstallManifest } from "../lib/feedback/install-manifest.js";
 
 /** 스테이지 → 성공 시 목적 상태, 요구 handoff를 만드는 직전 스테이지 */
@@ -116,7 +115,33 @@ export function stageClaudeEnv({ root, stage, harnessIssue = false, harness = nu
 
 /** 게이트 파일이 판정을 만드는 스테이지. 여기서 gates가 null이면 판정은 워크플로의 자기 신고뿐이다. */
 const GATED_STAGES = new Set(["implement", "review", "merge"]);
+/**
+ * #230 — triage 진입 재심사에 심사기(`deps.admission`)가 실리지 않은 런이 남기는 기록 한 줄(조용히 지나가지 않는다). main은 언제나 싣는다.
+ * #247 (dw5) — 새 상수가 아니다: "미배선"을 뜻하는 말은 transition.js의 `ADMISSION_UNWIRED` 하나뿐이고, 이 이름은 그 상수의 별칭
+ * 재수출이다(같은 값, 자기 문장 없음 — 브랜치의 test_230 테스트가 이 이름으로 import한다). 그 문장의 "`→ factory:queue` is refused"는
+ * 이 런에서도 참이다: 심사기가 없는 런의 큐 전이는 `transition()`이 거부한다.
+ */
+export { ADMISSION_UNWIRED as TRIAGE_RECHECK_UNWIRED };
 export const GATES_SELF_REPORTED = "gates: self-reported by workflow (no gates.json from this run — unverified)";
+/**
+ * #257 — 리뷰 게이트가 **같은 head·같은 level**에서 implement 게이트와 다른 status를 냈다는 진단 한 줄(#253: implement GREEN,
+ * 리뷰 RED, 재큐 뒤 GREEN — 같은 head·같은 명령). 기록에 더해질 뿐 판정·전이·factory/gates 상태·종료 코드는 바꾸지 않는다.
+ * 문구는 이슈가 정한 그대로다("environmental"은 원인 확정이 아니라 이슈의 이름이다 — plan dissent d1, open_risks).
+ */
+export const GATES_DIFFER_FROM_IMPLEMENT = "gates: verdict differs from the implement gate on the same head — environmental";
+/**
+ * 줄을 낼지 정하는 순수 함수. `implementGates`는 makeCheckoutHead가 implement handoff에서 읽어 온 `{ status, level, head_sha }`
+ * (head_sha = handoff의 `head_sha` — 미러 커밋은 implement 게이트 앞에서 일어나므로 게이트가 잰 sha 그대로다), `gates`는
+ * 이번 리뷰의 게이트 파일. 어느 한쪽이라도 비면, head·level이 다르면, status가 같으면 null이다.
+ */
+export function implementGateDiffersLine(implementGates, gates, reviewedHead = null) {
+  if (!implementGates || !gates) return null;
+  const head = gates.head_sha ?? reviewedHead;
+  if (!implementGates.head_sha || !head || implementGates.head_sha !== head) return null;
+  if (!implementGates.level || implementGates.level !== gates.level) return null;
+  if (!implementGates.status || !gates.status || implementGates.status === gates.status) return null;
+  return GATES_DIFFER_FROM_IMPLEMENT;
+}
 /**
  * 최종 리뷰 A-SF1 — qa 증거 부족을 이 라운드의 판정으로 접을 때 쓰는 **합성 must_fix의 id**.
  * 고정 id인 이유: 같은 부족이 두 번 접히지 않고(dedupe), rework 응답에서 사람과 builder가 그 항목을
@@ -134,52 +159,6 @@ export function unhandledGateReason(gates) {
   if (gates?.status !== "RED") return null;
   for (const g of Object.values(gates.gates || {})) if (g?.status === "RED" && g.reason) return g.reason;
   return null;
-}
-
-/**
- * #206 — gates-RED 재시도 finding에 실리는 게이트 `log`의 상한(앞에서 자른다). 설정 키가 아니다: 이슈 코멘트와 재시도
- * 브리프를 유계로 두는 이 자리만의 관례다.
- */
-export const GATE_LOG_FINDING_MAX = 300;
-/** sec1 — gates.js의 명령 게이트 `log` 꼬리 자르기 길이(`.slice(-2000)`). 이 길이의 log는 머리가 스크럽 전에 잘린 자리다. */
-const GATE_LOG_TAIL_CUT = 2000;
-
-/**
- * 1.4.23 (L26) gates-RED 가지의 finding들 — RED 게이트마다 `{check: "gate:<name>", blocking, detail}`.
- * id가 있는 게이트는 예전 그대로 `failing: <id…≤10>`이다. #206: id가 없는 게이트(must-not·lint·prove-test의 계약 위반)는
- * **그 게이트의 `log`가 곧 사유**다 — #195 attempt 1에서 빌더는 `(no test names; see the gate log)`만 보고 추측으로 재시도했다.
- * 이 detail은 공개 이슈 코멘트(`selfGateRetryComment`, 스크럽 없음)와 브리프로 간다. 그래서 순서가 계약이다:
- * ① `scrubText` + `secretValues(env)`(scrub-artifacts.js의 공용 수집기 — gates.js의 gates-detail과 같은 규칙 원천, 새 정규식도
- *   새 목록도 아니다)로 스크럽,
- * ② 개행 → 공백, ③ 코드펜스(```)를 깨뜨린다 — 코멘트의 JSON 블록은 `}` 뒤 첫 ```에서 끝나는 lazy 정규식으로 읽히므로
- * (issue-comments.js SELF_GATE_FINDINGS_JSON) 로그 속 `} ```` 하나가 블록을 잘라 findings 전체를 잃게 한다,
- * ⓪ 생산자가 스크럽 전에 꼬리를 자른 log — **명령 게이트**(정수 `code`)의 `GATE_LOG_TAIL_CUT`자 log뿐 — 는 잘린 첫 줄을
- * 버린다(sec1: 그 머리는 log의 시작이 아니라 생산자의 자른 자리다). 합성 게이트(must-not 등, `code: null`)는 통째로 만든
- * log라 길어도 시작부터 읽는다,
- * ④ 앞 `GATE_LOG_FINDING_MAX`자. 스크럽이 자르기보다 먼저여야 경계에 걸친 비밀이 반쪽으로 새지 않는다.
- * log가 비어 있으면 예전 문구다. ` — ${reason}` 접미 규칙은 바뀌지 않는다.
- */
-export function gateRedFindings(gates, { env = process.env } = {}) {
-  const secrets = secretValues(env); // #271 arch1: the one shared collector (scrub-artifacts.js), not a hand-built copy
-  const logReason = (raw, tailCut) => {
-    if (typeof raw !== "string") return "";
-    // sec1: a command gate's log is the RAW tail `(stderr + stdout).slice(-GATE_LOG_TAIL_CUT)` (gates.js), cut before any
-    // scrub — its head is that cut, and a secret split there is a remnant no scrub rule recognises. Such a log drops its
-    // partial first line; with no line break there is no safe head at all (→ the old wording). Only a COMMAND gate (an
-    // integer exit `code`) is tail-cut: the synthetic gates (must-not, prove-test, … — `code: null`) build their log whole,
-    // often as one long line, and are read from their start.
-    const cut = tailCut && raw.length >= GATE_LOG_TAIL_CUT;
-    const nl = cut ? raw.indexOf("\n") : -1;
-    const log = !cut ? raw : nl < 0 ? "" : raw.slice(nl + 1);
-    if (!log.trim()) return "";
-    const one = scrubText(log, { secrets }).text.replace(/\s*[\r\n]+\s*/g, " ").replace(/`{3,}/g, (m) => "'".repeat(m.length)).trim();
-    return one.slice(0, GATE_LOG_FINDING_MAX);
-  };
-  return Object.entries(gates?.gates || {}).filter(([, g]) => g?.status === "RED").map(([name, g]) => {
-    const ids = (Array.isArray(g.failing_ids) && g.failing_ids.length ? g.failing_ids : g.detail?.failing || []).slice(0, 10).join(", ");
-    const why = ids ? `failing: ${ids}` : logReason(g.log, Number.isInteger(g.code)) || "failing: (no test names; see the gate log)";
-    return { check: `gate:${name}`, blocking: true, detail: `gate ${name} RED — ${why}${g.reason ? ` — ${g.reason}` : ""}` };
-  });
 }
 
 // MergeBaseError/isMergeBaseError/MERGE_BASE_BLOCKED_REASON/GIT_DIFF_BLOCKED_REASON now live in
@@ -333,10 +312,19 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runAt
   let usageRecorded = false;
   /** #196 sc2 — 이 런의 진짜 크래시 줄(catch만 정한다). 그 밖의 줄은 줄머리 `engine-crash:`가 인용 표시돼 나간다(위조 방어 ①). */
   let crashLine = null;
+  /** #212 — 이 런의 진짜 conflict-round 줄(GREEN conflict-scope 뒤 마지막 섹션의 첫 줄, 아래에서만 정한다). 그 밖의 줄머리 `conflict-round:`는 인용된다. */
+  let conflictTag = null;
+  const safeLines = (lines) => lines.map((l) => (crashLine !== null && l === crashLine ? l
+    : conflictTag !== null && l === conflictTag ? l
+    : quoteConflictRoundLines(quoteEngineCrashLines(l))));
   const record = (lines) => {
     if (usage && lines.includes(usage)) usageRecorded = true;
-    const safe = lines.map((l) => (crashLine !== null && l === crashLine ? l : quoteEngineCrashLines(l)));
-    try { d.runRecord(safe); } catch (e) { console.error(`factory: run record write failed — ${e.message}`); }
+    try { d.runRecord(safeLines(lines)); } catch (e) { console.error(`factory: run record write failed — ${e.message}`); }
+  };
+  /** #212 skeptic — the one write whose failure must be KNOWN (the conflict-round tag's section): throws instead of swallowing. */
+  const recordOrThrow = (lines) => {
+    d.runRecord(safeLines(lines));
+    if (usage && lines.includes(usage)) usageRecorded = true;
   };
   /**
    * 체크 상태 게시는 부수 효과다 — 실패해도 런을 죽이지 않는다. sha가 없으면 애초에 게시할 대상이
@@ -426,8 +414,11 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runAt
   let hb = null;                                                      // 락을 잡은 뒤의 모든 실패는 finally를 거쳐야 한다
   let overlaidPaths = [];                                             // KTB-37 — 이 런의 overlay가 덮은 정확한 경로들(쓰기 금지 스테이지의 클린 체크 허용 목록)
   let stageBranchName = null;                                         // Task 8b — implement가 스테이지 스스로 체크아웃한 브랜치(세션 뒤 같은 자리인지 다시 묻는다)
+  let runnerResolved = [];                                            // #212 — base merge paths the runner union-merged before the session (`partial.union`)
+  let runnerMirror = [];                                              // #212 — conflicted mirror paths the runner gave base's copy (`partial.mirror`)
   let pendingMerge = null;                                            // #143 — 빌더에게 넘긴 base 병합 `{ sha, paths }`(세션 뒤 끝났는지 다시 묻는다)
   let driftRefusal = null;                                            // KTB-43 — 핸드오프 뒤의 커밋이 드리프트 경로 밖이었다(핸드오프를 쓴 뒤에 거부한다)
+  let implementGates = null;                                          // #257 — review: checkoutHead가 읽어 온 implement 게이트 {status, level, head_sha}(없으면 null)
   let checkoutSha = null;                                             // review/merge가 실제로 게이트를 돌린 PR head — review는 아래에서 런 레코드 마지막 줄에, merge는 runMergeStage로 그대로 넘겨 기록한다
   try {
     // 로컬 진입(§4.2.5): backlog 이슈를 사람이 손으로 큐에 넣기 전에 로컬에서 먼저 락을 잡았을 때,
@@ -562,6 +553,46 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runAt
       }
     }
     /**
+     * #230 (허점 원장 E-1·E-3·E-8) — **큐로 들어오는 문은 하나다: triage 진입이 심사를 한 번 더 돈다.** `transition()`의 큐 문을
+     * 비켜 오는 길이 있었다 — 사람이 UI로 붙인 라벨, 라벨을 달고 태어난 이슈, 문을 지난 뒤 러너 대기(55~90분) 중에 바뀐 본문.
+     * 그래서 에이전트를 띄우기 전, 진입 라벨이 `factory:queue`로 정해진 이 자리(로컬 진입과 blocked 재시도 hop **뒤**)에서 main의
+     * 그 심사기(`deps.admission`, 같은 `makeQueueAdmission`)를 다시 부른다. 판정은 `entryRecheck` 하나가 구조화된 코드로 한다:
+     *   - 이슈 자신의 사실(done_when 없음 → needs-info, NEVER_AUTOMATE → wont-do)이면 `transition()`으로 내보낸다 — 코멘트는 그 전이
+     *     코멘트 하나이고 사유는 큐 문이 같은 본문에 쓰는 문장 그대로다. claim은 finally가 푼다, exit 0.
+     *   - 상한은 다시 보지 않는다(형제를 세는 꽉 찬 큐가 통째로 비워진다 — `entryRecheck` 주석). 그 이슈는 오늘처럼 에이전트로 간다.
+     *     #247 — 예외 하나: 진입은 `queue_max`를 다시 잰다(`entryRecheck(…, { queueMax: true })`).
+     *     심사는 큐에 있는 이슈에게 번호가 앞선 형제만 세므로(`queueAdmission`의 자기 제외 + 순위) 번호 순 첫 N개는 통과하고, 그 뒤에 선
+     *     (구성원 수 − N)개만 `factory:needs-human`으로 간다 — 꽉 찬 큐가 통째로 비워지지 않는다(`test_247_full_queue_triage_never_evicts_its_first_n_members`).
+     *     #249 sec1 — blocked 재시도 hop으로 복구된 진입도 예외가 아니다: 그 hop을 허락하는 blocked-origin 마커는 작성자를 확인하지 않으므로
+     *     (누구나 쓸 수 있다 — ADR-040의 후속 이슈), 복구라는 주장만으로 상한을 건너뛰지 않는다(`test_249_hop_restored_entry_recheck_enforces_queue_max`).
+     *   - 심사가 입력을 읽지 못했으면(gh 장애, CHARTER 미적재, 심사기가 던짐) 판정이 아니다: 진입 상태를 못 읽었을 때와 같은
+     *     `factory:blocked`/`api-error`로 세우고 exit 2 — sweeper의 blocked 재시도가 다시 집고, 그 재시도도 이 자리를 지난다.
+     *   - 심사기 dep 자체가 없는 런(main은 언제나 싣는다 — 테스트가 고정)은 재심사를 건너뛰되 런 기록에 그 사실을 한 줄 남긴다
+     *     (`ADMISSION_UNWIRED` 그대로 — #247: "미배선"을 뜻하는 말은 그 하나뿐이고 `TRIAGE_RECHECK_UNWIRED`는 그 별칭이다). 거부로 하지 않는 이유는 ADR-040 — 기존 triage
+     *     테스트 넷(I2 두 건, KTB-20, KTB-15b)이 심사기 없는 deps로 큐 진입을 돌린다.
+     */
+    if (stage === "triage" && entryLabel === "factory:queue" && typeof d.admission !== "function") {
+      record([ADMISSION_UNWIRED]);
+    }
+    if (stage === "triage" && entryLabel === "factory:queue" && typeof d.admission === "function") {
+      let v;
+      try { v = entryRecheck(await d.admission({ issue }), { queueMax: true }); }
+      catch (e) { v = { verdict: "unreadable", reason: `queue admission threw — ${e?.message || e}` }; }
+      if (v.verdict === "unreadable") {
+        record([`triage entry: queue admission unreadable — ${v.reason}`]);
+        const t = await d.transition({ to: "factory:blocked", reason: `queue admission unreadable at triage entry — ${v.reason} (not a verdict on this issue; retried)`, cause: "api-error" });
+        console.error(`factory: stage triage aborted — queue admission unreadable: ${v.reason}`);
+        record([...refusal(t)]);
+        return 2;
+      }
+      if (v.verdict === "refuse") {
+        const t = await d.transition({ to: v.to, reason: v.reason });
+        console.error(`factory: issue #${issue} — triage entry refused: ${v.reason}`);
+        record([`triage entry: ${v.reason} → ${v.to}`, ...(t.ok ? [`transition: ${t.to}`] : refusal(t))]);
+        return t.ok ? 0 : 2;
+      }
+    }
+    /**
      * ── 리뷰 효율 Task 8 (Structure G) — 막힌 이슈는 리뷰 라운드를 태우지 않는다 ──────────────────
      *
      * 리뷰 패널을 띄우기 **전에**, 이 피처가 미해결 제품/하네스 의존성에 막혀 있으면(이 이슈를 막는
@@ -641,6 +672,7 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runAt
         return 2;
       }
       checkoutSha = co.sha;
+      implementGates = co.implement_gates ?? null;
       // 1.4.21 (L22) — 하네스 이슈의 리뷰는 브랜치의 harness.toml로 게이트를 돈다(implement의 1.4.3 규칙과 같다).
       if (stage === "review" && harnessLabeled && d.reloadHarness) record([harnessReloadLine(await d.reloadHarness(), "after the review checkout")]);
     }
@@ -662,6 +694,9 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runAt
       stageBranchName = cb.branch;
       // #143 (S3b) — 소스 충돌이 남은 병합은 abort되지 않고 빌더에게 넘어왔다: 커밋도 push도 없었으므로 base_merged 줄을 쓰지 않는다.
       if (cb.conflicts?.length) pendingMerge = { sha: cb.merged, paths: [...cb.conflicts] };
+      // #212 — the conflicted paths the runner resolved itself in the same merge, for the conflict-scope check: union-merged paths are
+      // held to the conflict-region rule; mirror paths must hold base's copy (that is what the runner wrote — skeptic: not the region rule).
+      if (cb.conflicts?.length) { runnerResolved = [...(cb.partial?.union || [])]; runnerMirror = [...(cb.partial?.mirror || [])]; }
       record([branchLine(cb), ...(pendingMerge ? [baseMergeConflictLine(cb)] : cb.merged ? [baseMergedLine(cb)] : [])]);
     }
     // KTB-37 — 체크아웃이 끝난 트리 위에 **팩토리 소유 설정만** 스테이지 자신의 커밋에서 덮는다
@@ -833,6 +868,13 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runAt
      * 여기서 바로 적는 이유: 이 뒤의 어느 지점에서 스테이지가 죽어도 "무엇을 보여줬는가"는 남아야 한다.
      * 로스터가 없는 컨텍스트는 선언할 것이 없으므로 아무 줄도 쓰지 않는다.
      */
+    /**
+     * #212 (ADR-041) — 충돌 해소 전용 라운드인지(context.js `conflictOnlyOf`, 러너 사실 셋)를 기록에 남긴다. 머지 스테이지의 문구가 바뀌어
+     * 알아보지 못한 경우도 조용하지 않다(`conflict_only_note`). 판정(비용·K 면제)은 아래 self-gate의 conflict-scope가 GREEN일 때만이다.
+     */
+    const conflictOnly = stage === "implement" && ctx?.loaded?.conflict_only === true ? ctx.loaded : null;
+    if (stage === "implement" && typeof ctx?.conflict_only_note === "string") record([ctx.conflict_only_note]);
+    if (conflictOnly) record([`conflict-only: the approved head ${String(conflictOnly.approved_head).slice(0, 7)} met a base conflict in ${(conflictOnly.merge_conflicts || []).length} path(s) — the self-gate's conflict-scope decides whether this round is kept out of the lifetime cap and K (ADR-041)`]);
     const manifestNote = contextManifestLines(ctx, stamp);
     if (manifestNote.length) record(manifestNote);
     await d.resetAgentsLog?.();                                       // 지난 런의 agents.jsonl이 로스터 체크를 대신 만족시키지 못하게
@@ -947,11 +989,43 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runAt
       }
       if (m.applicable) { record([mirrorLine(m)]); if (stage === "implement" && m.changed.length && m.sha) mirrorSha = m.sha; }
     }
+    /**
+     * #207 — **워크플로의 fail-closed 반환은 디스패처 전달 고장이다.** 네 워크플로는 `args.loaded`를 못 받거나 다른 이슈의 것을
+     * 받으면 `{issue, error: "context payload missing" | "context issue mismatch…", orchestration, guarantee}`를 돌려준다. 그것은
+     * 에이전트 산출물의 결함이 아니라 판정 불가다 — 사람이 할 일이 없다(run 37140542370: 잘린 6,604바이트 args → needs-human,
+     * 운영 세션이 재큐). blocked/undecidable로 세워 sweeper의 재시도에 맡긴다. 빌더는 돌지 않았으므로 게이트는 손대지 않은 브랜치
+     * head를 잰 것이다 — 그래서 **게이트가 어떤 상태든**(던짐·BLOCKED·실패 테스트 없는 RED·RED·GREEN) 이 원인이 이긴다. 다만 그
+     * 게이트 상태들이 어차피 실패로 끝나는 자리에서만 끼어든다(GREEN·보통 RED는 verify 실패 뒤 아래 자리) — 성공할 런을 막지 않는다.
+     * selfGateRetry·plan 리페어도 띄우지 않는다(빌더가 고칠 것이 없다). 턴 한도·API 오류는 먼저 자기 자리로 간다. 새 마커 필드는
+     * 없다 — K·R·예산 면제는 ADR-036 개정 이슈의 몫이다(plan non_goals).
+     */
+    let payloadErrorMemo;
+    let payloadCtx = ctx;                                             // 디스패처가 옮겨 쓴 loaded.json을 쓴 ctx — plan 리페어 턴이면 그 턴의 것
+    const payloadError = async () => {
+      if (payloadErrorMemo === undefined) {
+        payloadErrorMemo = hitMaxTurns(out) || hitApiError(out) ? null
+          : ((d.dispatcherPayloadError ? await d.dispatcherPayloadError(out) : dispatcherPayloadErrorOf({ out })) ?? null);
+      }
+      return payloadErrorMemo;
+    };
+    // Known gaps, deferred to #240 (spec2: outside this plan — non_goals "Any design beyond the b881484 port" and "Changing the sweeper's
+    // retry or escalation behaviour"): (1) `error` reaches `reason` verbatim, so a session-produced `context issue mismatch…` tail can carry a
+    // forged `factory-blocked-origin` marker ahead of transition.js's own; (2) a triage retry (blocked → queue) opens a fresh sweeper window, so a
+    // triage run that keeps failing closed is re-blocked each time and only the lifetime budget stops it — dw3's sweeper cap is pinned for implement only.
+    const blockOnPayload = async (error, lines) => {
+      const size = Number.isInteger(payloadCtx?.loaded_json?.bytes) ? `loaded.json ${payloadCtx.loaded_json.bytes} bytes` : "loaded.json size unknown";
+      const reason = `dispatcher payload: ${error} (${size})`;
+      const t = await d.transition({ to: "factory:blocked", reason, cause: "undecidable" });
+      record([...lines, `verify: ${reason} — not an agent artifact defect`, ...refusal(t), usage]);
+      return 2;
+    };
     let gates = null;
     if (!out?.is_error || hitMaxTurns(out) || hitApiError(out)) {
       try { gates = await d.gates(ctx); }                             // 게이트 없는 스테이지(triage/plan)는 null
       catch (e) {
         if (!isMergeBaseError(e) && !isGitDiffError(e)) throw e;
+        const pe = await payloadError();
+        if (pe) return blockOnPayload(pe, [`gates: BLOCKED — ${e.message}`]);
         const reason = isMergeBaseError(e) ? MERGE_BASE_BLOCKED_REASON : GIT_DIFF_BLOCKED_REASON;
         const t = await d.transition({ to: "factory:blocked", reason });
         record([`gates: BLOCKED — ${e.message}`, ...refusal(t), usage]);
@@ -970,11 +1044,16 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runAt
      * 그 RED의 뿌리는 7일짜리 Actions 아티팩트에만 남는다 — 루프가 그것을 읽을 수는 없다(spec §3).
      * 새 기록자는 만들지 않는다: 같은 `record()`(= `appendRunRecord`)를 타고 같은 줄 묶음으로 나간다.
      */
+    // #257 — 진단 한 줄(판정 불변). review만: implement 게이트와 같은 head·같은 level에서 status가 갈렸을 때.
+    const envDiffLine = stage === "review" ? implementGateDiffersLine(implementGates, gates, checkoutSha) : null;
+    const envDiffNote = envDiffLine ? [envDiffLine] : [];
     const gatesNote = gates == null
       ? (GATED_STAGES.has(stage) ? [GATES_SELF_REPORTED] : [])
-      : gates.schema === "factory.gates.v1" ? [verdictLine(gates), ...gatesDetailLines(gates, stamp), ...testEnvNote] : [];
+      : gates.schema === "factory.gates.v1" ? [verdictLine(gates), ...envDiffNote, ...gatesDetailLines(gates, stamp), ...testEnvNote] : [];
     // BLOCKED은 "판정 불가"다 — GREEN도 RED도 아니므로 needs-human이 아니라 blocked로 세운다.
     if (gates?.status === "BLOCKED") {
+      const pe = await payloadError();
+      if (pe) return blockOnPayload(pe, [`gates: BLOCKED — ${gates.blocked_reason || "unknown"}`, ...gatesNote]);
       const t = await d.transition({ to: "factory:blocked", reason: gates.blocked_reason || "gates could not be decided" });
       record([`gates: BLOCKED — ${gates.blocked_reason || "unknown"}`, ...refusal(t), ...gatesNote, usage]);
       return 2;
@@ -996,6 +1075,8 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runAt
      */
     const unhandled = unhandledGateReason(gates);
     if (unhandled) {
+      const pe = await payloadError();
+      if (pe) return blockOnPayload(pe, [`gates: RED (unhandled) — ${unhandled}`, ...gatesNote]);
       const t = await d.transition({ to: "factory:blocked", reason: unhandled, cause: "gates-unhandled" });
       record([`gates: RED (unhandled) — ${unhandled}`, ...refusal(t), ...gatesNote, usage]);
       return 2;
@@ -1031,6 +1112,14 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runAt
      * `d.buildContext({ planRepair })` writes them into `loaded.json` (→ `plan_repair`, which
      * factory-plan.js surfaces to the planner), and they are also handed to `d.claudeP` — so this is
      * a targeted repair, never a blind retry.
+     *
+     * #238 (P-14, M-8) — the repair turn also carries the WHOLE rejected plan (`v.data`) as `planRepairPrevious` →
+     * `plan_repair_previous` in context.json / context.<role>.json (never loaded.json — the dispatcher's 4096-byte copy, dw1;
+     * `plan_repair` stays today's string[]), so a workflow can rerun only the
+     * synthesis. Carried whole or left out (`carryableRejectedPlan`) — a missing plan never stops the repair. After a repair turn
+     * that RAN, exactly one cost line says what it cost (`planRepairCostLine`), read from that turn's agents log, never from the
+     * handoff's `repair_of` claim (test_238_plan_repair_records_whether_the_workflow_reused_the_plan). The roster guard is
+     * untouched: a synthesis-only repair still fails "roster role not completed" (test_238_synthesis_only_repair_is_recorded_…).
      */
     if (!v.ok && stage === "plan" && planRepairAttempt === 0 && d.claudeP
         && Array.isArray(v.planRepair) && v.planRepair.length > 0
@@ -1038,10 +1127,17 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runAt
         && !(out?.is_error)) {
       planRepairAttempt += 1;
       const repairReasons = v.planRepair;
+      const rejectedPlan = carryableRejectedPlan(v.data);
+      const previousArg = rejectedPlan ? { planRepairPrevious: rejectedPlan } : {};
       record([`plan repair (KTB-51): one repair turn — feeding ${repairReasons.length} validator reason(s) back: ${repairReasons.join("; ")}`]);
       let repairOut = null;
+      let repairRoster = ctx?.roster;
+      let repairMode = ctx?.plan?.mode;                              // #238 dw4 — single mode excludes the workflow's planner, not "synthesizer"
+      let repairCtx = null;
       try {
-        const repairCtx = await d.buildContext({ setupDirty, planRepair: repairReasons });
+        repairCtx = await d.buildContext({ setupDirty, planRepair: repairReasons, ...previousArg });
+        if (Array.isArray(repairCtx?.roster)) repairRoster = repairCtx.roster;
+        if (repairCtx?.plan?.mode) repairMode = repairCtx.plan.mode;
         /**
          * Task 1 (리뷰 SF-5) — 이 두 번째 `buildContext`가 `context.<role>.json`을 **다시 쓰고**
          * `plan_repair`를 투영에 더한다. 곧 리페어 턴의 플래너가 실제로 읽은 문맥은 이것인데, 첫
@@ -1050,38 +1146,53 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runAt
         const repairManifest = contextManifestLines(repairCtx, stamp);
         if (repairManifest.length) record(repairManifest);
         await d.resetAgentsLog?.();                                   // 지난 턴의 agents.jsonl이 로스터 체크를 대신 만족시키지 못하게
-        repairOut = await d.claudeP(repairCtx ?? ctx, { harnessIssue, planRepair: repairReasons });
+        repairOut = await d.claudeP(repairCtx ?? ctx, { harnessIssue, planRepair: repairReasons, ...previousArg });
       } catch (e) {
         // A repair that cannot even run is not a second chance for the planner — escalate as today
         // (fall through to the needs-human branch below with the original reasons unchanged).
         record([`plan repair (KTB-51): could not run — ${e?.message || e}`]);
         repairOut = null;
       }
+      // #238 dw5 — a repair turn that could not run must not leave the rejected plan in the context files it already wrote.
+      if (!repairOut && rejectedPlan) { try { await d.scrubPlanRepairPrevious?.(); } catch { /* best-effort: the next buildContext scrubs too */ } }
       if (repairOut) {
         out = repairOut;
-        try { finalProgress = d.progress?.() ?? null; } catch { /* best-effort */ }
-        usage = usageLine(out, finalProgress);
-        // plan is a no-write stage — re-assert the worktree exactly as the first pass did (KTB-14).
-        if (isNoWriteStage(stage)) {
-          const clean = d.assertCleanWorktree ? await d.assertCleanWorktree(overlaidPaths, setupDirty) : { ok: true };
-          if (!clean.ok) {
-            const dirty = Boolean(clean.dirty?.length);
-            const reason = dirty
-              ? `worktree dirty after ${stage} repair (no-write stage): ${clean.dirty.join(", ")}`
-              : `worktree check failed after ${stage} repair (no-write stage): ${clean.reason || "unknown"}`;
-            const t = await d.transition({ to: dirty ? "factory:needs-human" : "factory:blocked", reason });
-            record([`worktree: FAIL — ${reason}`, ...refusal(t), usage]);
-            return 2;
+        payloadCtx = repairCtx ?? ctx;                                // #207 — 이제 실패를 말하는 것은 리페어 턴의 반환과 그 턴의 loaded.json이다(memo는 리페어 전에 계산되지 않는다 — plan엔 게이트가 없다)
+        // #238 — this turn's agents log, read now (it was reset just before the turn). Unreadable → null → "full rerun".
+        let turnLog = null;
+        try { turnLog = d.agentsLog ? await d.agentsLog() : null; } catch { turnLog = null; }
+        // The turn RAN, so it cost something: its one cost line is written on EVERY way out of this block — the worktree
+        // re-assert's early return and a throwing re-verification included — hence `finally`. The `repair_of` claim is only
+        // known once the repaired handoff was parsed; on an earlier exit there is no claim to copy.
+        let repairedHandoff;
+        try {
+          try { finalProgress = d.progress?.() ?? null; } catch { /* best-effort */ }
+          usage = usageLine(out, finalProgress);
+          // plan is a no-write stage — re-assert the worktree exactly as the first pass did (KTB-14).
+          if (isNoWriteStage(stage)) {
+            const clean = d.assertCleanWorktree ? await d.assertCleanWorktree(overlaidPaths, setupDirty) : { ok: true };
+            if (!clean.ok) {
+              const dirty = Boolean(clean.dirty?.length);
+              const reason = dirty
+                ? `worktree dirty after ${stage} repair (no-write stage): ${clean.dirty.join(", ")}`
+                : `worktree check failed after ${stage} repair (no-write stage): ${clean.reason || "unknown"}`;
+              const t = await d.transition({ to: dirty ? "factory:needs-human" : "factory:blocked", reason });
+              record([`worktree: FAIL — ${reason}`, ...refusal(t), usage]);
+              return 2;
+            }
           }
+          // plan has no gates (d.gates returns null for plan) — recompute the verdict on the repaired handoff.
+          gates = null;
+          if (!out?.is_error || hitMaxTurns(out) || hitApiError(out)) {
+            try { gates = await d.gates(ctx); } catch { gates = null; }
+          }
+          v = d.verifyStage({ stage, out, ctx, gates });
+          repairedHandoff = v.data;
+          if (v.source) record([`artifact: ${v.source} (repair)`]);
+          record([`plan repair (KTB-51): ${v.ok ? "resolved → factory:planned" : "still red → escalating unchanged"}`]);
+        } finally {
+          record([planRepairCostLine({ agentsLog: turnLog, roster: repairRoster, mode: repairMode, rolePrefix: ROLE_PREFIX.plan, repairOf: repairedHandoff?.repair_of })]);
         }
-        // plan has no gates (d.gates returns null for plan) — recompute the verdict on the repaired handoff.
-        gates = null;
-        if (!out?.is_error || hitMaxTurns(out) || hitApiError(out)) {
-          try { gates = await d.gates(ctx); } catch { gates = null; }
-        }
-        v = d.verifyStage({ stage, out, ctx, gates });
-        if (v.source) record([`artifact: ${v.source} (repair)`]);
-        record([`plan repair (KTB-51): ${v.ok ? "resolved → factory:planned" : "still red → escalating unchanged"}`]);
       }
     }
     if (!v.ok) {
@@ -1103,6 +1214,9 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runAt
       const apiError = hitApiError(out);
       const qaPath = qaEvidenceUnusable(v.reasons);
       const blocked = hitMaxTurns(out) || qaPath || (apiError && !isNonTransientApiError(out));
+      // #207 — 디스패처 전달 고장(위 §payloadError). 턴 한도·API 오류·qa 증거 경로는 먼저 자기 자리로 간다.
+      const pe = !blocked && !apiError ? await payloadError() : null;
+      if (pe) return blockOnPayload(pe, ["verify: FAIL", ...v.reasons.map((r) => `- ${r}`), ...gatesNote]);
       /**
        * 1.4.23 (L26, 데모 #7) — **빌더의 커밋 뒤 gates RED는 빌더가 고칠 수 있는 가장 흔한 실패다**(기존 테스트를 깨뜨렸다).
        * 그런데 이 가지는 그것을 "산출물 결함"으로 읽어 곧장 needs-human으로 세웠다 — 검증자 거부(1.4.9)와 self-gate 발견
@@ -1110,8 +1224,10 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runAt
        * 빨간 게이트의 실패 테스트 id를 발견으로 실어 planned로 돌려보낸다; 두 번째부터는 예전처럼 사람이다.
        */
       if (stage === "implement" && gates?.status === "RED" && !blocked && !apiError && d.selfGateRetry) {
-        // #206: `process.env` is passed explicitly here — the scrub's secret values come from the job env, never a silent default.
-        const findings = gateRedFindings(gates, { env: process.env });
+        const findings = Object.entries(gates.gates || {}).filter(([, g]) => g?.status === "RED").map(([name, g]) => {
+          const ids = (Array.isArray(g.failing_ids) && g.failing_ids.length ? g.failing_ids : g.detail?.failing || []).slice(0, 10);
+          return { check: `gate:${name}`, blocking: true, detail: `gate ${name} RED — failing: ${ids.join(", ") || "(no test names; see the gate log)"}${g.reason ? ` — ${g.reason}` : ""}` };
+        });
         const head = gates.head_sha ?? v.data?.head_sha ?? null;
         const { attempt, total } = await d.selfGateRetry({ head, findings });
         const bounded = attempt >= 2 || (Number.isFinite(total) && total >= SELF_GATE_RETRY_BACKSTOP);
@@ -1128,6 +1244,22 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runAt
       record(["verify: FAIL", ...v.reasons.map((r) => `- ${r}`), ...refusal(t), ...gatesNote, usage]);
       return 2;
     }
+    /**
+     * #239 — lines this stage adds to its closing record entry (no extra `record()` call: the stage's record sequence is
+     * part of its observable skeleton). (M-7/M-9) the plan verifier's notes — an unresolved sign-off objection, skeptic
+     * items dropped at the cap — are record lines, never reasons; the normalized handoff reaches writeHandoff as `v.data`.
+     * (M-2) the review stage's `review-r1:` line is added below.
+     */
+    const stageNotes = stage === "plan" && Array.isArray(v.planNotes) ? [...v.planNotes] : [];
+    /**
+     * #239 (M-2, gap P-9) — R1 verdicts and the R1→R2 flip count of **this** round, on their own line. Deliberately not on
+     * the `review-evidence:` line: that line is merge provenance read by an end-anchored parser (run-record.js), and a new
+     * token there would send every approved PR to a person (plan non_goal). Named `r2_flipped` so it is never confused with
+     * the cross-round `review flips:` below. Until the review workflow carries `r1_verdicts`, the line says so explicitly.
+     * Computed here, before any review exit, so every closing record of a review run carries it (incomplete and
+     * k-restart FAIL included) — never a silent skip.
+     */
+    if (stage === "review" && v.data) stageNotes.push(reviewR1Line(v.data.r1_verdicts, v.data.verdicts));
     // 감사 M1 — 스크립트가 에이전트의 판정을 덮었다면 그 사실이 run 기록의 1차 증거다(다음 조사가
     // 이 줄로 grep한다). handoff에도 `never_automate_hit`으로 같은 내용이 실린다.
     if (stage === "triage" && v.data?.never_automate_hit?.length) {
@@ -1171,6 +1303,20 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runAt
         absRound = r.abs;
       }
     }
+    /**
+     * #212 dw6 (skeptic, round 3) — a review that does NOT approve decides on today's round: the conflict rework it is deciding on is exempt
+     * from K only once a review passed it. The round above is the approving one (merge's `round > K` check reads it); here, once the decision
+     * is known and is not approved, the round is recounted with that undecided conflict rework counted — so `nextState`'s K check, the
+     * handoff's `round` and the evidence line all use today's number. Windows without a conflict round count the same both ways.
+     */
+    const decideRoundAsToday = async () => {
+      if (stage !== "review" || !v.data || v.data.decision === "approved" || typeof v.data.round !== "number") return;
+      const prior = await d.reviewRounds?.({ rejecting: true });
+      if (typeof prior !== "number") return;
+      const r = reviewRoundOf(prior, kState);
+      v.data.round = r.round;
+      absRound = r.abs;
+    };
     // review handoff(review.v1)는 verdicts만 싣는다 — 집계 결정은 여기서 만들어 handoff·전이에 함께 실는다.
     // A-SF1 — `v.qaShortfall`이 있으면 산출물이 스스로 적은 decision이 있더라도 집계를 다시 돈다:
     // 그러지 않으면 이 부족이 **조용히 사라진다**(= 누락으로 정해지는 등급, 이 수정이 없애려는 것).
@@ -1196,7 +1342,7 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runAt
       if (agg.decision === "incomplete") {                            // 라운드가 덜 끝났다 — 자동 라우팅하지 않는다
         await postReviewStatus({ state: "error", decision: "incomplete" });
         const t = await d.transition({ to: "factory:needs-human", reason: `review incomplete — missing verdicts: ${agg.missing_roles.join(", ") || "unknown"}` });
-        record(["verify: ok", `review: incomplete — missing verdicts: ${agg.missing_roles.join(", ") || "unknown"}`, ...refusal(t), ...gatesNote, usage]);
+        record(["verify: ok", ...stageNotes, `review: incomplete — missing verdicts: ${agg.missing_roles.join(", ") || "unknown"}`, ...refusal(t), ...gatesNote, usage]);
         return 2;
       }
       /**
@@ -1227,6 +1373,7 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runAt
       }
       v.data.decision = agg.decision;
       v.data.must_fix = agg.must_fix;
+      await decideRoundAsToday();
       /**
        * ── 리뷰 효율 Task 5 (Structure D) — 회귀 핀 ──────────────────────────────────────────────
        * `→ rework`일 때만, 이 라운드의 must_fix를 carried **pin**으로 접는다(`deriveReworkPins`).
@@ -1269,6 +1416,7 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runAt
       record([reviewEvidenceLine({ runId, runnerId, headSha: checkoutSha ?? v.data.head_sha, round: v.data.round, decision: agg.decision, verdicts: v.data.verdicts, qaManifest: qaDigest, qaClaims })]);
       await postReviewStatus({ state: agg.decision === "approved" ? "success" : "failure", decision: agg.decision });
     }
+    await decideRoundAsToday();                                       // the same recount when the handoff carried its own decision
     /**
      * ADR-020 KTB-29 / 관측 O21 — **같은 역할이 라운드 사이에 판정을 뒤집는 빈도**는 §12.4의 지표다
      * (데모 #18에서 approve → reject 두 건이 관측됐다: 코드가 그대로인데 판정이 흔들리면 K 예산이
@@ -1355,9 +1503,11 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runAt
      * 기존 테스트/오래된 배선은 `d.selfGate`를 주입하지 않을 수 있다 — 그때는 (게이트처럼) 조용히
      * 건너뛰고 평소대로 awaiting-review로 간다.
      */
+    let conflictGreen = false;                                        // #212 — set only from a self-gate result that ran conflict-scope clean
+    let sg = null;
     if (stage === "implement" && !harnessIssue && d.selfGate) {
-      let sg;
-      try { sg = await d.selfGate({ gates }); }
+      // #212 — a conflict-only round's scope is measured on the real merge: this run's mirror commit and the base the runner merged.
+      try { sg = await d.selfGate(conflictOnly ? { gates, mirrorSha, mergedBase: pendingMerge?.sha ?? null, runnerResolved, runnerMirror } : { gates }); }
       catch (e) {
         // diff/merge-base를 못 읽으면 "무엇을 검사할지"가 없다 — GREEN도 RED도 아닌 판정 불가이므로
         // gates BLOCKED과 같은 등급이다. 못 돌린 self-gate 위에서 리뷰로 조용히 넘기지 않는다.
@@ -1427,7 +1577,16 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runAt
           return t.ok ? 0 : 2;
         }
         record([selfGateOkLine(sg, advisory.length), selfGateDetailLine(sg, { ...stamp, ktbVersion: d.ktbVersion ?? null })]);
+        if (conflictOnly) conflictGreen = conflictScopeGreen(sg);
       }
+    }
+    /**
+     * #212 (ADR-041, plan d3) — conflict-scope의 RED는 라운드를 막지 않는다: 바뀌지 않은 워크플로가 아직 self-critique를 돌리므로, 막으면 충돌을
+     * 만난 승인 PR이 오늘보다 나빠진다. RED(또는 측정 실패·self-gate 없음)인 라운드는 그냥 conflict 라운드가 **아니다** — 비용도 K도 오늘처럼 센다.
+     */
+    if (conflictOnly && !conflictGreen) {
+      const red = (sg?.findings || []).filter((f) => f.check === "conflict-scope").map((f) => f.detail);
+      record([`conflict-scope: RED — ${red.join("; ") || "not measured (no self-gate ran this round)"} — this round counts as a normal round (cost and K), and its review is today's full review`]);
     }
     await d.writeHandoff({ stage, data: v.data, gates });
     /**
@@ -1496,17 +1655,58 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runAt
         let posted;
         try { posted = await d.postKRestartBrief({ pr, head, findings: dec.findings }); }
         catch (e) {
-          record(["verify: ok", `k-restart: FAIL — the brief comment could not be posted (${e?.message || e}); no transition — a restart never happens without its brief`, ...gatesNote, usage]);
+          record(["verify: ok", ...stageNotes, `k-restart: FAIL — the brief comment could not be posted (${e?.message || e}); no transition — a restart never happens without its brief`, ...gatesNote, usage]);
           return 2;
         }
         const t = await d.transition({ to: "factory:rework", data: v.data, reason: dec.reason, by: `factory:run-${runId}` });
-        record(["verify: ok", `k-restart: ${posted?.reused ? "reused the brief already posted for" : "posted the brief for"} ${String(head ?? "unknown").slice(0, 7)} (${dec.findings.length} finding(s)) — self-restart 1/1`, ...(t.ok ? [`transition: ${t.to}`] : refusal(t)), ...(checkoutSha ? [`checkout: ${checkoutSha.slice(0, 7)}`] : []), ...gatesNote, usage]);
+        record(["verify: ok", ...stageNotes, `k-restart: ${posted?.reused ? "reused the brief already posted for" : "posted the brief for"} ${String(head ?? "unknown").slice(0, 7)} (${dec.findings.length} finding(s)) — self-restart 1/1`, ...(t.ok ? [`transition: ${t.to}`] : refusal(t)), ...(checkoutSha ? [`checkout: ${checkoutSha.slice(0, 7)}`] : []), ...gatesNote, usage]);
         return t.ok ? 0 : 2;
       }
       exhaustedReason = dec.reason;
     }
     const t = await d.transition({ to: toFinal, data: v.data, ...(exhausted ? { reason: exhaustedReason } : {}) });
-    record(["verify: ok", ...(t.ok ? [`transition: ${t.to}`] : refusal(t)), ...(checkoutSha ? [`checkout: ${checkoutSha.slice(0, 7)}`] : []), ...gatesNote, usage]);
+    /**
+     * #212 (ADR-041) — a GREEN conflict-only round that HANDED OFF: only after the transition to awaiting-review succeeded does the
+     * runner's K marker go out (issue comment, `countedTransitionIndices` reads it and requires it after that hand-off), and only then
+     * does the run's last section open with the runner's `conflict-round:` line (`lib/budget.js` reads it). A refused transition, or a
+     * round sent to a person, is not a finished conflict round (skeptic f3): no marker, no tag — counted as today. No marker → no tag.
+     */
+    /**
+     * Both or neither (ADR-041 4; skeptic): the TAG goes first, through a write whose failure is known (`recordOrThrow`) — if the record
+     * cannot take it, no marker is posted and the section is written again without the tag. Only then the K marker; if that post fails,
+     * the runner's revocation line (`conflictRoundRevokedLine`) withdraws the tag in the next section, so the cost counts again. What is
+     * left is a process death (or a second failed write) between the tag and the marker: tag without marker — K counts as today, and the
+     * cost exemption stays inside CONFLICT_ROUND_EXCLUDED_RUNS.
+     */
+    const conflictNote = [];
+    let marker = null;
+    if (conflictOnly && conflictGreen) {
+      const head = typeof v.data?.head_sha === "string" && SHA40.test(v.data.head_sha) ? v.data.head_sha : null;
+      if (!t.ok || t.to !== "factory:awaiting-review") {
+        conflictNote.push(`conflict-scope: GREEN, but the round did not hand off to factory:awaiting-review (${t.ok ? `went to ${t.to}` : `transition refused: ${t.reason ?? "unknown"}`}) — no conflict-round marker or tag; this round counts as a normal round (cost and K)`);
+      } else if (!head || !d.comment) {
+        const why = !head ? `the handoff head ${v.data?.head_sha ?? "none"} is not a 40-hex sha` : "no issue comment dep is wired";
+        conflictNote.push(`conflict-scope: GREEN, but the conflict-round marker was not written — ${why}; this round counts as a normal round (cost and K)`);
+      } else {
+        conflictTag = conflictRoundLine({ stage, runnerId, runId, approvedHead: conflictOnly.approved_head, head });
+        marker = conflictRoundComment({ issue, approvedHead: conflictOnly.approved_head, head });
+      }
+    }
+    const finalLines = (note) => ["verify: ok", ...stageNotes, ...(t.ok ? [`transition: ${t.to}`] : refusal(t)), ...(checkoutSha ? [`checkout: ${checkoutSha.slice(0, 7)}`] : []), ...note, ...gatesNote, usage];
+    if (!conflictTag) {
+      record(finalLines(conflictNote));
+      return t.ok ? 0 : 2;
+    }
+    try { recordOrThrow([conflictTag, ...finalLines(conflictNote)]); }
+    catch (e) {
+      conflictTag = null;
+      record(finalLines([...conflictNote, `conflict-scope: GREEN, but the conflict-round tag could not be written to the run record — ${e?.message || e}; no marker either — this round counts as a normal round (cost and K)`]));
+      return t.ok ? 0 : 2;
+    }
+    try { await d.comment(issue, marker); }
+    catch (e) {
+      record([conflictRoundRevokedLine({ stage, runnerId, runId, error: e }), `conflict-scope: GREEN, but the conflict-round marker was not written — ${e?.message || e}; this round counts as a normal round (cost and K)`]);
+    }
     return t.ok ? 0 : 2;
   } catch (e) {
     console.error(`factory: stage ${stage} aborted — ${e?.message || e}`);
@@ -2058,6 +2258,37 @@ export function implementHeadShaOf({ out, transcriptText = "" } = {}) {
 }
 
 /**
+ * #207 — 세션 산출물 중 **워크플로의 fail-closed 반환**이 있으면 그 `error` 문구, 없으면 null. 후보 탐색은 `verifyStage`와 같은
+ * 추출기(`extractStageArtifact`)이고, 채점 기준만 다르다: 네 워크플로 템플릿이 돌려주는 모양 그대로 — `issue`가 숫자(implement는
+ * 사건에서 0) 또는 null(triage/plan/review는 `Number(undefined)` = NaN이 JSON에서 null이 된다),
+ * `orchestration: "workflow"`, `guarantee: "structural"`, 그리고 `error`가 정확히 `context payload missing`이거나
+ * `context issue mismatch`로 시작한다. `error` 키 하나뿐인 객체, 다른 에러 문구, `issue: 0`만 있는 객체는 여기 해당하지 않는다 —
+ * 그런 산출물은 예전처럼 needs-human이다(일반 산출물 결함이 이 길로 빠져나가지 못하게).
+ */
+export const DISPATCHER_PAYLOAD_MISSING = "context payload missing";
+export const DISPATCHER_PAYLOAD_MISMATCH = "context issue mismatch";
+// `orchestration: "workflow"`은 아래 후보 검사가 이미 요구한다 — 여기서는 나머지 모양만 본다.
+const isWorkflowFailClosed = (o) => Boolean(o) && typeof o === "object"
+  && (typeof o.issue === "number" || o.issue === null) && o.guarantee === "structural"
+  && typeof o.error === "string" && (o.error === DISPATCHER_PAYLOAD_MISSING || o.error.startsWith(DISPATCHER_PAYLOAD_MISMATCH));
+export function dispatcherPayloadErrorOf({ out, transcriptText = "" } = {}) {
+  // 후보 순서는 **채널 순서**다(완료 알림 → Read/tool_result → 전경 Workflow 결과 → 최종 메시지, §extractStageArtifact) — 시간
+  // 순서가 아니고, "최신이 먼저"는 **한 채널 안에서만** 참이다. 그 순서로 첫 번째 워크플로 반환(`orchestration: "workflow"` + `issue`
+  // 키 + `guarantee: "structural"` — 네 템플릿의 스테이지 산출물과 fail-closed 반환 둘 다 그 모양이다. `guarantee`가 빠지면 디스패처가
+  // 먼저 Read하는 loaded.json(`issue`·`orchestration`은 있고 `guarantee`는 없다)이 후보로 뽑혀 진짜 반환을 가린다 — rework cf1)을
+  // 고르고, 그것이 fail-closed일 때만 답한다. 그래서 재시도가 **같은 채널이나 더 앞선 채널**로 스키마가 틀린 산출물을 냈다면 그것이
+  // 뽑혀 산출물 결함(needs-human)이 된다. 그러나 옛 fail-closed가 완료 알림으로 왔고 재시도의 반환이 더 뒤의 채널(전경 Workflow 결과·
+  // 최종 메시지)로 왔다면 옛 fail-closed가 뽑혀 blocked/undecidable이 된다 — b881484를 그대로 옮긴 동작이다(plan non_goals: "Any design
+  // beyond the b881484 port"; 교차 채널 순서는 이 이슈 밖이다).
+  const a = extractStageArtifact({
+    envelopeResult: out?.result,
+    transcriptText,
+    validate: (o) => (o && o.orchestration === "workflow" && "issue" in o && o.guarantee === "structural" ? { ok: true, errors: [] } : { ok: false, errors: ["not a workflow return"] }),
+  });
+  return a.ok && isWorkflowFailClosed(a.data) ? a.data.error : null;   // verbatim (b881484) — sanitising is #240, see §blockOnPayload
+}
+
+/**
  * 위 §KTB-43의 실행부. 반환은 셋 중 하나다:
  *   `{ok:true, dropped:[]}`           — 되돌릴 것이 없다(브랜치 head가 곧 핸드오프 sha다).
  *   `{ok:true, dropped:[sha…], …}`    — 드리프트만 얹혀 있었다: reset + 리스 push까지 끝났다.
@@ -2164,6 +2395,24 @@ export function reviewFlips(prev, now) {
   return (now || [])
     .filter((v) => v?.role && before.has(v.role) && before.get(v.role) !== v.verdict)
     .map((v) => `${v.role} ${before.get(v.role)}→${v.verdict}`);
+}
+
+/**
+ * #239 (M-2) — `review-r1: <role>=<verdict>,… r2_flipped=<n>` from the handoff's `r1_verdicts: [{role, verdict}]` (the
+ * cross-PR contract name the review workflow must emit), in `review-evidence:`'s canonical form (`normalizeVerdicts`). `n` counts R1 roles whose
+ * final (R2) verdict differs. No R1 array (or an empty one) → the explicit placeholder, never a silent skip.
+ */
+export const REVIEW_R1_NOT_CARRIED = "review-r1: (not carried by this workflow)";
+export function reviewR1Line(r1, final) {
+  const before = (Array.isArray(r1) ? r1 : []).filter((x) => typeof x?.role === "string" && x.role);
+  if (!before.length) return REVIEW_R1_NOT_CARRIED;
+  const after = new Map((Array.isArray(final) ? final : []).filter((x) => x?.role).map((x) => [x.role, x.verdict]));
+  const flipped = before.filter((x) => after.has(x.role) && after.get(x.role) !== x.verdict).length;
+  // sec1 (rework): role/verdict are agent text and this line lands in the agent-unwritable run record, ahead of (on the
+  // incomplete exit: instead of) the real `review-evidence:` line. Any whitespace/control run — line terminators included —
+  // becomes `_`, so the line stays ONE line and agent text can never start a parseable evidence line of its own.
+  // #289 (arch1) — the fold is verify-stage.js's `recordToken`, the same one its sign-off/dropped-id record lines use; one source.
+  return `review-r1: ${normalizeVerdicts(before.map((x) => ({ role: recordToken(x.role), verdict: recordToken(x.verdict) })))} r2_flipped=${flipped}`;
 }
 
 export const K_TWICE = "K exhausted twice (one self-restart used)";
@@ -2342,11 +2591,198 @@ export async function scopeInput({ run, cwd, base, issue, plan, maxBytes = SCOPE
 }
 
 /**
+ * #254 — 러너의 `verifyStage` dep (production = what the test drives). main()의 인라인 클로저였던 것을 꺼냈다:
+ * 그래야 "러너가 verifyStage에 무엇을 넘기는가"(NEVER_AUTOMATE, `[load_bearing].paths`)를 테스트가 실제 배선으로 핀한다.
+ * 게터인 이유 — charter·harness는 `charterReady` 뒤에, ctx는 `buildContext` 뒤에 생긴다.
+ */
+export function makeVerifyStageDep({ root, stage, getCtx, getCharter, getHarness, qaEvidenceSummary = () => null }) {
+  return ({ out, gates }) => {
+    const ctx = getCtx();
+    // 감사 M1 — NEVER_AUTOMATE의 글롭 항목은 CHARTER에서 그대로 온다(컨텍스트를 거치지 않는다:
+    // 이 재확인의 요점은 에이전트가 본 것과 **독립적인** 출처라는 데 있다). #254 — `[load_bearing].paths`도
+    // 같은 이유로 harness에서 그대로 온다(`tierFloor`가 읽는 바로 그 목록): triage의 tier 재확인 재료다.
+    const v = verifyStage({ stage, out, transcriptText: transcriptTextFor(root, out), agentsLog: readAgentsLog(join(root, ".factory/out/agents.jsonl")), roster: ctx.roster, rolePrefix: ROLE_PREFIX[stage] || "", expectedRounds: ctx.rounds, orchestration: ctx.orchestration, gates, planLimits: ctx.plan, issueBody: ctx.issue?.body, neverAutomate: getCharter()?.never_automate, loadBearing: getHarness()?.load_bearing?.paths ?? [], qaManifest: stage === "review" ? qaEvidenceSummary() : null });
+    // 추출에 성공했으면 `<stage>.json`을 **산출물**로 덮는다 — 사람과 다음 도구가 여는 파일이
+    // 디스패처의 산문 섞인 envelope이 아니라 스테이지가 실제로 쓴 객체이도록(envelope은 옆에 남아 있다).
+    if (v.ok && v.data) { try { writeFileSync(join(root, ".factory/out", `${stage}.json`), JSON.stringify(v.data, null, 2)); } catch { /* 기록 실패가 스테이지를 죽이지 않는다 */ } }
+    return v;
+  };
+}
+
+/**
+ * 감사 H3 — handoff에는 **러너가 계산한** 실효 tier를 함께 싣는다(`tier_effective`/`tier_source`).
+ * 에이전트가 적는 `tier`는 자기 신고이고, 이 둘은 diff에서 나온 사실이다: 다음 스테이지와 사람이
+ * 같은 코멘트에서 "무엇으로 채점됐는가"를 읽을 수 있어야 한다. 스키마는 추가 필드를 막지 않는다.
+ * (#254 — main()의 인라인 클로저를 꺼냈을 뿐 동작은 같다: 테스트가 "실제 handoff writer"를 몰 수 있게.)
+ */
+export function makeWriteHandoffDep({ gh, issue, stage, getCtx }) {
+  return async ({ data }) => {
+    const ctx = getCtx();
+    const d2 = ctx?.tier_effective ? { ...data, tier_effective: ctx.tier_effective, tier_source: ctx.tier_source } : data;
+    await gh.comment(issue, renderHandoff({ stage, issue, summary: d2.summary || `### ${stage} 완료`, data: d2 }));
+  };
+}
+
+/**
+ * ── #212 (ADR-041) — the self-gate `conflict-scope` input, measured on the REAL merge structure here (`runSelfGate` only judges) ──────
+ *
+ * A conflict-only round starts from the approved head A with the runner's base merge left to the builder (#143). Its legitimate output
+ * is exactly one merge commit M with M^1 = A and M^2 = the base the runner merged, optionally followed by this run's runner mirror
+ * commit. Anything else the round wrote is "outside the merge", named by path:
+ *   · a commit after M that is not this run's mirror commit (`mirrorSha`) — every path it changed;
+ *   · commits between A and M^1 (the builder committed before merging) — every path they changed;
+ *   · in M itself: every path where M differs from git's own merge of M^1 and M^2 (`git merge-tree --write-tree`, the same ort merge the
+ *     runner ran) that is not a conflicted path; and a conflicted path whose resolution changed lines outside its conflict regions (the
+ *     lines git placed around the `<<<<<<<`…`>>>>>>>` blocks must survive in order; a conflicted path one side's TREE does not list —
+ *     modify/delete, established by `ls-tree`, never inferred from a failed read — may be resolved whole); a conflicted mirror path the
+ *     runner resolved (`runnerMirror`) is inside the merge when M holds base's copy of it, which is what the runner wrote. Both sides
+ *     holding the path is a content conflict: M deleting it is outside the merge, and where git wrote no markers (a binary conflict) M
+ *     must be one side's blob, by object id.
+ * A failed or unexpected git read — any of them — is returned as `error` (the gate fails closed: not GREEN).
+ */
+const CONFLICT_WALK_MAX = 50;
+const CONFLICT_OPEN_RE = /^<{7}(?: |$)/m;                               // the opener `resolvedInsideConflicts` reads                                          // SHA40 is the module's one 40-hex rule (declared below, hoisted for calls)
+export async function conflictScopeInput({ run, cwd, approvedHead, mergedBase = null, paths = [], runnerResolved = [], runnerMirror = [], mirrorSha = null }) {
+  const conflicted = (Array.isArray(paths) ? paths : []).filter((p) => typeof p === "string" && p);
+  const strings = (xs) => (Array.isArray(xs) ? xs : []).filter((p) => typeof p === "string" && p);
+  // the merge's other conflicted paths, resolved by the RUNNER before the session (#143 `partial`): union-merged append-only files are
+  // held to the same conflict-region rule as the builder's paths; mirror paths (`runnerMirror`) were given base's WHOLE copy
+  // (`resolveMirrorConflicts`: `git checkout <base> -- <paths>`), which drops the branch's other hunks in that file by design (the mirror
+  // commit after the merge regenerates it) — so a mirror path is inside the merge exactly when M holds base's copy, byte for byte.
+  const mirrorTaken = strings(runnerMirror);
+  const allowed = [...conflicted, ...strings(runnerResolved), ...mirrorTaken];
+  const fail = (error) => ({ paths: conflicted, outside: [], error });
+  const git = async (args) => {
+    try { return await run("git", args, { cwd }); }
+    catch (e) { return { code: 1, stdout: "", stderr: e?.message || String(e) }; }
+  };
+  const why = (r) => String(r?.stderr || "").trim().split("\n")[0] || `exit ${r?.code}`;
+  const names = (r) => String(r.stdout || "").split("\0").filter(Boolean);
+  if (!SHA40.test(String(approvedHead || ""))) return fail(`no approved head to measure from (${approvedHead ?? "none"})`);
+  if (!conflicted.length) return fail("no conflicted paths were handed to this round");
+  const outside = new Set();
+  const head = await git(["rev-parse", "HEAD"]);
+  if (head.code !== 0) return fail(`git rev-parse HEAD failed — ${why(head)}`);
+  let cur = head.stdout.trim(), merge = null, sawMirror = false;
+  for (let n = 0; n < CONFLICT_WALK_MAX && !merge; n++) {
+    const r = await git(["rev-list", "--parents", "-n", "1", cur]);
+    if (r.code !== 0) return fail(`git rev-list failed — ${why(r)}`);
+    const [sha, ...parents] = r.stdout.trim().split(/\s+/);
+    if (parents.length >= 2) { merge = { sha, parents }; break; }
+    if (sha === approvedHead || !parents.length) return fail(`no base merge between the approved head ${approvedHead.slice(0, 7)} and HEAD`);
+    if (sha === mirrorSha) sawMirror = true;
+    else {
+      const ch = await git(["diff-tree", "--no-commit-id", "--name-only", "--no-renames", "-r", "-z", sha]);
+      if (ch.code !== 0) return fail(`git diff-tree failed — ${why(ch)}`);
+      names(ch).forEach((p) => outside.add(p));
+    }
+    cur = parents[0];
+  }
+  if (!merge) return fail(`no base merge within ${CONFLICT_WALK_MAX} commits of HEAD`);
+  if (merge.parents.length !== 2) return fail(`the base merge ${merge.sha.slice(0, 7)} has ${merge.parents.length} parents`);
+  const [ours, theirs] = merge.parents;
+  if (mergedBase && theirs !== mergedBase) return fail(`the merge's second parent ${theirs.slice(0, 7)} is not the base the runner merged (${String(mergedBase).slice(0, 7)})`);
+  if (ours !== approvedHead) {
+    const anc = await git(["merge-base", "--is-ancestor", approvedHead, ours]);
+    if (anc.code !== 0 && anc.code !== 1) return fail(`git merge-base --is-ancestor failed — ${why(anc)}`);   // 1 = "not an ancestor"; else a failed read
+    if (anc.code !== 0) return fail(`the merge's first parent ${ours.slice(0, 7)} does not descend from the approved head ${approvedHead.slice(0, 7)}`);
+    const before = await git(["diff", "--name-only", "--no-renames", "-z", approvedHead, ours]);
+    if (before.code !== 0) return fail(`git diff failed — ${why(before)}`);
+    names(before).forEach((p) => outside.add(p));
+  }
+  const mt = await git(["merge-tree", "--write-tree", "--no-messages", ours, theirs]);
+  const auto = mt.code === 0 || mt.code === 1 ? String(mt.stdout || "").split("\n")[0].trim() : "";
+  if (!/^[0-9a-f]{40,64}$/.test(auto)) return fail(`git merge-tree failed — ${why(mt)}`);
+  const diff = await git(["diff", "--name-only", "--no-renames", "-z", auto, merge.sha]);
+  if (diff.code !== 0) return fail(`git diff failed — ${why(diff)}`);
+  /**
+   * One side of a conflicted path: `{ absent }` only when the tree itself says the path is not there (`ls-tree` exits 0 and lists nothing —
+   * a modify/delete conflict); any failed read is `{ error }`. A failed `git show` is NEVER read as "deleted" — that was a fail-open
+   * (skeptic f1): a transient error turned a RED resolution GREEN.
+   */
+  const side = async (tree, p) => {
+    const ls = await git(["ls-tree", "-z", tree, "--", p]);
+    if (ls.code !== 0) return { error: `git ls-tree ${tree.slice(0, 7)} ${p} failed — ${why(ls)}` };
+    if (!names(ls).length) return { absent: true };
+    const oid = /^\d+ \w+ ([0-9a-f]{40,64})\t/.exec(names(ls)[0])?.[1];
+    if (!oid) return { error: `git ls-tree ${tree.slice(0, 7)} ${p} printed no object id` };
+    const s = await git(["show", `${tree}:${p}`]);
+    if (s.code !== 0) return { error: `git show ${tree.slice(0, 7)}:${p} failed — ${why(s)}` };
+    return { text: String(s.stdout ?? ""), oid };
+  };
+  for (const p of names(diff)) {
+    if (!allowed.includes(p)) {
+      // cf1/qa1 — the implement overlay (`makeFactoryOverlay`: `git checkout <stage sha> -- .factory …`) runs while the base merge is
+      // pending, so M carries base's copy of every mirror-family path the BRANCH changed, not only the conflicted ones. Those paths are
+      // generated: the runner's mirror commit (`mirrorSha`, which the walk above must have passed) regenerates them from factory/**. A
+      // mirror-family path is inside the merge exactly when that commit holds git's own merge result for it, by object id — the round's
+      // net change on it is nil. Without this run's mirror commit, or with any other copy there, it stays outside.
+      if (sawMirror && inMirrorFamily(p)) {
+        const a = await side(auto, p);
+        if (a.error) return fail(a.error);
+        const r = await side(mirrorSha, p);
+        if (r.error) return fail(r.error);
+        if (a.absent ? r.absent : !r.absent && r.oid === a.oid) continue;
+      }
+      outside.add(p);
+      continue;
+    }
+    const a = await side(auto, p);
+    if (a.error) return fail(a.error);
+    const m = await side(merge.sha, p);
+    if (m.error) return fail(m.error);
+    const t = await side(theirs, p);
+    if (t.error) return fail(t.error);
+    if (mirrorTaken.includes(p) && Boolean(t.absent) === Boolean(m.absent) && (t.absent || t.text === m.text)) continue;   // the runner's resolution: base's copy
+    // modify/delete is a fact of the two SIDES' trees (ours/theirs), never of git's auto-merge or of M (skeptic): only then is the whole
+    // file the conflict. Both sides hold it → a content conflict: M deleting it (or an auto-merge without it) drops lines outside the region.
+    const o = await side(ours, p);
+    if (o.error) return fail(o.error);
+    if (o.absent || t.absent) continue;
+    if (a.absent || m.absent) { outside.add(p); continue; }
+    // no markers in git's merge (a binary content conflict: ort writes none) → no region to hold M to: M must be one side whole, by
+    // object id (a decoded-text compare would let two different binaries match). `resolvedInsideConflicts` alone was GREEN for any bytes.
+    if (!CONFLICT_OPEN_RE.test(a.text)) { if (m.oid !== o.oid && m.oid !== t.oid) outside.add(p); continue; }
+    if (!resolvedInsideConflicts(a.text, m.text)) outside.add(p);
+  }
+  return { paths: conflicted, outside: [...outside].sort() };
+}
+
+/**
+ * Did the resolution keep every line git placed outside the conflict blocks, in order? `auto` is git's merge with markers; the text
+ * between `<<<<<<<` and `>>>>>>>` is free. True when there are no markers (nothing to hold the resolution to). An unclosed block is false.
+ */
+export function resolvedInsideConflicts(auto, resolved) {
+  const fixed = [[]];
+  let open = false;
+  for (const l of auto.split("\n")) {
+    if (!open && /^<{7}(?: |$)/.test(l)) { open = true; continue; }
+    if (open) { if (/^>{7}(?: |$)/.test(l)) { open = false; fixed.push([]); } continue; }
+    fixed[fixed.length - 1].push(l);
+  }
+  if (open) return false;
+  if (fixed.length === 1) return true;
+  const r = resolved.split("\n");
+  const at = (seg, j) => seg.every((l, k) => r[j + k] === l);
+  const first = fixed[0], last = fixed[fixed.length - 1];
+  if (!at(first, 0)) return false;
+  let pos = first.length;
+  for (const seg of fixed.slice(1, -1)) {
+    let j = pos;
+    while (j + seg.length <= r.length && !at(seg, j)) j++;
+    if (j + seg.length > r.length) return false;
+    pos = j + seg.length;
+  }
+  const end = r.length - last.length;
+  return end >= pos && at(last, end);
+}
+
+/**
  * The implement self-gate dep (production = what the test drives). Inputs are what main() already holds; `getCtx` returns
  * the context built for this run (`ctxCache`). `run-stage` computes every list here (git), `runSelfGate` only judges them.
  */
 export function makeSelfGateDep({ root, harness, run, mergeBase, getCtx, scopeMaxBytes = SCOPE_DIFF_MAX_BYTES }) {
-  return async ({ gates }) => {
+  return async ({ gates, mirrorSha = null, mergedBase = null, runnerResolved = [], runnerMirror = [] }) => {
     // 2026-10-03 실측(#157·#170·#178 implement 세 런이 게이트 GREEN 직후 "Cannot read properties of undefined (reading 'test')"로 죽음):
     // #174가 이 dep을 팩토리 함수로 빼면서 `harness`를 **값으로** 받았는데, main()의 `harness`는 deps 객체가 만들어진 뒤 `charterReady`에서야
     // 로드된다 — 그래서 여기 들어온 값은 undefined였다. 예전 인라인 dep은 호출 시점에 변수를 읽었다. 게터를 받아 호출 시점에 푼다
@@ -2368,6 +2804,11 @@ export function makeSelfGateDep({ root, harness, run, mergeBase, getCtx, scopeMa
     const restartBrief = brief ? await restartBriefInput({ run, cwd: root, brief, ...(await addedPathsNoRenames({ run, cwd: root, base })) }) : null;
     // #200 — the scope check's input: the plan's files_expected, the run's own issue number, and this round's diff (git, here).
     const scope = await scopeInput({ run, cwd: root, base, issue: Number(ctx?.issue?.number), plan: ctx?.handoffs?.plan ?? null, maxBytes: scopeMaxBytes });
+    // #212 — a conflict-only round (context.js `conflictOnlyOf`): measured HERE on the real merge commit; self-gate only judges it.
+    const loaded = ctx?.loaded ?? null;
+    const conflictScope = loaded?.conflict_only === true
+      ? await conflictScopeInput({ run, cwd: root, approvedHead: loaded.approved_head, mergedBase, paths: loaded.merge_conflicts, runnerResolved, runnerMirror, mirrorSha })
+      : null;
     return runSelfGate({
       root, harness: h, gates, run,
       // NEW tests only (should_fix 2) — the mutation check's dual is "a new test fails when its
@@ -2375,6 +2816,7 @@ export function makeSelfGateDep({ root, harness, run, mergeBase, getCtx, scopeMa
       changedTests: diff.addedTests, changedSources: diff.sources, pins,
       ...(restartBrief ? { restartBrief } : {}),
       scope,
+      ...(conflictScope ? { conflictScope } : {}),
     });
   };
 }
@@ -2554,6 +2996,24 @@ export function makePrEvidenceDeps({ gh, issue, repo = null, readRecord = null, 
 }
 
 /**
+ * 감사 H3 / KTB-46 r3 — merge 스테이지의 `reviewRoster` dep(정족수의 로스터). main()의 인라인 클로저였던 것을 꺼냈다(#254):
+ * 그래야 "merge 정족수가 review 스테이지의 `context.json`과 같은 tier 규칙에서 나오는가"를 테스트가 실제 배선으로 핀한다.
+ * 해석은 `lib/review-roster.js` 하나다 — sweeper의 사람-머지 반영 팔이 같은 함수를 부른다(판정이 두 벌이면 한쪽 문이 조용히 싸진다).
+ * 여기만이 diff로 tier를 올릴 수 있다. 코멘트 조회의 실패도 예전과 같은 문장으로 접는다(그 조회는 helper 밖에서 일어난다).
+ * 게터인 이유 — charter·harness는 `charterReady` 뒤에 생긴다.
+ */
+export function makeMergeReviewRosterDep({ run, root, gh, issue, getCharter, getHarness, mergeBase }) {
+  return async () => {
+    try {
+      return await resolveReviewRoster({
+        charter: getCharter(), roles: () => loadRoles(root), comments: await gh.comments(issue),
+        effectiveTier: async (tier) => resolveTier({ run, cwd: root, base: await mergeBase(), harness: getHarness(), tier }),
+      });
+    } catch (e) { return { ok: false, reason: `review roster for this tier could not be resolved — ${e?.message || e}` }; }
+  };
+}
+
+/**
  * `makeMergeSelfChangeDeps`: merge-stage의 `selfChange`·`engine`·`neverAutomate`·`mergePr`·`vetoWindow`·`vetoLabel`·`now`·`jobStartedAt`·`jobTimeoutMinutes`.
  * `selfChange`·`engine`은 **게터**다(CHARTER와 base 판정은 charterReady에서 생긴다) — 조립하는 쪽은 펼치지(`...`) 말고
  * `Object.getOwnPropertyDescriptors`로 옮긴다. GitHub 호출은 전부 gh.js를 지난다: 창은 `setStatus`/`commitStatuses`, 거부권은
@@ -2566,6 +3026,8 @@ export function makePrEvidenceDeps({ gh, issue, repo = null, readRecord = null, 
 export function makeMergeSelfChangeDeps({ gh, issue, getCharter, getEngine, env = {}, now = () => Date.now() }) {
   const started = String(env.FACTORY_JOB_STARTED ?? "").trim();
   const timeout = String(env.FACTORY_JOB_TIMEOUT_MINUTES ?? "").trim();
+  // ADR-038 보정 — 워크플로가 싣는 체크아웃 토큰의 수명(분). App 설치 토큰이면 60, 만료 없는 머지 PAT면 0; 없거나 모양이 틀리면 null(= 만료 없음).
+  const ttl = String(env.FACTORY_GIT_TOKEN_TTL_MINUTES ?? "").trim();
   return {
     get selfChange() { return getCharter()?.self_change; },
     get engine() { return getEngine() === true; },
@@ -2576,6 +3038,7 @@ export function makeMergeSelfChangeDeps({ gh, issue, getCharter, getEngine, env 
     now,
     jobStartedAt: /^[0-9]+$/.test(started) && Number(started) > 0 ? Number(started) * 1000 : null,
     jobTimeoutMinutes: /^[0-9]+$/.test(timeout) && Number(timeout) > 0 ? Number(timeout) : null,
+    gitTokenTtlMinutes: /^[0-9]+$/.test(ttl) && Number(ttl) > 0 ? Number(ttl) : null,
     vetoWindow: {
       open: async ({ sha, description }) => {
         try { await gh.setStatus({ sha, context: VETO_WINDOW_CONTEXT, state: "pending", description }); return { ok: true }; }
@@ -2655,7 +3118,8 @@ export async function syncRunRecords({ run, root, message, guard, vouch = null, 
 export function makeKRestartDeps({ gh, issue }) {
   const window = async () => commentsSinceRequeue(await gh.comments(issue));
   return {
-    reviewRounds: async () => countTransitionsTo(await window(), "factory:rework"),
+    // dw6 — `{ rejecting: true }`: the round as a REJECTING review decides it — the conflict round it is deciding on counts, as today.
+    reviewRounds: async ({ rejecting = false } = {}) => countTransitionsTo(await window(), "factory:rework", { rejecting }),
     kRestartState: async () => kRestartState(await window()),
     postKRestartBrief: async ({ pr, head, findings }) => {
       const s = kRestartState(await window());
@@ -2807,6 +3271,13 @@ export function makeHarnessIssueDep({ gh, issue, stage, rehearsal, admission, tr
  * Every stage transition funnels through here. `buildExtra(args)` is main's ctxExtra builder (roster, gates file, merge gates).
  */
 export function makeTransitionDep({ gh, issue, stage, rehearsal, admission, buildExtra, transitionFn = transition }) {
+  /**
+   * #249 sec1 — **triage의 blocked 재시도 hop(blocked → factory:queue)도 같은 문을 지난다.** 상한(queue_max·open_max·depth_max)을 포함한
+   * 심사 전부다. 그 hop을 허락하는 것은 작성자를 확인하지 않는 blocked-origin 마커뿐이라(ADR-040의 후속 이슈), hop만의 상한 면제는 그
+   * 마커를 쓸 수 있는 누구에게나 큐 문을 비켜 가는 길이었다. 대가: 꽉 찬 큐에서의 진짜 재시도는 factory:blocked에 남고 exit 2, 기록에 상한이 적힌다.
+   * 이 PR은 이 자리의 코드를 바꾸지 않는다 — main의 이 함수와 `transition()`이 이미 `prerequisite`과 무관하게 상한까지 심사한다. 위 문장은
+   * 그 불변식의 기록이고, `test_249_blocked_retry_hop_is_refused_by_queue_caps`는 그것을 지키는 회귀 가드다(hop에 상한 면제를 되살리면 RED).
+   */
   return async (args) => {
     const { to, reason, cause, by = null } = args;
     const ctxExtra = await buildExtra(args);
@@ -2832,7 +3303,12 @@ export function makeCheckoutHead({ gh, run, root, issue }) {
     if (fetch.code !== 0) return { ok: false, reason: `git fetch failed: ${fetch.stderr.trim()}` };
     const checkout = await run("git", ["checkout", "--detach", head_sha], { cwd: root });
     if (checkout.code !== 0) return { ok: false, reason: `git checkout failed: ${checkout.stderr.trim()}` };
-    return { ok: true, sha: head_sha, pr };
+    // #257 — implement 게이트 판정을 함께 돌려준다(선택 필드: handoff에 gates가 없으면 키 자체가 없다 — 기존 소비자는 그대로).
+    // 그 게이트가 돈 sha는 handoff의 `head_sha`다: implement는 미러 커밋을 게이트 **앞**에서 하므로(runStage의 mirror("commit") →
+    // gates) 미러 라운드에서도 게이트가 잰 것은 mirror_sha = head_sha, 곧 리뷰가 체크아웃하는 head다(`builder_head_sha`가 아니다).
+    const g = handoff.data.gates;
+    const implement_gates = g && typeof g === "object" ? { status: g.status ?? null, level: g.level ?? null, head_sha } : null;
+    return { ok: true, sha: head_sha, pr, ...(implement_gates ? { implement_gates } : {}) };
   };
 }
 
@@ -3103,20 +3579,92 @@ export async function mergeBaseIntoBranch({ run, root, branch, sha, source = "ba
 }
 
 /**
+ * #238 (P-14, M-8) — the rejected plan the repair turn carries: the verdict's `v.data`, whole, or `null` (left out). Only a plain
+ * object qualifies, and it is deep-copied through JSON so the carried value is exactly what `loaded.json` will hold — never cut
+ * short, and never a reference a later mutation of `v.data` could change. A value JSON cannot hold is left out, not truncated.
+ */
+export function carryableRejectedPlan(data) {
+  if (!isPlainObject(data)) return null;
+  try { const copy = JSON.parse(JSON.stringify(data)); return isPlainObject(copy) ? copy : null; }
+  catch { return null; }
+}
+
+export const PLAN_REPAIR_SYNTHESIS_ONLY = "plan repair: synthesis-only";
+export const PLAN_REPAIR_FULL_RERUN = "plan repair: full rerun (workflow ignored plan_repair.previous)";
+
+/**
+ * #238 — the one cost line of a plan repair turn that ran. It is decided by what the RUNNER observed: the hook-written agents
+ * log of that turn (run-stage resets it just before the turn). The plan writer was seen and no debate roster role
+ * (`<prefix><role>`, the writer aside) was → `synthesis-only`; any did, the writer is absent too (an empty log), the log could
+ * not be read, or there is no debate role to look for → `full rerun`
+ * (unsure is never "cheap"). A debate role counts once it STARTED (completed, orphaned or merely started). The handoff's
+ * `repair_of` is the agent's claim: any value it holds (null too) is appended as its JSON text and never consulted for the
+ * classification.
+ *
+ * Which role is "the synthesis" follows the shipped workflow (templates/factory/claude/workflows/factory-plan.js): in `single`
+ * mode the plan is written by `roster.find(name === "synthesizer") || roster[0]` — CHARTER `plan_roles.single` may rename it —
+ * so THAT role is excluded; otherwise (debate, or mode unknown) the synthesizer is (test_238_…_single_mode_planner).
+ */
+export function planRepairCostLine({ agentsLog, roster, mode, rolePrefix = "plan-", repairOf } = {}) {
+  const completed = Array.isArray(agentsLog?.completed) ? agentsLog.completed : null;
+  // a debate role that STARTED but never stopped (crash/timeout mid-debate) still ran and cost money — it counts as a rerun too.
+  const seen = completed === null ? null : new Set([
+    ...completed,
+    ...(Array.isArray(agentsLog.orphans) ? agentsLog.orphans : []),
+    ...(Array.isArray(agentsLog.starts) ? agentsLog.starts.map((s) => s?.agent_type) : []),
+  ]);
+  const names = (Array.isArray(roster) ? roster : []).filter((r) => typeof r === "string" && r);
+  const writer = mode === "single" ? (names.includes("synthesizer") ? "synthesizer" : names[0]) : "synthesizer";
+  const debate = names.filter((r) => r !== writer);
+  // A log that parsed but does not show even the writer (an empty file from a silently failing record-agents.sh hook) is not
+  // evidence that the synthesis ran alone — it is doubt, and doubt is a full rerun (test_238_…_reused_the_plan (12)).
+  const reran = seen === null || debate.length === 0 || !seen.has(rolePrefix + writer) || debate.some((r) => seen.has(rolePrefix + r));
+  const head = reran ? PLAN_REPAIR_FULL_RERUN : PLAN_REPAIR_SYNTHESIS_ONLY;
+  if (repairOf === undefined) return head;                        // no `repair_of` key in the handoff → no claim to record
+  // Verbatim = the claimed value's exact JSON text (null included): lossless — `JSON.parse` gives back the same value — and it
+  // keeps the record one line, so a claim carrying "\n" cannot forge a record line of its own.
+  let claim;
+  try { claim = JSON.stringify(repairOf); } catch { claim = undefined; }
+  if (claim === undefined) claim = JSON.stringify(`<not JSON-representable: ${typeof repairOf}>`);
+  return `${head} — handoff claims repair_of=${claim} (agent's claim, not used to classify)`;
+}
+
+/**
+ * #238 — main()'s view of this turn's `.factory/out/agents.jsonl`: `null` (unsure) when the hook wrote no file, when it cannot be
+ * read, or when any non-blank line is not JSON — `readAgentsLog` skips such lines, so a truncated/garbled log could have lost
+ * exactly the debate-role lines and read as "synthesis-only". Else the parsed log (`readAgentsLog`, the roster check's parser).
+ */
+export function turnAgentsLog(root) {
+  const p = join(root, ".factory/out/agents.jsonl");
+  if (!existsSync(p)) return null;
+  try {
+    for (const line of readFileSync(p, "utf8").split("\n")) {
+      if (line.trim()) JSON.parse(line);
+    }
+  } catch { return null; }
+  return readAgentsLog(p);
+}
+
+/**
  * main()의 `buildContext` dep. 감사 H3 — 컨텍스트는 `run`/`base`를 받아야 tier 바닥(diff)을 계산할 수 있다. base를 못 구하는
  * 것은 판정 불가이지 "바닥 없음"이 아니지만, **여기서** 스테이지를 죽이지는 않는다: 곧이어 도는 `gates` dep이 같은 `mergeBase()`로
  * MergeBaseError를 올려 `factory:blocked`로 보낸다(게이트가 없는 triage/plan은 애초에 diff를 판정 재료로 쓰지 않는다). 대신 그 사실을
  * 런 레코드에 남긴다. Task 9 (KTB-51): plan repair 턴의 validator 사유는 `plan_repair`로 `loaded.json`에 실린다.
+ * #238: 그 사유가 겨눈 거부된 계획 전체는 `planRepairPrevious`로 실려 context.json·context.<role>.json의 `plan_repair_previous`가 된다(loaded.json에는 싣지 않는다 — dw1).
  * #143 (S3b): 빌더에게 넘긴 base 병합의 충돌 경로는 `mergeConflicts`로 실려 `loaded.merge_conflicts`가 된다 — 이 배선을 테스트가
  * 직접 부를 수 있도록 main() 밖으로 꺼냈다(셀프 비판 f1: 이 고리가 목록을 떨어뜨려도 아무 테스트도 실패하지 않았다).
  */
 export const makeBuildContextDep = ({ root, gh, issue, stage, run, mergeBase, recordLine, onBuilt = () => {}, produce = buildContext }) =>
-  async ({ setupDirty = null, planRepair = null, mergeConflicts = null } = {}) => {
+  async ({ setupDirty = null, planRepair = null, planRepairPrevious = null, mergeConflicts = null } = {}) => {
     let base = null;
     try { base = await mergeBase(); }
     catch (e) { if (!isMergeBaseError(e)) throw e; recordLine("tier: merge-base unresolved — tier floor not computed (gates will block)"); }
-    const ctx = await produce({ root, gh, issue, stage, run, base, setupDirty, planRepair, mergeConflicts });
+    const ctx = await produce({ root, gh, issue, stage, run, base, setupDirty, planRepair, planRepairPrevious, mergeConflicts });
     onBuilt(ctx);
+    // #207 — 이 buildContext가 쓴 `loaded.json`의 디스크 위 크기(디스패처가 손으로 옮겨 쓸 파일, 모든 스테이지). 매 호출이 한 줄이다:
+    // plan 리페어 턴의 두 번째 buildContext는 `plan_repair`가 붙어 커진 파일을 다시 쓰므로 그 크기도 따로 선다. 모르면 줄이 없다.
+    const loadedNote = loadedJsonLine(ctx);
+    if (loadedNote) recordLine(loadedNote);
     return ctx;
   };
 
@@ -3273,6 +3821,17 @@ export async function mirrorMatchesBranchHead({ root, run, importer, match = mir
 }
 
 /**
+ * #253 — `assertStageBranch`(아래, 쓰기 스테이지의 세션 뒤 가드)가 돌려주는 오버레이 드리프트 사유. 이 사유는
+ * `undecidable — …`/`branch: FAIL — …`로 운영자와 sweeper의 다음 빌더에게 그대로 간다.
+ * 접두 `factory config changed during the stage: <paths>`는 그대로다(하류가 그 접두를 읽는다). 드리프트한 경로에
+ * mirrorStep의 가족(`inMirrorFamily`)이 하나라도 있으면 처방을 덧붙인다: 미러는 러너가 만들고, self-mirror 테스트는
+ * 빌더 세션 안에서 노트와 함께 통과한다(`factory/test/helpers/builder-session.js`). git diff 실패(`drift.reason`)는 그대로.
+ */
+export const OVERLAY_MIRROR_REMEDY = " — a builder must not write .factory/**; the self-mirror test is the runner's (it passes inside a builder session since #253)";
+export const overlayDriftReason = (drift) =>
+  drift.reason || `factory config changed during the stage: ${drift.paths.join(", ")}${drift.paths.some((p) => inMirrorFamily(p)) ? OVERLAY_MIRROR_REMEDY : ""}`;
+
+/**
  * ADR-023 Task 8b — 세션이 끝난 뒤에도 **여전히 그 브랜치 위인가**, 그리고 팩토리 설정은 여전히
  * 스테이지 커밋의 것인가. 훅이 브랜치 이동을 막지만 훅이 못 보는 철자는 언제나 남는다(런타임 조립) —
  * 이것은 그 뒤에 서는 구조적 백스톱이다. `git rev-parse --abbrev-ref HEAD` 자체가 실패하거나 HEAD가
@@ -3288,7 +3847,7 @@ export async function assertStageBranch({ run, cwd, issue, sha, harnessIssue = f
   // harness 이슈는 overlay가 애초에 덮지 않은 경로(`HARNESS_OPENS`)를 세션 뒤에도 묻지 않는다 —
   // 빌더가 그 파일을 고치는 것이 그 이슈의 일이다(§overlayPathspecs).
   const drift = await overlayDrift({ run, cwd, sha, harnessIssue });
-  if (!drift.ok) return { ok: false, reason: drift.reason || `factory config changed during the stage: ${drift.paths.join(", ")}` };
+  if (!drift.ok) return { ok: false, reason: overlayDriftReason(drift) };
   return { ok: true, branch: at };
 }
 
@@ -3482,7 +4041,7 @@ export const overlayLine = (ov) => {
  * 마커 코멘트를 남긴다 — 락은 이미 이 프로세스가 쥐고 있으므로, 라벨 이벤트로 따라 뜨는 GitHub의
  * triage 잡은 claim에 실패해 exit 0으로 물러난다(의도된 설계, 중복 실행 방지).
  */
-export function makeLocalEntry({ gh, issue, stage, env, rehearsal = null }) {
+export function makeLocalEntry({ gh, issue, stage, env, rehearsal = null, admission, log = (m) => console.error(m) }) {
   return async () => {
     if (!env?.FACTORY_LOCAL_ENTRY || stage !== "triage") return null;
     const it = await gh.issue(issue);
@@ -3503,6 +4062,20 @@ export function makeLocalEntry({ gh, issue, stage, env, rehearsal = null }) {
        */
       const r = await rehearsal?.();
       if (!r || r.ok !== true) return `local entry refused: ${r?.reason || REHEARSAL_UNWIRED}`;
+      /**
+       * #230 (E-2) — **심사도 같은 문으로.** 리허설만 보던 이 자리는 done_when 없는 이슈·NEVER_AUTOMATE·꽉 찬 큐를 그대로 큐에 썼다.
+       * main의 그 심사기를 부르고, 거부면 라벨을 쓰지 않고 큐 문과 같은 문장을 돌려주고 stderr에도 낸다.
+       * **배선이 비면 거부한다(fail closed)**: `admission`이 함수가 아니면 — 키를 **생략한** 호출이든 `null` 등을 넘긴 호출이든 — 라벨을
+       * 쓰지 않고 `transition()`이 같은 경우에 내는 문장(`ADMISSION_UNWIRED`) 그대로 거부한다 — 리허설의 `REHEARSAL_UNWIRED`와 같은 규칙.
+       * #247 (spec1, dw3) — 생략한 키를 예외로 두지 않는다(`admission !== undefined`로 건너뛰던 #230 브랜치의 모양은 리뷰 두 라운드가 거부했다).
+       */
+      const unwired = typeof admission !== "function";
+      const a = unwired ? null : await admission({ issue });
+      if (unwired || a?.ok !== true) {
+        const line = `local entry refused: ${unwired ? ADMISSION_UNWIRED : admissionRefusedReason(a)}`;
+        log(line);
+        return line;
+      }
       await gh.setFactoryLabel(issue, "factory:queue");
       await gh.comment(issue, "<!-- factory-transition:v1 from=backlog to=factory:queue by=local -->\nbacklog → factory:queue — claimed locally first (§4.2.5)");
       return "local entry: backlog → factory:queue";
@@ -3511,11 +4084,39 @@ export function makeLocalEntry({ gh, issue, stage, env, rehearsal = null }) {
   };
 }
 
+/**
+ * main()의 큐 진입 심사기(#230에서 추출 — 테스트가 프로덕션 배선을 그대로 부르게). CHARTER는 `charterReady`가 나중에 읽으므로
+ * 호출 시점에 `getCharter()`로 늦게 본다. 없으면 거부하되(fail closed) 그 거부는 `unreadable`이다 — 이슈에 대한 판정이 아니다.
+ */
+// #249 (dw3) — 두 번째 심사기가 아니다: main()이 이것을 **한 번** 부르고 그 한 심사기를 큐 문·로컬 진입·triage 재심사에 나눠 준다
+// (아래 `const admission = makeStageAdmission(…)`). main() 조립의 추출도 아니다 — main의 `deps`는 여전히 main 안에서 조립된다.
+// 이 함수는 main에 있던 인라인 클로저(`charter ? makeQueueAdmission(…) : 거부`)를 이름만 붙여 옮긴 것이고, 9f6dc7a 브랜치 테스트
+// (test_230_*, test_247_*)가 이 이름으로 import해 프로덕션 심사기를 그대로 부른다(non_goal "no new design" — 브랜치 그대로).
+export function makeStageAdmission({ gh, getCharter, factoryLogins }) {
+  return async (args) => {
+    const charter = getCharter();
+    if (!charter) return { ok: false, reasons: ["CHARTER not loaded — queue admission needs it"], codes: [ADMISSION_CODES.unreadable] };
+    return makeQueueAdmission({ gh, charter, factoryLogins })(args);
+  };
+}
+
 /** CLI 진입: 실제 의존성 조립 */
+/**
+ * ADR-038 보정(2026-10-11, #249·#212) — merge 스테이지의 **엔진 git**은 `GH_TOKEN`으로 인증한다(`lib/exec.js` `gitAuthEnv`).
+ * 체크아웃의 App 설치 토큰은 60분에 만료되는데 거부권 창은 60분을 잡 안에서 기다리므로, 창 뒤의 records fetch·push·락 해제는
+ * 두 배우 모드의 만료 없는 머지 PAT(= 이 잡의 `GH_TOKEN`)로 나가야 한다. merge 밖에서는 null — 다른 스테이지의 `GH_TOKEN`은
+ * 체크아웃과 같은 토큰이라 얻는 것이 없고, `claude -p`가 도는 자리에 env를 더 얹지 않는다. 게이트 자식은 `scrubEnv`가 이 키들을 뺀다.
+ */
+export function mergeGitAuth({ stage, env }) {
+  if (stage !== "merge") return null;
+  return gitAuthEnv({ token: env?.GH_TOKEN, serverUrl: env?.GITHUB_SERVER_URL || undefined });
+}
+
 async function main() {
   const argv = process.argv.slice(2);
   const [stage, issueArg] = argv;
   const issue = Number(issueArg);
+  Object.assign(process.env, mergeGitAuth({ stage, env: process.env }) ?? {});   // ADR-038 보정 — merge의 엔진 git 인증(위)
   // KTB-24 — `--aborted <job.status>`. 값이 빠지면(`--aborted`만) "cancelled"로 읽는다: 이 스텝은
   // 취소된 잡의 짧은 유예 안에서만 도는데, 인자 하나 때문에 usage로 죽으면 정리가 통째로 사라진다.
   const abortedAt = argv.indexOf("--aborted");
@@ -3596,9 +4197,8 @@ async function main() {
    */
   const rehearsal = makeRehearsalChecker({ gh, root, branch: () => harness?.project?.default_branch || "main" });   // 지연: harness는 charterReady에서 읽힌다
   // S2 — 큐 진입 심사. charter는 charterReady에서 읽히므로 호출 시점에 늦게 본다; 없으면 심사기가 거부한다(fail closed).
-  const admission = async (args) => (charter
-    ? makeQueueAdmission({ gh, charter, factoryLogins: () => resolveFactoryLogins({ gh, env: process.env }) })(args)
-    : { ok: false, reasons: ["CHARTER not loaded — queue admission needs it"] });
+  // #230 — 이 한 심사기가 큐 문(`deps.transition`)·로컬 진입·triage 진입 재심사에 모두 간다.
+  const admission = makeStageAdmission({ gh, getCharter: () => charter, factoryLogins: () => resolveFactoryLogins({ gh, env: process.env }) });
   const deps = {
     // 잠드는 건 정상 동작이지만 "왜" 잠들었는지는 반드시 말한다(`makeCharterReady`). #179 — 엔진 판정도 거기서, base에서 굳는다.
     charterReady: makeCharterReady({ root, set: (s) => { if ("charter" in s) charter = s.charter; if ("harness" in s) harness = s.harness; if ("engine" in s) engineAtBase = s.engine; } }),
@@ -3611,7 +4211,9 @@ async function main() {
     trustWorkspace: () => trustWorkspace({ root }),
     claim: () => claim({ run, cwd: root, issue, stage, runnerId }),
     // KTB-44 (r2 nf-2): 로컬 진입도 다른 네 생산자와 **같은** 검사기를 지난다.
-    localEntry: makeLocalEntry({ gh, issue, stage, env: process.env, rehearsal }),
+    localEntry: makeLocalEntry({ gh, issue, stage, env: process.env, rehearsal, admission }),
+    /** #230 — triage 진입의 재심사(runStage). 위 큐 문과 같은 심사기다. */
+    admission,
     /** 진입 상태 가드(KTB-10)의 재료 — 지금 이 순간 이슈에 붙어 있는 라벨 이름들. */
     issueLabels: async () => (await gh.issue(issue)).labels,
     /** blocked 재시도 가드 전용(KTB-15b I2) — 지금의 factory:blocked이 마지막으로 어느 스테이지의
@@ -3673,6 +4275,8 @@ async function main() {
      * 않고 같은 추출기를 한 번 더 돌린다(후보 채점은 동일하다 — §implementHeadShaOf).
      */
     handoffHeadSha: (out) => (stage === "implement" ? implementHeadShaOf({ out, transcriptText: transcriptTextFor(root, out) }) : null),
+    /** #207 — 워크플로의 fail-closed 반환(디스패처 전달 고장)을 트랜스크립트까지 훑어 찾는다(§dispatcherPayloadErrorOf). */
+    dispatcherPayloadError: (out) => dispatcherPayloadErrorOf({ out, transcriptText: transcriptTextFor(root, out) }),
     /** KTB-43 — 핸드오프 뒤에 붙은 드리프트 전용 커밋을 떨어뜨린다(리스 없는 force는 없다). */
     dropPostHandoffDrift: async ({ handoffSha, baseline }) => makeDropPostHandoffDrift({ run, root, issue })({
       handoffSha, baseline,
@@ -3710,6 +4314,10 @@ async function main() {
     buildContext: makeBuildContextDep({ root, gh, issue, stage, run, mergeBase, recordLine, onBuilt: (c) => { ctxCache = c; } }),
     /** 지난 런의 SubagentStart/Stop 기록이 이번 런의 로스터 체크를 대신 만족시키면 안 된다. */
     resetAgentsLog: async () => { rmSync(join(root, ".factory/out/agents.jsonl"), { force: true }); },
+    /** #238 — the plan repair turn's cost line reads the same file the roster check reads (`planRepairCostLine`). */
+    agentsLog: () => turnAgentsLog(root),
+    /** #238 dw5 — a plan repair turn that could not run takes its rejected plan back out of .factory/out/context*.json. */
+    scrubPlanRepairPrevious: () => scrubPlanRepairPrevious(root),
     // `resetGates`(지난 런의 게이트 판정 파일과 그 재료를 스테이지 첫 전이보다 먼저 지운다)는 아래 makeStageGateDeps 조립에서 온다 — #157 cf1.
     /**
      * **이번 주기에 실제로 끝난 rework 라운드 수**(r1 SF2). 두 가지가 범위를 정한다:
@@ -3844,24 +4452,9 @@ async function main() {
      * 붙인 뒤 그 파일을 다시 써 온디스크 산출물과 handoff 코멘트가 갈리지 않게 한다.
      */
     syncStageArtifact: (data) => { try { writeFileSync(join(root, ".factory/out", `${stage}.json`), JSON.stringify(data, null, 2)); } catch { /* 기록 실패는 스테이지를 죽이지 않는다 */ } },
-    verifyStage: ({ out, gates }) => {
-      // 감사 M1 — NEVER_AUTOMATE의 글롭 항목은 CHARTER에서 그대로 온다(컨텍스트를 거치지 않는다:
-      // 이 재확인의 요점은 에이전트가 본 것과 **독립적인** 출처라는 데 있다).
-      const v = verifyStage({ stage, out, transcriptText: transcriptTextFor(root, out), agentsLog: readAgentsLog(join(root, ".factory/out/agents.jsonl")), roster: ctxCache.roster, rolePrefix: ROLE_PREFIX[stage] || "", expectedRounds: ctxCache.rounds, orchestration: ctxCache.orchestration, gates, planLimits: ctxCache.plan, issueBody: ctxCache.issue?.body, neverAutomate: charter.never_automate, qaManifest: stage === "review" ? qaEvidenceSummary() : null });
-      // 추출에 성공했으면 `<stage>.json`을 **산출물**로 덮는다 — 사람과 다음 도구가 여는 파일이
-      // 디스패처의 산문 섞인 envelope이 아니라 스테이지가 실제로 쓴 객체이도록(envelope은 옆에 남아 있다).
-      if (v.ok && v.data) { try { writeFileSync(join(root, ".factory/out", `${stage}.json`), JSON.stringify(v.data, null, 2)); } catch { /* 기록 실패가 스테이지를 죽이지 않는다 */ } }
-      return v;
-    },
-    /**
-     * 감사 H3 — handoff에는 **러너가 계산한** 실효 tier를 함께 싣는다(`tier_effective`/`tier_source`).
-     * 에이전트가 적는 `tier`는 자기 신고이고, 이 둘은 diff에서 나온 사실이다: 다음 스테이지와 사람이
-     * 같은 코멘트에서 "무엇으로 채점됐는가"를 읽을 수 있어야 한다. 스키마는 추가 필드를 막지 않는다.
-     */
-    writeHandoff: async ({ data }) => {
-      const d2 = ctxCache?.tier_effective ? { ...data, tier_effective: ctxCache.tier_effective, tier_source: ctxCache.tier_source } : data;
-      await gh.comment(issue, renderHandoff({ stage, issue, summary: d2.summary || `### ${stage} 완료`, data: d2 }));
-    },
+    // #254 — 두 dep의 본문은 `makeVerifyStageDep`·`makeWriteHandoffDep`(위)에 있다: 테스트가 같은 배선을 몬다.
+    verifyStage: makeVerifyStageDep({ root, stage, getCtx: () => ctxCache, getCharter: () => charter, getHarness: () => harness, qaEvidenceSummary }),
+    writeHandoff: makeWriteHandoffDep({ gh, issue, stage, getCtx: () => ctxCache }),
     /** triage 전용(KTB-9): 판정된 tier를 라벨로 내보낸다 — 다른 `factory:tier-*`는 같은 호출에서 떨어진다. */
     setTierLabel: (tier) => gh.setTierLabel(issue, tierLabel(tier)),
     /** merge stage 전용: PR이 열려 있는지, 충돌은 없는지 — implement handoff에 적힌 PR을 조회한다. */
@@ -3973,17 +4566,7 @@ async function main() {
      * 한 규칙에서 나온다. (리뷰 batch-1의 잠정 `reviewTier(claimed, gates.json)` 바닥은 이 canonical
      * 계산으로 대체됐다 — gates.json은 PR head에서 쓰이지만 이것은 base + diff에서 도출된다.)
      */
-    reviewRoster: async () => {
-      // KTB-46 r3: 해석은 `lib/review-roster.js` 하나다 — sweeper의 사람-머지 반영 팔이 같은 함수를
-      // 부른다(판정이 두 벌이면 한쪽 문이 조용히 싸진다). 여기만이 diff로 tier를 올릴 수 있다.
-      // 코멘트 조회의 실패도 예전과 같은 문장으로 접는다(그 조회는 helper 밖에서 일어난다).
-      try {
-        return await resolveReviewRoster({
-          charter, roles: () => loadRoles(root), comments: await gh.comments(issue),
-          effectiveTier: async (tier) => resolveTier({ run, cwd: root, base: await mergeBase(), harness, tier }),
-        });
-      } catch (e) { return { ok: false, reason: `review roster for this tier could not be resolved — ${e?.message || e}` }; }
-    },
+    reviewRoster: makeMergeReviewRosterDep({ run, root, gh, issue, getCharter: () => charter, getHarness: () => harness, mergeBase }),
     /**
      * 리뷰 batch-1 MF-2 — 머지 직전 §(6b2)의 재료: `factory/records` 브랜치의 run 기록에 **러너가**
      * 쓴 `review-evidence:` 줄. 브랜치를 읽지 못하는 것은 "기록이 없다"가 아니라 **판정 불가**이므로

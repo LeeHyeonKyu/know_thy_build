@@ -96,6 +96,11 @@ jobs:
         env:
           APP_SLUG: ${{ steps.factory-token.outputs.app-slug }}
         run: echo "FACTORY_BOT_LOGIN=${APP_SLUG}[bot]" >> "$GITHUB_ENV"
+      # ADR-038 보정(2026-10-11) — 체크아웃 토큰은 **에이전트 배우의 것 그대로**다(머지 PAT를 여기 두면 `.git/config`에 admin 자격이
+      # 심기고, 게이트 `[commands]` = PR head의 코드가 그것을 읽을 수 있다 — env 스크럽은 `.git/config`에 닿지 않는다). App 설치 토큰은
+      # 민팅 뒤 60분에 만료되는데 거부권 창은 60분이라 #249·#212의 머지 런이 창 뒤의 records fetch·push에서 죽었다 — 그래서 엔진은
+      # 머지 스테이지에서 **자기 프로세스의 git에만** `GH_TOKEN`(두 배우 모드 = 만료 없는 머지 PAT)으로 인증 헤더를 얹는다
+      # (`exec.js` `gitAuthEnv`, 게이트 자식 env에서는 스크럽). 단일 배우 모드는 아래 `FACTORY_GIT_TOKEN_TTL_MINUTES`가 창을 막는다.
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
@@ -151,6 +156,8 @@ jobs:
           # 필요한 것은 불리언 하나뿐이다. 시크릿 값을 env에 한 번 더 복사하면 사본이 하나 더 생길
           # 뿐이다 — `GH_TOKEN`이 이미 그 토큰이다.
           FACTORY_TWO_ACTOR: ${{ secrets.FACTORY_MERGE_TOKEN != '' }}
+          # ADR-038 보정 — 체크아웃 토큰의 수명(분). 머지 PAT면 만료 없음(0), App 설치 토큰이면 60: merge-stage가 창 + 여유가 그 안에 드는지 본다.
+          FACTORY_GIT_TOKEN_TTL_MINUTES: ${{ secrets.FACTORY_MERGE_TOKEN == '' && env.FACTORY_APP_CONFIGURED == 'true' && '60' || '0' }}
           FACTORY_RUNNER_ID: gha-${{ github.run_id }}
           FACTORY_RUN_ATTEMPT: ${{ github.run_attempt }}
           # ADR-020 최종 리뷰 MF-2 — **`${{ … }}`를 `run:` 안에 붙여 넣지 않는다.** `inputs.issue`는
@@ -221,10 +228,23 @@ jobs:
       # `failure()`는 "앞 스텝이 실패했다"만 참으로 만든다 — 잡 타임아웃·러너 소실처럼 그 어느 쪽으로도
       # 분류되지 않는 끝맺음에서는 정리 스텝이 통째로 건너뛰어지고, 고아 락과 침묵이 그대로 남는다(데모 #15).
       # `always()`로 언제나 평가하고 성공만 빼면 "성공이 아닌 모든 끝"이 정확히 한 조건에 들어온다.
+      # ADR-038 보정(2026-10-11, #249 머지 런 38172268448) — **설치 토큰은 민팅 뒤 60분에 만료된다.** 아래 두 후행 스텝은 그보다 늦게
+      # 돌 수 있다(merge의 거부권 창 60분, implement·review의 긴 런, 잡 타임아웃 직후의 정리). 만료된 토큰으로는 `gh`가 빈 출력을
+      # 내고(sweep.js의 JSON.parse 크래시), 정리 스텝은 고아 락을 못 지운다(KTB-24가 막으려던 바로 그 침묵). 그래서 여기서 **다시
+      # 민팅**한다 — 아티팩트 업로드 뒤라 이 토큰은 어떤 아티팩트에도 실리지 않는다. App이 없으면 건너뛰고 PAT 폴백이 그대로 선다.
+      - name: Factory token for the trailing steps (re-minted — the first one may have expired)
+        id: factory-token-late
+        if: ${{ always() && env.FACTORY_APP_CONFIGURED == 'true' }}
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ secrets.FACTORY_APP_ID }}
+          private-key: ${{ secrets.FACTORY_APP_PRIVATE_KEY }}
+        # 일시적 민팅 실패가 정착된 스테이지를 failure로 만들고 `Aborted cleanup`을 쏘면 안 된다 — 그때는 첫 토큰·PAT 폴백으로 간다.
+        continue-on-error: true
       - name: Aborted cleanup
         if: always() && job.status != 'success'
         env:
-          GH_TOKEN: ${{ steps.factory-token.outputs.token || secrets.FACTORY_BOT_TOKEN }}
+          GH_TOKEN: ${{ steps.factory-token-late.outputs.token || steps.factory-token.outputs.token || secrets.FACTORY_BOT_TOKEN }}
           FACTORY_RUNNER_ID: gha-${{ github.run_id }}
           FACTORY_RUN_ATTEMPT: ${{ github.run_attempt }}
           ISSUE: ${{ github.event.issue.number || inputs.issue }}
@@ -241,7 +261,7 @@ jobs:
       - name: Sweep
         if: always()
         env:
-          GH_TOKEN: ${{ steps.factory-token.outputs.token || secrets.FACTORY_BOT_TOKEN }}
+          GH_TOKEN: ${{ steps.factory-token-late.outputs.token || steps.factory-token.outputs.token || secrets.FACTORY_BOT_TOKEN }}
         run: |
           git checkout ${{ github.sha }} -- .factory || true
           node .factory/bin/sweep.js --quick

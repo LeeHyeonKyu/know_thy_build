@@ -1,3 +1,4 @@
+// Scope change (#249): dw4/dw6 — re-landing branch claude/fq-247 @ 9f6dc7a as-is (non_goal "no new design"): that branch makes the flaky harvest call harness-request.js's single createBacklogIssueAndQueue (the tail dw4's retro promotion uses), so dropping this hunk would leave a second copy of that tail. (#247: dw5, verifier finding 4.)
 import { existsSync, readFileSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import { parseVitestJson } from "./parsers/vitest-json.js";
@@ -12,7 +13,8 @@ import { proveTest, repeatNewTests, proveModeFor, selfReferentialTests, proveFix
 import { runDiffCoverage } from "./diff-coverage.js";
 import { mutationGate } from "./mutation.js";
 import { scrubbedRunner } from "./exec.js";
-import { secretValues, scrubText } from "../bin/scrub-artifacts.js";
+import { SECRET_ENV, scrubText } from "../bin/scrub-artifacts.js";
+import { createBacklogIssueAndQueue } from "./harness-request.js";
 
 const LEVELS = ["fast", "full", "deep"];
 /**
@@ -63,7 +65,8 @@ export const unhandledReason = (code) => `command exited ${code} with 0 failing 
 export function unhandledGateLog(stderr, stdout, { env = process.env } = {}) {
   const text = String(stderr || "").trim() || String(stdout || "");
   const tail = text.split("\n").slice(-UNHANDLED_TAIL_LINES).join("\n");
-  return scrubText(tail, { secrets: secretValues(env) }).text.slice(-2000);
+  const secrets = SECRET_ENV.map((n) => env?.[n]).filter((v) => typeof v === "string" && v.length > 0);
+  return scrubText(tail, { secrets }).text.slice(-2000);
 }
 
 /**
@@ -95,10 +98,8 @@ export const DETAIL_MAX_SCAN_LINES = 2000;
 /** 런 레코드의 줄 접두사. 뒤는 **한 줄 JSON**이다 — Task 3의 harvester가 `/^gates-detail: (\{.*\})$/`로 읽는다. */
 export const GATES_DETAIL_PREFIX = "gates-detail: ";
 
-/**
- * `scrub-artifacts.js`가 유일한 규칙 출처다 — 이 파일은 자기 정규식도 자기 시크릿 목록도 만들지 않는다(#271 arch1: 목록은
- * `secretValues`). 이 파일의 기본값은 여기 남는다: env를 받지 못한 자리는 `env ?? process.env`로 잡의 env를 쓴다.
- */
+/** `scrub-artifacts.js`가 유일한 규칙 출처다 — 이 파일은 자기 정규식을 만들지 않는다. */
+const secretsFrom = (env) => SECRET_ENV.map((n) => (env ?? process.env)?.[n]).filter((v) => typeof v === "string" && v.length > 0);
 const scrubOne = (text, secrets, max) => scrubText(String(text ?? ""), { secrets }).text.slice(0, max);
 
 /**
@@ -163,7 +164,7 @@ export function parseFailingTests(text) {
 export function gateFailureSnippet(stdout, stderr, { env = process.env } = {}) {
   const text = [String(stdout ?? ""), String(stderr ?? "")].filter((s) => s.trim()).join("\n");
   const tail = text.split("\n").slice(-DETAIL_TAIL_LINES).join("\n");
-  return scrubText(tail, { secrets: secretValues(env ?? process.env) }).text.slice(-DETAIL_MAX_CHARS);
+  return scrubText(tail, { secrets: secretsFrom(env) }).text.slice(-DETAIL_MAX_CHARS);
 }
 
 /**
@@ -177,7 +178,7 @@ export function gateFailureSnippet(stdout, stderr, { env = process.env } = {}) {
 export function gateDetail({ gate, stdout = "", stderr = "", env } = {}) {
   try {
     const text = [String(stdout ?? ""), String(stderr ?? "")].join("\n");
-    const secrets = secretValues(env ?? process.env);
+    const secrets = secretsFrom(env);
     return {
       gate,
       failing: parseFailingTests(text).map((n) => scrubOne(n, secrets, DETAIL_MAX_NAME)),
@@ -234,7 +235,7 @@ export function attachGateDetails(result) {
 export function gatesDetailLines(result, { runId = null, runnerId = null, round = null } = {}) {
   try {
     const out = [];
-    const secrets = secretValues(process.env);
+    const secrets = secretsFrom();
     /**
      * 1.4.18 (KTB #38) — **test-env re-up 실패도 이 채널로 나간다.** 재-업이 실패하면 게이트는 하나도 돌지 않고
      * (`status: BLOCKED`, `gates: {}`) run 기록에는 산문 한 줄(`test-env: re-up failed — …`)만 남았다 — 루프의 수확기는
@@ -590,18 +591,18 @@ export async function runStageGates({ run: injectedRun, cwd, harness, stage, tie
          * 태어나 리허설 + 심사를 실은 문을 지나고, 거부되면 `factory-harness-not-queued` 코멘트를 단다.
          */
         try {
-          const n = await gh?.createIssue({ title, body: `Detected while implementing #${issue}. evidence: ${JSON.stringify(c.evidence)}`, labels: ["backlog", "factory:flaky"] });
-          result.flaky_issues.push(n);
-          if (n != null) {
-            const t = transitionIssue
-              ? await transitionIssue({ issue: n, to: "factory:queue", reason: `flaky test harvested while implementing #${issue}` })
-              : { ok: false, reason: "no transition wiring in this gate run — the issue stays in backlog" };
-            if (!t?.ok) {
-              (result.flaky_issues_backlogged ??= []).push({ issue: n, reason: t?.reason || "unknown" });
-              try { await gh?.comment(n, `<!-- factory-flaky-not-queued issue=${n} -->\n이 이슈는 \`backlog\`에 머물러 있습니다 — 큐 전이가 거부됐습니다: ${t?.reason || "unknown"}\n\n하네스를 러너에서 한 번 돌린 뒤(\`factory rehearse\`) \`/know-thy-build:next\`로 큐에 넣으세요(ADR-025).`); }
-              catch { /* 기록의 실패가 수확의 실패는 아니다 */ }
-            }
-          }
+          // #247 dw5 — the create-in-backlog → door → not-queued-comment tail is harness-request.js's single
+          // `createBacklogIssueAndQueue` (the one harness requests and retro promotions call), not a copy with its own marker.
+          const made = await createBacklogIssueAndQueue({
+            gh, title,
+            body: `Detected while implementing #${issue}. evidence: ${JSON.stringify(c.evidence)}`,
+            labels: ["backlog", "factory:flaky"],
+            reason: `flaky test harvested while implementing #${issue}`,
+            transitionIssue,
+            parkedFeature: false,
+          });
+          result.flaky_issues.push(made.issue);
+          if (!made.queued) (result.flaky_issues_backlogged ??= []).push({ issue: made.issue, reason: made.queue_reason });
         } catch (e) { result.flaky_issues.push(`error: ${e?.message || e}`); }
       }
       result.tests.failed = result.tests.failing.length;

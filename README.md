@@ -228,7 +228,8 @@ npx know-thy-build factory rehearse      # dispatches factory-rehearse.yml, wait
 The job runs what a stage runs, with no issue, no labels and no `claude -p`: `lint` (whole repo) · `unit`
 (full) · `test_files` on a real file from `[test].test_glob` · `test_one` on a real test name from that file ·
 `lint_file` on a source file · a write probe into `.factory/out/qa/` · the no-write clean check against the
-setup baseline · the prove-test machinery (base worktree + dependency install) · `gh api user`, the label list
+setup baseline · the prove-test machinery (base worktree + dependency install) · `gh api repos/{owner}/{repo}`
+(can the token gh holds reach this repository — `gh api user` is 403 for a GitHub App installation token), the label list
 and a `git push --dry-run` to a scratch branch. Every step is timed and capped; **one RED does not stop the
 rest** — the three-round bill came from finding the defects one at a time. The verdict is one markdown table
 in the job summary and in `.factory/out/rehearsal.json` (uploaded, scrubbed, 7 days).
