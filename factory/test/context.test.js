@@ -744,6 +744,130 @@ test("test_174_builder_context_takes_the_brief_bound_to_the_restart_transition",
   expect(loaded.k_restart_brief.paths).toEqual(["factory/lib/self-gate.js"]);
 });
 
+
+// ── #232 (gap P-6, E-7) — the issue's done_when checklist is the contract's origin ──────────────────
+// Real issue text, verbatim (CLAUDE.md SDD brief: "real issues with real text"): #200's body as GitHub
+// returns it, and #232's own body. Neither is hand-reduced — the parser must survive their prose, the
+// `(draft)` heading, the `must_not:` block after the checklist and the trailing quote line.
+const ISSUE_200_BODY = [
+  "[ready]",
+  "",
+  "## What",
+  "**`files_expected` 밖 경로의 \"Scope change\" 사유를 self-gate의 결정적 검사로 옮긴다** — retro 2026-10-03-1055·1431이 독립적으로 같은 제안(P1, `docs/factory/retro/2026-10-03-{1055,1431}.md`)을 냈다. 지금은 spec-conformance 리뷰어의 주의력(Lens 2)이 유일한 검사이고, 리뷰 로스터 전체(4~5 에이전트)를 한 라운드 돌린 뒤에야 잡힌다.",
+  "",
+  "1. `factory/lib/self-gate.js`: 새 검사 `scope`(기존 `gates`/`mutation`/`pins` 옆, 같은 finding 형식). 입력은 run-stage가 git으로 계산해 넘긴다: 이 라운드 diff의 변경 파일 목록(merge-base 대비, `--no-renames`), 각 파일의 **추가된 줄**, plan handoff의 `files_expected[]`(glob — `minimatch`류 새 의존성 없이 `lib`에 이미 있는 glob 매처를 쓴다), 이슈 번호.",
+  "   - 제외: 러너가 만드는 미러 경로(`MIRROR_FAMILIES`, `lib/mirror.js`)와 `docs/factory/runs/**`.",
+  "   - 규칙: `files_expected`에 매치되지 않는 경로 P마다, **P 자신의 추가된 줄** 중 `Scope change (#<issue>)`를 포함한 줄이 하나 이상 있어야 한다. P가 **삭제**된 파일이면 diff의 어느 추가된 줄이든 `Scope change (#<issue>)`와 P의 경로를 함께 담고 있으면 된다. 없으면 blocking finding `scope: <P> is outside files_expected and carries no \"Scope change (#<issue>)\" line`. 이 문장이 self-gate RED → 빌더가 리뷰에 가기 전에 자기 세션에서 고친다(기존 self-gate 루프 그대로).",
+  "   - `files_expected`가 비어 있거나 plan handoff가 없으면 검사를 건너뛰고 기록에 `scope: skipped — …` 한 줄(품질 보조이지 안전 장치가 아니다 — fail open).",
+  "2. `factory/bin/run-stage.js`: `makeSelfGateDep`에 위 입력을 더한다(#174의 `addedPathsNoRenames`·diff 읽기 재사용).",
+  "3. 빌더 프롬프트·에이전트 문서의 \"PR 본문에 Scope change\"(`templates/factory/claude/workflows/factory-implement.js:400`, `agents/factory-builder.md` Lens 5)는 **이 이슈 밖**(NEVER_AUTOMATE) — 운영 세션이 별도 PR로 \"diff 안에\"로 고친다. 이 이슈는 게이트만 넣는다.",
+  "",
+  "## Why",
+  "retro 두 번의 실측: #149(round 3)·#156(round 2)·#157(round 1·2)·#170(round 1)·#178 — 다섯 이슈에서 spec-conformance가 정확히 이 사유로 reject했고 매번 **리뷰 라운드 하나**(로스터 전체)를 먹었다. 검사 비용은 git diff 1회·토큰 0. 이미 저장소 코드가 이 규약을 쓰고 있다(`factory/bin/operator-merge-check.js:9`, `factory/lib/retro/issue-comments.js:618`, `factory/test/sweep-bin.test.js:184` — 전부 파일 머리의 `Scope change (#n): …` 줄).",
+  "",
+  "## Impact paths",
+  "- `factory/lib/self-gate.js`, `factory/bin/run-stage.js`",
+  "- `factory/test/self-gate.test.js`, `factory/test/run-stage.test.js`",
+  "",
+  "## done_when (draft)",
+  "- [ ] `test_200_scope_check_blocks_an_outside_path_without_a_scope_change_line` — `files_expected` 밖 경로에 `Scope change (#<issue>)` 줄이 없으면 blocking finding에 그 경로가 적히고, 같은 경로에 그 줄이 있으면 통과; `files_expected` 안의 경로는 줄이 없어도 통과 (level: fast)",
+  "- [ ] `test_200_scope_check_accepts_a_deleted_outside_path_named_elsewhere` — 삭제된 밖 경로는 diff의 다른 추가 줄이 `Scope change (#<issue>)`와 그 경로를 담으면 통과, 없으면 RED (level: fast)",
+  "- [ ] `test_200_scope_check_ignores_mirror_and_run_record_paths` — `MIRROR_FAMILIES`·`docs/factory/runs/**` 경로는 `files_expected` 밖이어도 검사 대상이 아니다 (level: fast)",
+  "- [ ] `test_200_scope_check_skips_without_files_expected` — plan handoff가 없거나 `files_expected`가 비면 finding 없이 기록 한 줄 `scope: skipped — …` (level: fast)",
+  "- [ ] `test_200_run_stage_feeds_scope_inputs_from_git` — `makeSelfGateDep`가 merge-base 대비 변경 파일·추가 줄·`files_expected`·이슈 번호를 `scope` 검사에 넘긴다(실제 git 저장소 픽스처) (level: fast)",
+  "",
+  "must_not:",
+  "- touch: `.github/**`, `factory/hooks/**`, `templates/factory/**`, `docs/factory/CHARTER.md`",
+  "- add: new dependency in `package.json`",
+  "",
+  "> 제출자: 운영 세션(에이전트). retro P1(2026-10-03 두 건) 채택. #199 뒤에 큐에 넣는다(self-gate.js·run-stage.js 겹침).",
+  "",
+  "",
+].join("\n");
+const ISSUE_232_BODY_FOR_PARSER = [
+  "[ready]",
+  "",
+  "## What",
+  "**이슈의 `done_when`은 계약의 원본이다** — 허점 원장 E-7(P-6), 소유자 결정 2026-10-11. plan 검증기가 \"plan 계약이 이슈의 done_when 항목을 빠짐없이 덮는가\"를 스크립트로 확인한다.",
+  "",
+  "1. `factory/lib/context.js`(또는 admission이 이미 쓰는 파서 옆): 이슈 본문의 `## done_when` 절에서 항목을 읽는다 — 체크리스트 항목(`- [ ]`/`- [x]`)마다 `id`(백틱 안 `test_…` 이름이 있으면 그것, 없으면 항목 순번 `issue-dw<n>`)와 `text`. 절이 없거나 비면 빈 배열.",
+  "2. `factory/lib/verify-stage.js` `validatePlanHandoff`: plan의 `done_when[]`이 이슈 항목을 **전부** 덮어야 한다 — 덮음 = plan 항목의 `check.ref`가 이슈 항목의 `test_…` id와 같거나, plan 항목에 `covers_issue: [\"issue-dw<n>\" | \"test_…\"]`(새 선택 필드)로 명시. 덮이지 않은 이슈 항목이 있으면 거부 사유 `issue done_when not covered by the plan: <id> — \"<text 앞 80자>\"` (수리 턴으로 간다). plan이 이슈에 없는 항목을 **더하는** 것은 허용(상한은 그대로).",
+  "3. `templates`의 plan 프롬프트는 이 이슈 밖(NEVER_AUTOMATE) — 운영 세션이 \"이슈의 done_when을 전부 덮고 `covers_issue`로 표시하라\"를 넣는다. 그 전까지는 `check.ref` 일치로만 덮임이 성립한다(이 저장소의 이슈는 전부 `test_<n>_…` id를 쓴다).",
+  "4. 이슈에 done_when 항목이 하나도 없으면(자기생성 이슈 등) 검사는 통과하고 기록에 `done_when: issue has no items — the plan's contract stands alone` 한 줄.",
+  "",
+  "## Why",
+  "원장 §1 E-7: admission은 done_when **제목**만 보고(`DONE_WHEN_RE`), plan 검증기는 이슈 본문을 거의 읽지 않아 초안이 비거나 어긋나면 plan이 계약을 통째로 발명한다 — 9월 베이스라인(`docs/factory/dogfood/2026-09-14-plan-baseline.md`) must_fix 15건 중 5건이 plan이 발명한 done_when에서 나왔다. 소유자: 이슈의 done_when은 초안이 아니라 **원본**이다.",
+  "",
+  "## Impact paths",
+  "- `factory/lib/context.js`, `factory/lib/verify-stage.js`, `factory/lib/admission.js`",
+  "- `factory/test/context.test.js`, `factory/test/verify-stage.test.js`",
+  "",
+  "## done_when (draft)",
+  "- [ ] `test_232_issue_done_when_items_are_parsed_with_test_ids` — 이 저장소의 실제 이슈 본문(#200 형식)에서 항목·id·text가 나오고, 절이 없으면 빈 배열 (level: fast)",
+  "- [ ] `test_232_plan_must_cover_every_issue_done_when_item` — 이슈 항목 셋 중 하나를 plan이 덮지 않으면 `validatePlanHandoff`가 그 id와 text로 거부; `check.ref` 일치 또는 `covers_issue`로 전부 덮이면 통과; plan이 더한 항목은 허용 (level: fast)",
+  "- [ ] `test_232_issue_without_done_when_items_passes_with_a_record_line` — 항목 0개면 통과 + 기록 한 줄 (level: fast)",
+  "",
+  "must_not:",
+  "- touch: `.github/**`, `factory/hooks/**`, `templates/factory/**`, `docs/factory/CHARTER.md`, `factory/lib/merge-stage.js`",
+  "",
+  "> 제출자: 운영 세션(에이전트). 허점 원장 P-6. plan 프롬프트 문장은 운영 세션 PR.",
+  "",
+].join("\n");
+
+test("test_232_issue_done_when_items_are_parsed_with_test_ids", async () => {
+  const { issueDoneWhenItems } = await import("../lib/context.js");
+
+  const items200 = issueDoneWhenItems(ISSUE_200_BODY);
+  expect(items200.map((i) => i.id)).toEqual([
+    "test_200_scope_check_blocks_an_outside_path_without_a_scope_change_line",
+    "test_200_scope_check_accepts_a_deleted_outside_path_named_elsewhere",
+    "test_200_scope_check_ignores_mirror_and_run_record_paths",
+    "test_200_scope_check_skips_without_files_expected",
+    "test_200_run_stage_feeds_scope_inputs_from_git",
+  ]);
+  // text is the item's prose after the backticked id and its separator — what the issue promises.
+  expect(items200[3].text).toBe("plan handoff가 없거나 `files_expected`가 비면 finding 없이 기록 한 줄 `scope: skipped — …` (level: fast)");
+  for (const it of items200) {
+    expect(it.text).toMatch(/\(level: fast\)$/);
+    expect(it.text.startsWith("`test_")).toBe(false);
+  }
+  // lines outside the section (the What list, the must_not block, the quote) never become items.
+  expect(items200.some((i) => /touch:|new dependency|제출자|새 검사/.test(i.text))).toBe(false);
+
+  const items232 = issueDoneWhenItems(ISSUE_232_BODY_FOR_PARSER);
+  expect(items232.map((i) => i.id)).toEqual([
+    "test_232_issue_done_when_items_are_parsed_with_test_ids",
+    "test_232_plan_must_cover_every_issue_done_when_item",
+    "test_232_issue_without_done_when_items_passes_with_a_record_line",
+  ]);
+  expect(items232[2].text).toBe("항목 0개면 통과 + 기록 한 줄 (level: fast)");
+
+  // An item with no backticked test_ name is named by its position; `- [x]` counts; plain bullets do
+  // not; the section ends at the next heading.
+  const mixed = [
+    "## done_when",
+    "- [x] `test_9_first` — the first",
+    "- a plain bullet is not an item",
+    "- [ ] the export button downloads a CSV with a header row",
+    "* [X] `test_9_third`: the third",
+    "",
+    "## Notes",
+    "- [ ] `test_9_not_in_section` — under another heading",
+  ].join("\n");
+  expect(issueDoneWhenItems(mixed)).toEqual([
+    { id: "test_9_first", text: "the first" },
+    { id: "issue-dw2", text: "the export button downloads a CSV with a header row" },
+    { id: "test_9_third", text: "the third" },
+  ]);
+
+  // no section, an empty section, a section with no checklist items, no body at all → []
+  expect(issueDoneWhenItems("## What\n- [ ] `test_9_x` — not under done_when\n")).toEqual([]);
+  expect(issueDoneWhenItems("## done_when\n\n## Why\nbecause\n")).toEqual([]);
+  expect(issueDoneWhenItems("## done_when\n- the plan decides\n- prose only\n")).toEqual([]);
+  expect(issueDoneWhenItems(undefined)).toEqual([]);
+  expect(issueDoneWhenItems("")).toEqual([]);
+});
+
 // ── #233 → #254 (gap P-12 / ledger M-6) — triage 검증이 올린 tier를 plan·review·merge가 따른다 ─────────
 // plan 시점에는 diff가 없어 바닥이 docs(또는 null)이다 — 그래서 triage 검증이 impact_paths로 올린 tier
 // (handoff의 `tier`, 신고는 `tier_declared`)가 모든 스테이지의 입력으로 남아야 한다. diff가 생긴 뒤에도 내려가지 않는다.
