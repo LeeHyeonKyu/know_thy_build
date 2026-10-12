@@ -10788,6 +10788,59 @@ test("test_199_restart_round_does_not_double_report (restart-brief skipped becau
   }
 });
 
+// dw6, "Mirror copies of either produce no finding" (verifier, round 2): in an engine checkout the runner's mirror commit copies the
+// builder's new file and new export into `.factory/lib/**` before the self-gate runs. In a K-restart round, on both branches (restart-
+// brief ran / skipped because its input errored), the mirror copies add no finding — not from restart-brief, not from rework-scope —
+// so the findings are exactly those of the builder paths. The mirror commits are made by the production mirror step, as in dw1.
+test("test_199_restart_round_does_not_double_report (runner mirror copies in a restart round produce no finding)", async () => {
+  const repo = await reworkRepo199();
+  const origin = mkdtempSync(join(tmpdir(), "fq199-origin-"));
+  await realRun199("git", ["init", "-q", "--bare", origin], { cwd: origin });
+  await repo.git("remote", "add", "origin", origin);
+  for (const f of ["manifest.js", "install.js", "init.js"]) repo.put(`factory/cli/${f}`, "// stub\n");
+  mkdirSync(join(repo.root, ".factory"), { recursive: true });
+  await repo.commit("engine checkout markers");
+  const mirror = async () => {
+    const m = await mirrorStep199({ root: repo.root, run: realRun199, mode: "commit", regenerate: (o) => regenerateMirror199({ ...o, importer: mirrorImporter199 }) });
+    expect(m, m.reason).toMatchObject({ ok: true });
+    expect(await repo.git("log", "-1", "--format=%an")).toBe("factory-runner");
+    return m.changed;
+  };
+  await mirror();
+  const reviewed = await repo.git("rev-parse", "HEAD");
+  const review = reviewHandoff199({ head: reviewed, where: ["factory/lib/self-gate.js:40"] });
+
+  repo.put("factory/lib/second-parser.js", repo.lines("s") + "export function parseAgain() { return 3; }\n");
+  repo.append("factory/lib/old-parser.js", "export const parseTwo = 2;\n");
+  await repo.commit("restart round: a new file and a new export outside both");
+  expect(await mirror()).toEqual([".factory/lib/old-parser.js", ".factory/lib/second-parser.js"]);
+  expect((await repo.git("diff", "--name-status", "--no-renames", `${reviewed}...HEAD`)).split("\n").sort()).toEqual([
+    "A\t.factory/lib/second-parser.js", "A\tfactory/lib/second-parser.js", "M\t.factory/lib/old-parser.js", "M\tfactory/lib/old-parser.js",
+  ]);
+
+  const ran = { pr: 31, head: reviewed, scope: K_RESTART_SCOPE, paths: ["factory/lib/self-gate.js"], findings: [] };
+  const skipped = { pr: 31, head: "zzz", scope: K_RESTART_SCOPE, paths: ["factory/lib/self-gate.js"], findings: [] };
+  const cases = [
+    ["restart-brief ran", ran, [
+      "restart-brief: new file outside the restart brief: factory/lib/second-parser.js",
+      "rework-scope: new export outside the review findings: parseTwo in factory/lib/old-parser.js",
+    ]],
+    ["restart-brief skipped (input errored)", skipped, [
+      "restart-brief: restart brief unusable",
+      "rework-scope: new export outside the review findings: parseTwo in factory/lib/old-parser.js",
+      "rework-scope: new file outside the review findings: factory/lib/second-parser.js",
+    ]],
+  ];
+  for (const [name, brief, expected] of cases) {
+    const r = await dep199(repo, ctx199({ review, restart: brief }), { rounds: 4 })({ gates: GREEN_199 });
+    expect(r.ranChecks, name).toEqual(expect.arrayContaining(["restart-brief", "rework-scope"]));
+    expect(r.ok, name).toBe(false);
+    const blocking = r.findings.filter((f) => f.blocking).map((f) => `${f.check}: ${head199(f)}`).sort();
+    expect(blocking, name).toEqual(expected);
+    expect(r.findings.filter((f) => f.detail.includes(".factory/lib/")), name).toEqual([]);
+  }
+});
+
 // dw4, the runner-written half: an id that appears only on a runner-written path (a mirror copy, a run record) is not RED — even
 // with a harness whose test_glob reaches those paths, so the exemption is `runnerWrittenPath` in the judge, not the glob's reach.
 // The same id on a builder path is RED.

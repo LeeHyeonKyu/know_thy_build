@@ -282,7 +282,9 @@ export async function runSelfGate({
       const allowed = (Array.isArray(restartBrief.paths) ? restartBrief.paths : []).filter((p) => typeof p === "string" && p);
       // exact paths only — a directory or a prose token in the allow-list must never admit every file under it
       const inBrief = (f) => allowed.includes(f);
+      // #199 dw6 — a runner-written path (the mirror commit's `.factory/lib|bin/**` copy) is not a builder addition: no finding
       for (const f of Array.isArray(restartBrief.newFiles) ? restartBrief.newFiles : []) {
+        if (typeof f === "string" && runnerWrittenPath(f)) continue;
         if (!inBrief(f)) findings.push({ check: "restart-brief", blocking: true, detail: `new file outside the restart brief: ${f}` });
       }
     }
