@@ -56,7 +56,8 @@ export async function main(argv) {
     case "bootstrap": return (await import("./bootstrap.js")).bootstrapCommand({ root, argv: rest, io });
     // rehearse는 doctor처럼 실주입이 필요하다 — 이 명령의 일은 러너에 주문을 넣고 결과를 가져오는 것이다.
     case "rehearse": return (await import("./rehearse.js")).rehearseCommand({ argv: rest, io, run: realRun });
-    case "run": return (await import("./run.js")).runCommand({ root, argv: rest, io });
+    // #236 dw4 — env를 명시로 넘긴다: runCommand는 env를 주입받지 못하면 로컬 merge를 거부한다(러너가 아님을 증명할 재료가 없다).
+    case "run": return (await import("./run.js")).runCommand({ root, argv: rest, io, env: process.env });
     case "status": return (await import("./status.js")).statusCommand({ root, argv: rest, io });
     // analyze는 status처럼 읽기 전용이다 — `run`은 gh 호출(코멘트·records 브랜치 내용)에만 쓰이고,
     // `--health`는 Task 4의 집계를 **지연 import**한다(그 파일이 없는 설치에서도 이 명령은 산다).

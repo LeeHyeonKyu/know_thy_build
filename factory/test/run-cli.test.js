@@ -39,11 +39,9 @@ test("stage merge → error, runs only in CI, exit 1, no side effects", async ()
   const { io: i, o } = io();
   const run = vi.fn();
   const spawnInherit = vi.fn();
-  // #236 dw4 (rework spec1/qa1, the issue's own instruction "merge는 로컬 금지 → 운영 세션에서만 로컬 허용"): plain merge now runs
-  // locally off a runner, so this refusal holds on a runner only — env is injected and the pinned text is the runner refusal.
-  const code = await runCommand({ root, argv: ["merge", "5"], io: i, run, spawnInherit, env: { GITHUB_ACTIONS: "true" } });
+  const code = await runCommand({ root, argv: ["merge", "5"], io: i, run, spawnInherit });
   expect(code).toBe(1);
-  expect(o.err.join("\n")).toContain("merge runs locally only from an operator session");
+  expect(o.err.join("\n")).toContain("merge runs only in CI (branch protection)");
   expect(run).not.toHaveBeenCalled();
   expect(spawnInherit).not.toHaveBeenCalled();
 });
@@ -294,4 +292,19 @@ test("test_236_plain_merge_runs_locally_off_a_runner_and_is_refused_on_one", asy
     expect(run).not.toHaveBeenCalled();
     expect(spawn).not.toHaveBeenCalled();
   }
+  // The real entry (`factory run merge <n>` through cli/index.js) injects the env, so the operator gets the runner refusal above —
+  // never the un-injected caller's "runs only in CI" refusal. Driven under GITHUB_ACTIONS=true so nothing can spawn.
+  const saved = process.env.GITHUB_ACTIONS;
+  process.env.GITHUB_ACTIONS = "true";
+  const errs = [];
+  const spy = vi.spyOn(console, "error").mockImplementation((s) => { errs.push(String(s)); });
+  try {
+    const { main } = await import("../cli/index.js");
+    expect(await main(["run", "merge", "5"])).toBe(1);
+  } finally {
+    spy.mockRestore();
+    if (saved === undefined) delete process.env.GITHUB_ACTIONS; else process.env.GITHUB_ACTIONS = saved;
+  }
+  expect(errs.join("\n")).toMatch(/GITHUB_ACTIONS is set/);
+  expect(errs.join("\n")).not.toMatch(/runs only in CI|--remote/);
 });

@@ -26,7 +26,8 @@ const defaultSpawnInherit = (cmd, args, opts) => spawnSync(cmd, args, { ...opts,
  * 작업을 하므로 캡처하지 않고 사람이 실시간으로 본다. `FACTORY_LOCAL_ENTRY=1`을 심어 run-stage.js의
  * triage가 "락을 먼저 잡고 큐잉은 나중에" 경로(§4.2.5)를 타게 한다(retro는 이 env를 보지 않는다).
  */
-export async function runCommand({ root, argv = [], io, run = realRun, spawnInherit = defaultSpawnInherit, env = process.env, resolveRepo = realResolveRepo }) {
+export async function runCommand({ root, argv = [], io, run = realRun, spawnInherit = defaultSpawnInherit, env: injectedEnv, resolveRepo = realResolveRepo }) {
+  const env = injectedEnv ?? process.env;
   // 플래그는 **위치에 상관없이** 플래그다(KTB-10 M7). 예전에는 `argv[0]`·`argv[1]`을 그대로 스테이지·
   // 이슈로 읽어서 `factory run --remote plan 5`가 stage="--remote"로 usage를 뱉었다 — 사람이 실제로
   // 그렇게 친다(sweeper가 하는 일을 손으로 할 때 `--remote`를 먼저 쓰는 게 자연스럽다).
@@ -62,6 +63,9 @@ export async function runCommand({ root, argv = [], io, run = realRun, spawnInhe
   // #236 dw4 (ADR-044) — "merge는 로컬 금지"가 "merge는 운영 세션에서만 로컬 허용"이 됐다: 러너가 아니면 plain `factory run merge <n>`이
   // 로컬 merge를 돌린다. 러너(`GITHUB_ACTIONS`가 env에 있으면 — 빈 값도 러너다, sec1)에서는 거부한다 — 스테이지는 운영자가 아니다.
   // run-stage도 같은 조건을 다시 보고, 행위자가 사람 계정인지까지 확인한다(makeOperatorMergeDeps).
+  // env를 주입하지 않은 호출자는 러너가 아님을 증명하지 못한다 — process.env로 추측하지 않고 예전 거부를 그대로 낸다(fail-closed;
+  // integrityCommand와 같은 규칙). 실제 진입점 cli/index.js는 env를 명시로 넘기므로 운영자는 이 문구를 보지 않는다.
+  if (stage === "merge" && injectedEnv === undefined) { io.err("merge runs only in CI (branch protection) for a caller that injects no env — the local operator merge needs the caller's env (cli/index.js passes it). Nothing was merged."); return 1; }
   if (stage === "merge" && env?.GITHUB_ACTIONS !== undefined) { io.err("factory run merge refused — GITHUB_ACTIONS is set, so this is a CI runner: merge runs locally only from an operator session (ADR-044), and a stage is never the operator. Nothing was merged."); return 1; }
   if (!isRetro && !STAGES.includes(stage) && stage !== "merge") { io.err(USAGE); return 1; }
   let issue = 0;
