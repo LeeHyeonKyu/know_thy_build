@@ -1,45 +1,44 @@
 # Retro State
 
-- last retro: 2026-10-12T14:19:32.174Z
+- last retro: 2026-10-12T15:05:51.211Z
 - merges since last retro: 0
-- current N: 1
+- current N: 2
 
 ## History (last 5)
 
 | at | yield | n_before | n_after | needs_human_since |
 | --- | --- | --- | --- | --- |
-| 2026-10-12T05:40:12.734Z | 0 | 1 | 2 | 0 |
 | 2026-10-12T08:34:05.316Z | 0 | 2 | 1 | 2 |
 | 2026-10-12T10:20:44.131Z | 0 | 1 | 2 | 0 |
 | 2026-10-12T12:10:57.026Z | 0 | 2 | 1 | 2 |
 | 2026-10-12T14:19:32.174Z | 0 | 1 | 1 | 2 |
+| 2026-10-12T15:05:51.211Z | 0 | 1 | 2 | 0 |
 
 ## Stats
 
 | metric | this window | cumulative |
 | --- | --- | --- |
-| merged | 2 | 33 |
-| review rounds avg | 1.5 | 1.55 |
-| rounds/issue (plan/impl/review) | 1.5 / 2 / 1.5 | 1.24 / 2 / 1.55 |
-| escaped defects | 2 (#244×1, #199×1) | 30 |
-| revert rate | 0.00 (0/2) | 0.00 (0/33) |
-| needs-human | 2 | 98 |
-| rejects by role | correctness 2, qa 1 | spec-conformance 12, qa 5, correctness 16, architecture 7, security 5 |
-| reviewer overlap | 0.33 (1/3, runs 4) | 0.49 (24/49, runs 72) |
-| unique findings by role | correctness 1, qa 1 | spec-conformance 5, qa 5, correctness 7, architecture 4, security 4 |
-| qa na ratio | 0.67 (4/6 claims, na-heavy 1/1 approvals) | 0.23 (79/344 claims, na-heavy 11/51 approvals) |
-| cost (usd) | 31.53 | 1497.00 |
-| tokens | input 859675 / output 67777 | input 37668486 / output 3086640 |
-| retro cost (usd) | 1.05 | 21.73 |
-| retro tokens | input 4 / output 2808 | input 66 / output 50853 |
-| full retros | — | 18 |
+| merged | 1 | 34 |
+| review rounds avg | 2 | 1.56 |
+| rounds/issue (plan/impl/review) | 1 / 2 / 2 | 1.23 / 2 / 1.56 |
+| escaped defects | 1 (#299×1) | 31 |
+| revert rate | 0.00 (0/1) | 0.00 (0/34) |
+| needs-human | 0 | 98 |
+| rejects by role | correctness 1 | spec-conformance 12, qa 5, correctness 17, architecture 7, security 5 |
+| reviewer overlap | 1.00 (1/1, runs 2) | 0.50 (25/50, runs 74) |
+| unique findings by role | 없음 | spec-conformance 5, qa 5, correctness 7, architecture 4, security 4 |
+| qa na ratio | 0.00 (0/7 claims, na-heavy 0/1 approvals) | 0.23 (79/351 claims, na-heavy 11/52 approvals) |
+| cost (usd) | 9.73 | 1506.73 |
+| tokens | input 391431 / output 34941 | input 38059917 / output 3121581 |
+| retro cost (usd) | 1.75 | 23.48 |
+| retro tokens | input 4 / output 2347 | input 70 / output 53200 |
+| full retros | — | 19 |
 
 ### Rounds per issue (this window)
 
 | issue | plan | implement | review | escaped |
 | --- | --- | --- | --- | --- |
-| #244 | 1 | 2 | 2 | 1 |
-| #199 | 2 | 2 | 1 | 1 |
+| #299 | 1 | 2 | 2 | 1 |
 
 ### Phase-2 gate baseline (this session)
 
@@ -53,11 +52,11 @@
 ```json
 {
   "cursor": {
-    "last_retro_at": "2026-10-12T14:19:32.174Z",
+    "last_retro_at": "2026-10-12T15:05:51.211Z",
     "last_record_offsets": {}
   },
   "merges_since": 0,
-  "n": 1,
+  "n": 2,
   "history": [
     {
       "at": "2026-09-14T14:00:58.920Z",
@@ -1071,6 +1070,60 @@
       ],
       "n_before": 1,
       "n_after": 1
+    },
+    {
+      "at": "2026-10-12T15:05:51.211Z",
+      "yield": 0,
+      "needs_human_since": 0,
+      "applied": [
+        {
+          "step": "feedback-route",
+          "issues": [
+            299
+          ],
+          "actions": [
+            {
+              "kind": "warning",
+              "step": "feedback-route",
+              "login": "LeeHyeonKyu",
+              "current": "ktb-factory[bot]",
+              "reason": "current factory identity: ktb-factory[bot] (machine user/app, FACTORY_BOT_LOGIN); older runs in this window ran under a shared identity (LeeHyeonKyu) — their human decisions are unverifiable, nothing to register"
+            }
+          ]
+        },
+        {
+          "step": "lessons:plan-operator",
+          "added": [
+            "L-2026-10-12-01"
+          ],
+          "rejected": [],
+          "evicted": [],
+          "cited": []
+        },
+        {
+          "step": "role:plan-operator",
+          "added": [
+            {
+              "section": "### 좋은 발견",
+              "text": "위치: `templates/factory/claude/workflows/factory-review.js`만 바꾸는 계획(#244). 주장: 이 계획이 머지되어도 이 저장소의 review 스테이지는 새 필드를 내지 않는다. 러너가 실행하는 것은 설치본 `.claude/workflows/factory-review.js`이고, 그 파일은 미러가 다시 만들지 않으며 빌더가 쓸 수도 없다. 근거: #244가 머지된 커밋 9efbb8a에서 돈 #299의 review 라운드 두 번(runs/299.md:106·138, :185·220)이 여전…"
+            }
+          ],
+          "skipped": [],
+          "deferred": []
+        },
+        {
+          "step": "publish-lessons",
+          "pr": 224,
+          "merged": false,
+          "reason": "gh pr merge failed (1): X Pull request LeeHyeonKyu/know_thy_build#224 is not mergeable: the base branch policy prohibits the merge.\nTo have the pull request merged after all the requirements have been met, add the `--auto` flag.\nTo use administrator privileges to immediately merge the pull request, add the `--admin` flag.",
+          "files": [
+            ".factory/lessons/plan-operator.md",
+            ".claude/agents/plan-operator.md"
+          ]
+        }
+      ],
+      "n_before": 1,
+      "n_after": 2
     }
   ],
   "candidates": {
@@ -2114,6 +2167,14 @@
           199
         ],
         "source": "must_fix"
+      },
+      {
+        "role": "correctness",
+        "text": "Downgrading the workflow's surviving sign-off objection from medium to low turns off the engine's run-record line for every real objection. ADR-042 lists three things that replace the human escalation, and the run-record line `plan: unresolved sign-off objection from <role>: …` is one of them. After this change it is never written for a workflow-produced objection. The reason the code comment gives for the downgrade is also no longer true: it says a medium `signoff-<role>` 'was always rejected and forced a repair turn'. Since #239 the validator exempts an exact `signoff-<role>` entry at any severity.",
+        "runs": [
+          299
+        ],
+        "source": "must_fix"
       }
     ],
     "examples": [
@@ -2476,6 +2537,33 @@
           299
         ],
         "source": "dissent"
+      },
+      {
+        "role": "skeptic",
+        "kind": "good",
+        "text": "The veto skip is aimed at exactly the wrong PRs. In factory/lib/merge-stage.js:1346-1355 the veto window runs only inside `if (selfPath)`, so ordinary approved PRs never wait today, and the skip's whole effect is to remove the owner's 15-minute veto (CHARTER veto_minutes, fa600c2; CLAUDE.md §3) on PRs that change the factory's own judging, with no CHARTER edit, through an agent session ('제출자: 운영 세션(에이전트)') running a human token. Smaller alternative: in operator mode a selfPath PR takes a named refusal that hands the merge to a person (handToHuman, as at merge-stage.js:1327); non-selfPath PRs run the full merge stage locally with no new `operatorPresent` dep.",
+        "runs": [
+          236
+        ],
+        "source": "dissent"
+      },
+      {
+        "role": "skeptic",
+        "kind": "good",
+        "text": "The L0 required context `factory/integrity` is not tied to an app (factory/lib/bootstrap.js:152), so a commit status from any statuses:write token satisfies branch protection. The `GITHUB_ACTIONS` refusal is an env check that any local agent session can skip, and a human-account or login-match check is passed by an agent running the owner's gh token.",
+        "runs": [
+          236
+        ],
+        "source": "dissent"
+      },
+      {
+        "role": "product-advocate",
+        "kind": "good",
+        "text": "In a truly Actions-less repo, H1b (factory/lib/merge-stage.js:83-102, 'forged review signal') refuses review/gates posted by the operator's token, so the local merge can always stop there until P-7a decides who posts them; the refusal must be named on stderr and point the operator to the next step, not look like a silent failure.",
+        "runs": [
+          236
+        ],
+        "source": "dissent"
       }
     ],
     "flaky": [],
@@ -2743,32 +2831,22 @@
     ]
   },
   "stats": {
-    "merged": 2,
-    "review_rounds_avg": 1.5,
-    "plan_rounds_avg": 1.5,
+    "merged": 1,
+    "review_rounds_avg": 2,
+    "plan_rounds_avg": 1,
     "implement_rounds_avg": 2,
     "rounds_per_issue": [
       {
-        "issue": 244,
+        "issue": 299,
         "plan": 1,
         "implement": 2,
         "review": 2
-      },
-      {
-        "issue": 199,
-        "plan": 2,
-        "implement": 2,
-        "review": 1
       }
     ],
-    "escaped_defects": 2,
+    "escaped_defects": 1,
     "escaped_defects_detail": [
       {
-        "issue": 244,
-        "count": 1
-      },
-      {
-        "issue": 199,
+        "issue": 299,
         "count": 1
       }
     ],
@@ -2776,57 +2854,53 @@
     "reverted_issues": [],
     "revert_rate": 0,
     "rejects_by_role": {
-      "correctness": 2,
-      "qa": 1
+      "correctness": 1
     },
-    "review_runs": 4,
-    "findings_total": 3,
+    "review_runs": 2,
+    "findings_total": 1,
     "overlapping_findings": 1,
-    "unique_findings_by_role": {
-      "correctness": 1,
-      "qa": 1
-    },
-    "overlap_ratio": 0.33,
-    "needs_human": 2,
+    "unique_findings_by_role": {},
+    "overlap_ratio": 1,
+    "needs_human": 0,
     "qa_approvals": 1,
-    "qa_claims_total": 2,
-    "qa_na_total": 4,
-    "qa_na_ratio": 0.67,
-    "qa_na_heavy_approvals": 1,
+    "qa_claims_total": 7,
+    "qa_na_total": 0,
+    "qa_na_ratio": 0,
+    "qa_na_heavy_approvals": 0,
     "usage": {
-      "cost_usd": 31.531539,
+      "cost_usd": 9.727036,
       "tokens": {
-        "input": 859675,
-        "output": 67777
+        "input": 391431,
+        "output": 34941
       }
     },
     "retro_usage": {
-      "cost_usd": 1.050361,
+      "cost_usd": 1.754796,
       "tokens": {
         "input": 4,
-        "output": 2808
+        "output": 2347
       }
     }
   },
   "stats_total": {
-    "merged": 33,
-    "review_rounds_avg": 1.55,
-    "plan_rounds_avg": 1.24,
+    "merged": 34,
+    "review_rounds_avg": 1.56,
+    "plan_rounds_avg": 1.23,
     "implement_rounds_avg": 2,
-    "escaped_defects": 30,
+    "escaped_defects": 31,
     "reverts": 0,
     "reverted_issues": [],
     "revert_rate": 0,
     "rejects_by_role": {
       "spec-conformance": 12,
       "qa": 5,
-      "correctness": 16,
+      "correctness": 17,
       "architecture": 7,
       "security": 5
     },
-    "review_runs": 72,
-    "findings_total": 49,
-    "overlapping_findings": 24,
+    "review_runs": 74,
+    "findings_total": 50,
+    "overlapping_findings": 25,
     "unique_findings_by_role": {
       "spec-conformance": 5,
       "qa": 5,
@@ -2834,28 +2908,28 @@
       "architecture": 4,
       "security": 4
     },
-    "overlap_ratio": 0.49,
+    "overlap_ratio": 0.5,
     "needs_human": 98,
-    "qa_approvals": 51,
-    "qa_claims_total": 265,
+    "qa_approvals": 52,
+    "qa_claims_total": 272,
     "qa_na_total": 79,
     "qa_na_ratio": 0.23,
     "qa_na_heavy_approvals": 11,
     "usage": {
-      "cost_usd": 1497.003102,
+      "cost_usd": 1506.730138,
       "tokens": {
-        "input": 37668486,
-        "output": 3086640
+        "input": 38059917,
+        "output": 3121581
       }
     },
     "retro_usage": {
-      "cost_usd": 21.726342,
+      "cost_usd": 23.481138,
       "tokens": {
-        "input": 66,
-        "output": 50853
+        "input": 70,
+        "output": 53200
       }
     },
-    "retros": 18
+    "retros": 19
   },
   "deferred_proposals": [],
   "deletion_candidates": []
