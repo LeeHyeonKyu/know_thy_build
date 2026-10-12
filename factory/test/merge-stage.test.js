@@ -4294,7 +4294,8 @@ const OPERATOR_OK_236 = () => vi.fn(async () => ({ ok: true, reasons: [], actor:
 /** The self-change fixture (the only path that has a window today) in operator mode — no clock, no job budget wired. */
 const operatorD236 = (over = {}) => selfD179({ operatorPresent: true, operatorMergeCheck: OPERATOR_OK_236(), jobStartedAt: undefined, jobTimeoutMinutes: undefined, ...over });
 const windowUntouched236 = (d, at) => {
-  for (const dep of [d.vetoWindow.open, d.vetoWindow.read, d.vetoLabel, d.sleep]) expect(dep, at).not.toHaveBeenCalled();
+  for (const dep of [d.vetoWindow.open, d.vetoWindow.read, d.sleep]) expect(dep, at).not.toHaveBeenCalled();
+  expect(d.vetoLabel.mock.calls.length, at).toBeLessThanOrEqual(1);   // sec1: one read of the standing label, never a poll
   expect(d.comment.mock.calls.some(([, body]) => /거부권 창/.test(String(body))), at).toBe(false);
 };
 const refusedNoMerge236 = (d, lines, at, why) => {
@@ -4409,4 +4410,54 @@ test("test_236_operator_present_skips_only_the_veto_window — and the local mer
   expect(await run(still, makeRecord())).toBe(0);
   expect(still.mergePr.mock.calls).toEqual([[9, { matchHeadCommit: HEAD }]]);
   expect(merged).toEqual([HEAD]);
+});
+
+// sec1 (rework) — skipping the WAIT must not skip the owner's STANDING `factory:veto`. The label is read once, through the real
+// producer (run-stage `makeMergeSelfChangeDeps().vetoLabel`) over a fake gh: only a label that is on the issue now stops the merge.
+import { makeMergeSelfChangeDeps as makeMergeSelfChangeDeps236 } from "../bin/run-stage.js";
+import { VETO_LABEL as VETO_LABEL236 } from "../lib/label-catalog.js";
+
+test("test_236_operator_present_skips_only_the_veto_window — and a standing factory:veto on the issue still stops a local merge", async () => {
+  const OLD = "2026-09-01T00:00:00.000Z";   // the label event predates this run (attached before anyone asked for the merge)
+  const realVeto = (labels) => {
+    const gh = { labelEvents: vi.fn(async () => [{ login: "owner", at: OLD }]), issue: vi.fn(async () => ({ labels })) };
+    return { gh, vetoLabel: vi.fn(makeMergeSelfChangeDeps236({ gh, issue: 7 }).vetoLabel) };
+  };
+  for (const route of ["non_judge", "judge"]) {
+    const judge = route === "judge"
+      ? { protectedPaths: vi.fn(async () => ({ ok: true, files: BASE_FIXTURES_179.judge.files })), selfChange: { auto_merge_non_judge: false, auto_merge_judge: true, veto_minutes: 60 }, reviewRoster: vi.fn(async () => ({ ok: true, roles: ["correctness", "qa"], tier: "load-bearing" })) }
+      : {};
+    // (a) the owner's label stands on #7 → refused, handed to a person, nothing merged, and still no window, no wait.
+    {
+      const { gh, vetoLabel } = realVeto(["factory:approved", VETO_LABEL236]);
+      const d = operatorD236({ ...judge, vetoLabel });
+      const { code, lines } = await run179(d);
+      expect(code, route).toBe(2);
+      refusedNoMerge236(d, lines, route, /vetoed by @owner/);
+      expect(d.transition.mock.calls.map((x) => x[0].to), route).toContain("factory:needs-human");
+      expect(gh.issue, route).toHaveBeenCalled();
+      expect(vetoLabel, route).toHaveBeenCalledTimes(1);                          // one read, not a poll
+      for (const dep of [d.vetoWindow.open, d.vetoWindow.read, d.sleep]) expect(dep, route).not.toHaveBeenCalled();
+      expect(lines.some((l) => l.startsWith("local-merge ")), route).toBe(false);
+    }
+    // (b) the label was attached once and removed before the merge → only a STANDING veto counts here: the merge goes through.
+    {
+      const { vetoLabel } = realVeto(["factory:approved"]);
+      const d = operatorD236({ ...judge, vetoLabel });
+      const { code, lines } = await run179(d);
+      expect(code, route).toBe(0);
+      expect(d.mergePr, route).toHaveBeenCalledTimes(1);
+      expect(vetoLabel, route).toHaveBeenCalledTimes(1);
+      expect(d.vetoLabel.mock.invocationCallOrder[0], route).toBeLessThan(d.mergePr.mock.invocationCallOrder[0]);
+      expect(lines, route).toContain(`local-merge pr=9 sha=${HEAD} actor=alice veto=skipped`);
+    }
+  }
+  // (c) the label cannot be read → not "no veto": blocked, nothing merged.
+  for (const [label, vetoLabel] of [["ok:false", vi.fn(async () => ({ ok: false, reason: "label events unreadable" }))], ["throws", vi.fn(async () => { throw new Error("socket hang up"); })], ["unwired", undefined]]) {
+    const d = operatorD236({ vetoLabel });
+    const { code, lines } = await run179(d);
+    expect(code, label).toBe(2);
+    refusedNoMerge236(d, lines, label, /standing factory:veto could not be computed/);
+    expect(d.transition.mock.calls.map((x) => x[0].to), label).toContain("factory:blocked");
+  }
 });

@@ -11003,7 +11003,8 @@ test("test_236_local_merge_runs_merge_stage_with_the_operator_token_and_no_veto_
     expect(code).toBe(0);
     expect(d.mergePr).toHaveBeenCalledTimes(1);
     expect(d.transition.mock.calls.map((c) => c[0].to)).toEqual(["factory:merged"]);
-    for (const dep of [d.vetoWindow.open, d.vetoWindow.read, d.vetoLabel, d.sleep]) expect(dep).not.toHaveBeenCalled();
+    for (const dep of [d.vetoWindow.open, d.vetoWindow.read, d.sleep]) expect(dep).not.toHaveBeenCalled();
+    expect(d.vetoLabel).toHaveBeenCalledTimes(1);   // sec1: one read of the standing factory:veto, never a poll
     const audit = `local-merge pr=9 sha=${HEAD_236} actor=alice veto=skipped`;
     expect(sink).toContain(audit);
     expect(log).toContain(audit);
@@ -11210,6 +11211,7 @@ test("test_236_local_merge_one_run_through_run_stage_with_mains_wiring", async (
     setStatus: vi.fn(async () => {}),
     labelEvents: vi.fn(async () => []),
     issueLabels: vi.fn(async () => []),
+    issue: vi.fn(async () => ({ labels: ["factory:approved"] })),   // sec1: the standing-veto read (no factory:veto on the issue)
   };
   // (b) The two dep sets the composition merges never write the same key — their order cannot silently drop one.
   const operatorKeys = Object.keys(makeOperatorMergeDeps236({ stage: "merge", env: { [OPERATOR_MERGE_ENV236]: "1" }, gh, run: prViewRun236(prJson236()) }));
@@ -11352,6 +11354,7 @@ test("test_236_local_merge_runs_merge_stage_with_the_operator_token_and_no_veto_
       mergePr: vi.fn(async () => {}),
       labelEvents: vi.fn(async () => []),
       issueLabels: vi.fn(async () => []),
+      issue: vi.fn(async () => ({ labels: ["factory:approved"] })),   // sec1: the standing-veto read (no factory:veto on the issue)
     };
   };
   const compose = ({ gh, env, sink, log, operator, protectedFiles }) => {
@@ -11432,6 +11435,7 @@ test("test_236_local_merge_runs_merge_stage_with_the_operator_token_and_no_veto_
       mergePr: vi.fn(async () => {}),
       labelEvents: vi.fn(async () => []),
       issueLabels: vi.fn(async () => []),
+      issue: vi.fn(async () => ({ labels: ["factory:approved"] })),   // sec1: the standing-veto read (no factory:veto on the issue)
     };
   };
   // main()'s composition, field for field where it decides who the factory is: no factoryLogins fake on either side.
