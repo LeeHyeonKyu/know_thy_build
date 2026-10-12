@@ -13,7 +13,7 @@ import { backPressure } from "../lib/back-pressure.js";
 import { runStageGates, verdictLine, gatesDetailLines, commitStatusState, maxTier } from "../lib/gates.js";
 import { isGitDiffError, changedFiles } from "../lib/changed-files.js";
 import { MergeBaseError, MERGE_BASE_BLOCKED_REASON, MERGE_BASE_ERROR_CODE, isMergeBaseError, GIT_DIFF_BLOCKED_REASON } from "../lib/blocked-errors.js";
-import { integrityCheck, protectedPaths, policyViolations } from "../lib/integrity.js";
+import { integrityCheck, protectedPaths, policyViolations, mustNotContract } from "../lib/integrity.js";
 import { needsDenyAllWritesHook } from "../lib/agent-md.js";
 import { claim, release, lockHolder } from "../lib/claim.js";
 import { requirementFor } from "../lib/requirements.js";
@@ -22,7 +22,7 @@ import { HARNESS_LABEL, VETO_LABEL } from "../lib/label-catalog.js";
 import { harnessNeeded, ensureHarnessIssue, parkedReason, findOpenHarnessIssueFor } from "../lib/harness-request.js";
 import { makeRehearsalChecker } from "../lib/rehearsal.js";
 import { makeQueueAdmission, entryRecheck, admissionRefusedReason, ADMISSION_CODES } from "../lib/admission.js";
-import { mirrorStep, mirrorMatchesHead, inMirrorFamily, regenerateMirror, mirrorApplicable, isUnionMergePath, MIRROR_FAMILIES } from "../lib/mirror.js";
+import { mirrorStep, mirrorMatchesHead, inMirrorFamily, regenerateMirror, mirrorApplicable, mirrorApplicableAtRev, isUnionMergePath, MIRROR_FAMILIES } from "../lib/mirror.js";
 import { REHEARSAL_UNWIRED, ADMISSION_UNWIRED } from "../lib/transition.js";
 export { HARNESS_LABEL };   // 재수출 — retro.js와 이 값이 같은 소스에서 왔다는 것을 테스트가 import equality로 확인한다
 import { buildContext, resolveTier, contextManifestLines, isPlainObject, loadedJsonLine, scrubPlanRepairPrevious, checkHandoffPr } from "../lib/context.js";
@@ -3103,6 +3103,37 @@ export function makeMergeReviewRosterDep({ run, root, gh, issue, getCharter, get
 }
 
 /**
+ * merge 스테이지의 `policyViolations` dep — main()의 인라인 클로저였던 것을 꺼냈다(#286): 그래야 "mirror 면제의 적용 여부를
+ * 어디서 정하는가"를 테스트가 실제 배선으로 핀한다. 게터인 이유 — harness는 `charterReady` 뒤에 생긴다.
+ */
+export function makeMergePolicyViolationsDep({ run, root, gh, issue, mergeBase, getHarness, recordLine = () => {} }) {
+  return async () => {
+    /**
+     * 감사 H5 — 기존 테스트의 수정·삭제도 이 dep이 실어 온다. 예외 표식(`tests_changed_allowed:`)은
+     * **이슈 본문**에서만 읽는다: PR diff 안에 있으면 그 PR이 스스로를 허가하게 된다. 본문을 못 읽으면
+     * 빈 문자열이고, 그때는 허가가 없는 것으로 친다(fail closed — 사람이 머지한다).
+     */
+    let issueBody = "";
+    try { issueBody = (await gh.issue(issue))?.body ?? ""; }
+    catch (e) { recordLine(`policy: issue body unreadable — tests_changed_allowed ignored (${e?.message || e})`); }
+    try {
+      const base = await mergeBase();
+      /**
+       * #286 — 러너의 미러 커밋이 만든 경로는 must_not 계약의 대상이 아니다(게이트와 같은 `mustNotScope`). 적용 여부는 **base
+       * revision**에서 묻는다: 이 dep은 checkoutHead 뒤, PR head 트리 위에서 돈다 — 트리를 보면 PR이 표지 파일을 더해 자기 면제를
+       * 넓힌다. 조회가 실패하면 false(면제 없음). 계약이 없으면 묻지 않는다(git을 더 부를 이유가 없다).
+       */
+      const contract = mustNotContract(issueBody);
+      const mirrorSelf = contract.touch.length || contract.add.length ? await mirrorApplicableAtRev({ run, cwd: root, rev: base }) : false;
+      const r = await policyViolations({ run, cwd: root, base, harness: getHarness(), issueBody, mirrorSelf });
+      // 적용된 면제는 조용하지 않다 — 사후에 감사하는 소유자가 run 기록에서 그 수를 본다.
+      if (r?.ok && r.mirror_excluded > 0) recordLine(`policy: issue must_not contract — runner-generated mirror paths excluded: ${r.mirror_excluded}`);
+      return r;
+    } catch (e) { return { ok: false, files: [], reason: `${e?.message || e}` }; }
+  };
+}
+
+/**
  * `makeMergeSelfChangeDeps`: merge-stage의 `selfChange`·`engine`·`neverAutomate`·`mergePr`·`vetoWindow`·`vetoLabel`·`now`·`jobStartedAt`·`jobTimeoutMinutes`.
  * `selfChange`·`engine`은 **게터**다(CHARTER와 base 판정은 charterReady에서 생긴다) — 조립하는 쪽은 펼치지(`...`) 말고
  * `Object.getOwnPropertyDescriptors`로 옮긴다. GitHub 호출은 전부 gh.js를 지난다: 창은 `setStatus`/`commitStatuses`, 거부권은
@@ -4639,18 +4670,7 @@ async function main() {
      * 브랜치의 코드·하네스로 계산하고, 섹션 판정에 필요한 파일 내용은 **워킹 트리가 아니라**
      * `git show <rev>:<file>`로 읽는다 — checkoutHead 뒤의 트리는 PR의 것이다.
      */
-    policyViolations: async () => {
-      /**
-       * 감사 H5 — 기존 테스트의 수정·삭제도 이 dep이 실어 온다. 예외 표식(`tests_changed_allowed:`)은
-       * **이슈 본문**에서만 읽는다: PR diff 안에 있으면 그 PR이 스스로를 허가하게 된다. 본문을 못 읽으면
-       * 빈 문자열이고, 그때는 허가가 없는 것으로 친다(fail closed — 사람이 머지한다).
-       */
-      let issueBody = "";
-      try { issueBody = (await gh.issue(issue))?.body ?? ""; }
-      catch (e) { recordLine(`policy: issue body unreadable — tests_changed_allowed ignored (${e?.message || e})`); }
-      try { return await policyViolations({ run, cwd: root, base: await mergeBase(), harness, issueBody }); }
-      catch (e) { return { ok: false, files: [], reason: `${e?.message || e}` }; }
-    },
+    policyViolations: makeMergePolicyViolationsDep({ run, root, gh, issue, mergeBase, getHarness: () => harness, recordLine }),
     /** 이슈(또는 PR — 같은 번호 공간)에 코멘트를 남긴다. KTB-18의 라벨-무효 알림과 merge stage의
      * 거부 사유(사람이 머지 버튼을 누르는 PR)·blocked-origin 마커 재게시가 모두 이걸 쓴다. */
     comment: (number, body) => gh.comment(number, body),

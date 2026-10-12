@@ -7,8 +7,8 @@ import { isQuarantined, recordResult } from "./quarantine.js";
 import { changedFiles } from "./changed-files.js";
 import { matchesAny } from "./glob.js";
 import { classifyFailures } from "./classify-failure.js";
-import { mustNotContract, mustNotViolations, addedLines, fixesTests } from "./integrity.js";
-import { inMirrorFamily, mirrorApplicable } from "./mirror.js";
+import { mustNotContract, mustNotViolations, mustNotScope, addedLines, fixesTests } from "./integrity.js";
+import { mirrorApplicable } from "./mirror.js";
 import { proveTest, repeatNewTests, proveModeFor, selfReferentialTests, proveFixedTests } from "./prove-test.js";
 import { runDiffCoverage } from "./diff-coverage.js";
 import { mutationGate } from "./mutation.js";
@@ -640,11 +640,10 @@ export async function runStageGates({ run: injectedRun, cwd, harness, stage, tie
        * 러너가 `factory/**`에서 생성해 커밋한 것이지 빌더의 변경이 아니다(빌더는 거기 쓸 수 없다). `must_not: touch .factory/**`는
        * 그 생성물에 대는 계약이 아니라 빌더의 손에 대는 계약이므로, 그 경로는 계약 대조에서 뺀다. 채택자 저장소에서는 그대로다.
        */
-      const mirrorSelf = mirrorApplicable(cwd);
-      const changedForContract = mirrorSelf ? ch.all.filter((p) => !inMirrorFamily(p)) : ch.all;
-      const excluded = mirrorSelf ? ch.all.length - changedForContract.length : 0;
-      if (mirrorSelf) for (const k of [...added.keys()]) if (inMirrorFamily(k)) added.delete(k);
-      const v = mustNotViolations({ contract, changed: changedForContract, added });
+      // #286 — 면제의 본체는 integrity.js `mustNotScope` 하나다(merge의 `policyViolations`가 같은 함수를 부른다).
+      const scope = mustNotScope({ changed: ch.all, added, mirrorSelf: mirrorApplicable(cwd) });
+      const excluded = scope.excluded;
+      const v = mustNotViolations({ contract, changed: scope.changed, added: scope.added });
       const note = excluded ? ` (runner-generated mirror paths excluded: ${excluded})` : "";
       result.gates["must-not"] = v.length
         ? { status: "RED", code: null, duration_ms: 0, log: `issue must_not contract violated: ${v.map((x) => `${x.file}: ${x.rule}`).join("; ")}${note}` }

@@ -3,7 +3,7 @@ import { gatesDetailLines, verdictLine, DETAIL_MAX_FAILING, GATES_DETAIL_PREFIX 
 import { parseVitestJson } from "./parsers/vitest-json.js";
 import { isMergeBaseError, MERGE_BASE_BLOCKED_REASON, GIT_DIFF_BLOCKED_REASON } from "./blocked-errors.js";
 import { isGitDiffError } from "./changed-files.js";
-import { LESSONS_POLICY_RULE as LESSONS_RULE_RE, HARNESS_SECTION_POLICY_RULE as HARNESS_SECTION_RULE_RE, TESTS_MODIFIED_POLICY_RULE as TESTS_RULE_RE } from "./integrity.js";
+import { LESSONS_POLICY_RULE as LESSONS_RULE_RE, HARNESS_SECTION_POLICY_RULE as HARNESS_SECTION_RULE_RE, TESTS_MODIFIED_POLICY_RULE as TESTS_RULE_RE, MUST_NOT_TOUCH_RULE, MUST_NOT_ADD_RULE, ADDITIVE_ONLY_POLICY_RULE as ADDITIVE_RULE_RE } from "./integrity.js";
 import { blockedOriginMarker } from "./retro/issue-comments.js";
 import { parseBlocks } from "./harness-request.js";
 import { verifyReviewQuorum, verifyReviewProvenance, NOT_BOUND } from "./review-quorum.js";
@@ -661,8 +661,35 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
     // 외부 감사 H5: 네 번째 제목 — 기존 테스트의 수정·삭제.
     const testsChanged = (pol.violations || []).filter((v) => TESTS_RULE_RE.test(v.rule));
     const testFiles = [...new Set(testsChanged.map((v) => v.file))];
-    const additive = pol.files.filter((f) => !lessons.includes(f) && !frozenFiles.includes(f) && !testFiles.includes(f));
+    /**
+     * #286 — 다섯 번째 제목: 이슈 본문의 `must_not:` 계약. 예전엔 위 셋에 안 걸린 파일이 전부 "역할 섹션" 제목으로 떨어져서,
+     * must_not 위반만 있던 PR #255의 사람이 역할 프롬프트를 찾아 헤맸다. 이제 역할 섹션 제목은 **자기 규칙**(additive-only)으로
+     * 고른다 — 한 파일이 두 종류를 다 가지면 두 제목에 다 나온다. 규칙이 하나도 안 실린 파일(위반 목록 없이 `files`만 온 오래된
+     * 모양)은 오늘처럼 역할 섹션 제목이다(사람에게 넘어가는 것은 같고, 제목 없이 사라지지 않는다).
+     */
+    const mustNot = (pol.violations || []).filter((v) => MUST_NOT_TOUCH_RULE.test(v.rule) || MUST_NOT_ADD_RULE.test(v.rule));
+    const mustNotFiles = [...new Set(mustNot.map((v) => v.file))];
+    const classified = (v) => LESSONS_RULE_RE.test(v.rule) || HARNESS_SECTION_RULE_RE.test(v.rule) || TESTS_RULE_RE.test(v.rule)
+      || MUST_NOT_TOUCH_RULE.test(v.rule) || MUST_NOT_ADD_RULE.test(v.rule);
+    const ruled = new Set((pol.violations || []).filter(classified).map((v) => v.file));
+    const additiveRuled = new Set((pol.violations || []).filter((v) => ADDITIVE_RULE_RE.test(v.rule)).map((v) => v.file));
+    const additive = pol.files.filter((f) => additiveRuled.has(f) || (!ruled.has(f) && !lessons.includes(f) && !frozenFiles.includes(f) && !testFiles.includes(f)));
     const sections = [], reasons = [];
+    if (mustNot.length) {
+      const said = mustNot.map((v) => `${v.file} (${v.rule})`);
+      reasons.push(`issue must_not contract violated — ${HUMAN_MERGE_REQUIRED_TEXT}: ${said.join(", ")}`);
+      sections.push({
+        heading: "이슈 must_not 계약 위반",
+        why: [
+          "이 PR의 diff가 추적 이슈 본문의 `must_not:` 계약을 깹니다 — 그 금지는 이슈(사람이 쓰거나 승인한 글)에 있고",
+          "PR은 그것을 고칠 수 없습니다. implement 게이트 `must-not`과 같은 함수로 셌습니다(1.4.14 / KTB #73).",
+          "러너가 생성한 미러 경로는 이 계약에서 빠집니다(#286) — 아래는 그 밖의 위반입니다.",
+          "", "깨진 계약 줄:", ...said.map((s) => `- ${s}`),
+          "", "위반한 파일:",
+        ],
+        files: mustNotFiles,
+      });
+    }
     if (additive.length) {
       reasons.push(`agent role sections edited outside Examples/Perspectives — ${HUMAN_MERGE_REQUIRED_TEXT}: ${additive.join(", ")}`);
       sections.push({
