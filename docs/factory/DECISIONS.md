@@ -4917,9 +4917,10 @@ dep을 싣는지는 소스 문자열 핀으로 고정하지 않는다(계획 non
    `ciRunnerMarker` 하나이고 `cli/run.js`·`cli/integrity.js`·`isOperatorMerge`가 모두 그것을 부른다(rework arch1 — `test_236_local_merge_runs_merge_stage_with_the_operator_token_and_no_veto_wait — every runner marker refuses both entry points, as isOperatorMerge does`). 두 배우 모드의 머지 PAT은
    팩토리 로그인 목록에 없는 사람 계정이라 행위자 검사로는 러너를 가르지 못한다; 그래서 표식이 여럿이다. 그것을 전부 지울 수 있는 것은
    merge 스텝 안에서 도는 엔진 코드 자신뿐이고, 그 너머는 이 거름망의 한계다. 행위자 검사는 그대로다: 머지하는 계정(`gh api user`)이
-   팩토리 계정이거나 사람(`User`)이 아니면 거부한다. 운영 모드의 팩토리 계정은 운영자 env의 `FACTORY_BOT_LOGIN`이 있으면 그것만이고,
-   없으면 러너 하트비트(`runner: gha-…`)의 작성자가 정확히 한 계정일 때만 그 계정이다 — 하트비트의 runner 필드는 코멘트 본문이라 위조될 수
-   있으므로 작성자가 둘 이상이면 거부한다. `--remote`는 그대로다.
+   팩토리 계정이거나 사람(`User`)이 아니면 거부한다. 운영 모드의 팩토리 계정(H1b와 door가 같이 쓴다)은 운영자 env의 `FACTORY_BOT_LOGIN`
+   **하나에서만** 온다 — 이슈 코멘트(하트비트)는 보지 않는다: 하트비트의 runner 필드는 코멘트 본문이라 누구든 적고, 러너가 돈 적 없는 Actions
+   없는 저장소에서는 위조 하나가 그 작성자를 H1b의 팩토리 계정으로 만든다(skeptic r5 — H1b를 푸는 것은 plan non_goal). 없으면 거부하고 사유가
+   `FACTORY_BOT_LOGIN`을 말한다. `--remote`는 그대로다.
    — `test_236_local_merge_runs_merge_stage_with_the_operator_token_and_no_veto_wait`
 3. **ADR-033 개정**: merge-stage의 새 dep `operatorPresent`(정확히 `true`일 때만)는 거부권 창의 **기다림 하나**만 지운다 — 창 상태·알림 코멘트·
    라벨 폴링·sleep이 없다. 다만 이미 서 있는 `factory:veto`는 기다림이 아니므로 **한 번** 읽는다: 붙어 있으면 사람에게 넘기고, 읽지 못하면

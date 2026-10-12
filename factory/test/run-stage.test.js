@@ -11274,7 +11274,7 @@ test("test_236_local_merge_one_run_through_run_stage_with_mains_wiring", async (
 });
 
 // ── #236 skeptic self-critique (round 2) — main() does not inject factoryLogins: the operator deps resolve the factory login off
-// a runner the way the production wiring can (the issue's runner-written heartbeat, or FACTORY_BOT_LOGIN), never from a fake. ──
+// a runner the way the production wiring can (the operator's FACTORY_BOT_LOGIN only — skeptic r5), never from a fake. ──
 test("test_236_local_merge_resolves_the_factory_login_off_a_runner_without_an_injected_fake", async () => {
   // main()'s wiring passes the issue and no factoryLogins fake.
   const src = readFileSync(new URL("../bin/run-stage.js", import.meta.url), "utf8");
@@ -11289,17 +11289,19 @@ test("test_236_local_merge_resolves_the_factory_login_off_a_runner_without_an_in
     getCharter: () => ({ self_change: { operator_merge_judge: false } }), getEngine: () => true, getDefaultBranch: () => "main", runRecord: () => {}, log: () => {},
   });
 
-  // (1) An operator laptop: no FACTORY_BOT_LOGIN, no GITHUB_ACTIONS — the issue's heartbeat names the factory account, so a
-  // green fixture with a human actor opens, and the issue's comments were the ones read.
+  // (1) An operator laptop: no FACTORY_BOT_LOGIN, no GITHUB_ACTIONS, a runner-looking heartbeat on the issue (skeptic r5) — a
+  // heartbeat is comment text, so it names nobody: the factory account is unknown, the green fixture is refused, and the issue's
+  // comments are never consulted.
   {
     const gh = ghOf();
     const v = await depsOf({ gh }).operatorMergeCheck({ pr: 9, sha: HEAD_236 });
-    expect(v).toEqual(expect.objectContaining({ ok: true, reasons: [], actor: "alice" }));
-    expect(gh.comments).toHaveBeenCalledWith(42);
+    expect(v.ok).toBe(false);
+    expect(v.reasons.join("; ")).toMatch(/factory account\(s\) could not be resolved/);
+    expect(gh.comments).not.toHaveBeenCalled();
   }
-  // (2) The same resolution still tells the factory token apart: that account as the actor is refused.
+  // (2) FACTORY_BOT_LOGIN still tells the factory token apart: that account as the actor is refused.
   {
-    const v = await depsOf({ gh: ghOf({ viewer: "ktb-bot" }) }).operatorMergeCheck({ pr: 9, sha: HEAD_236 });
+    const v = await depsOf({ env: { [OPERATOR_MERGE_ENV236]: "1", FACTORY_BOT_LOGIN: "ktb-bot" }, gh: ghOf({ viewer: "ktb-bot" }) }).operatorMergeCheck({ pr: 9, sha: HEAD_236 });
     expect(v.ok).toBe(false);
     expect(v.reasons.join("; ")).toMatch(/the merging actor @ktb-bot is a factory account/);
   }
@@ -11413,7 +11415,7 @@ test("test_236_local_merge_runs_merge_stage_with_the_operator_token_and_no_veto_
 // ── #236 skeptic self-critique (round 3) — the factory account on a laptop, with NO injected factoryLogins anywhere: H1b gets main's
 // own resolver (`resolveFactoryLogins({ gh, env })`, no comments) and the door gets main's wiring (`issue`, no fake). The run's
 // heartbeat is posted by startHeartbeat through the operator's own token into the very comments the door reads — and so is an
-// earlier local stage's heartbeat. Only a runner-written heartbeat (runner gha-<id>) names the factory account. ──
+// earlier local stage's heartbeat. No heartbeat names the factory account; the operator's FACTORY_BOT_LOGIN does (skeptic r5). ──
 import { resolveFactoryLogins as resolveFactoryLogins236 } from "../lib/gh.js";
 import { startHeartbeat as startHeartbeat236 } from "../lib/heartbeat.js";
 
@@ -11461,6 +11463,8 @@ test("test_236_local_merge_runs_merge_stage_with_the_operator_token_and_no_veto_
     return d;
   };
   const env = { [OPERATOR_MERGE_ENV236]: "1" };   // a laptop: no GITHUB_ACTIONS, no FACTORY_BOT_LOGIN
+  // skeptic r5: off a runner the factory account comes only from the operator's FACTORY_BOT_LOGIN, never from the issue's comments.
+  const envBot = { ...env, FACTORY_BOT_LOGIN: "ktb-bot" };
 
   // (1) alice merges: her earlier local stage's heartbeat and this run's heartbeat (both authored by alice) sit on the issue next to
   // the runner's. One run goes approved → merged + merged label, and both H1b and the door saw ktb-bot as the factory, not alice.
@@ -11468,23 +11472,23 @@ test("test_236_local_merge_runs_merge_stage_with_the_operator_token_and_no_veto_
     const comments = [runnerBeat, earlierLocalBeat("alice")];
     const gh = ghOf({ viewer: "alice", comments });
     const sink = [], log = [];
-    const d = compose({ gh, env, sink, log });
+    const d = compose({ gh, env: envBot, sink, log });
     const code = await runStage({ stage: "merge", issue: 7, deps: d, runnerId: "local/laptop" });
     expect(comments.filter((c) => c.author === "alice" && /factory-heartbeat issue=7/.test(c.body) && /stage: merge/.test(c.body))).toHaveLength(1);
-    expect(gh.comments).toHaveBeenCalledWith(7);
+    expect(gh.comments).not.toHaveBeenCalled();
     expect([...sink, ...log].filter((l) => /factory account|could not be resolved/.test(l))).toEqual([]);
     expect(code).toBe(0);
     expect(gh.mergePr).toHaveBeenCalledTimes(1);
     expect(d.transition.mock.calls.map((c) => c[0].to)).toContain("factory:merged");
     expect(sink).toContain(`local-merge pr=9 sha=${HEAD_236} actor=alice veto=skipped`);
   }
-  // (2) The factory token run off a runner (env flipped) is still the factory: its runner-written heartbeat names it, its own local
+  // (2) The factory token run off a runner (env flipped) is still the factory: FACTORY_BOT_LOGIN names it, its own local
   // heartbeat does not hide that, and nothing merges.
   {
     const comments = [runnerBeat];
     const gh = ghOf({ viewer: "ktb-bot", comments });
     const sink = [], log = [];
-    const d = compose({ gh, env, sink, log });
+    const d = compose({ gh, env: envBot, sink, log });
     expect(await runStage({ stage: "merge", issue: 7, deps: d, runnerId: "local/laptop" })).not.toBe(0);
     expect(gh.mergePr).not.toHaveBeenCalled();
     expect(d.transition.mock.calls.map((c) => c[0].to)).not.toContain("factory:merged");
@@ -11543,10 +11547,26 @@ test("test_236_operator_present_skips_only_the_veto_window — H1b never takes i
     expect((await h1b(d, byMallory)).ok).toBe(false);
     expect((await h1b(d, FACTORY_STATUSES_236)).ok).toBe(true);
   }
-  // (3) Control: the runner's heartbeat alone still names the factory, and its review/gates pass H1b — the fix refuses forgery, not the factory.
+  // (3) The single-forger case (skeptic r5): an Actions-less issue where no runner ever ran, one forged gha- heartbeat by mallory and
+  // no FACTORY_BOT_LOGIN. mallory never becomes the factory: H1b holds no factory login at all, so mallory's review/gates do not pass,
+  // and the door refuses naming FACTORY_BOT_LOGIN. The issue's comments are not consulted for the factory account.
+  {
+    const d = wired({ comments: [forgedBeat] });
+    const logins = await d.factoryLogins();
+    expect(logins.ok).toBe(false);
+    expect(logins.logins ?? []).not.toContain("mallory");
+    expect(logins.reason).toMatch(/FACTORY_BOT_LOGIN/);
+    expect((await h1b(d, byMallory)).ok).toBe(false);
+    const door = await d.operatorMergeCheck({ pr: 9, sha: HEAD_236 });
+    expect(door.ok).toBe(false);
+    expect(door.reasons.join("; ")).toMatch(/factory account\(s\) could not be resolved/);
+  }
+  // (4) A runner-looking heartbeat alone is comment text just like the forgery in (3) — it cannot be told apart from one, so it names
+  // nobody either; off a runner only the operator's FACTORY_BOT_LOGIN names the factory (case 2).
   {
     const d = wired({ comments: [realBeat] });
-    expect((await h1b(d, FACTORY_STATUSES_236)).ok).toBe(true);
+    expect((await d.factoryLogins()).ok).toBe(false);
+    expect((await h1b(d, FACTORY_STATUSES_236)).ok).toBe(false);
     expect((await h1b(d, byMallory)).ok).toBe(false);
   }
 });
