@@ -761,9 +761,9 @@ export function makeGh({ run, repo, sleep = realSleep }) {
     /**
      * #195 — the PR body, read right before the runner rewrites its evidence section (read-modify-write). Bounded by a
      * timeout and never retried: the caller sits right before a merge or a hand-off, and a slow GitHub must not hold it.
-     * #217 — REST (`GET repos/<repo>/pulls/<n>`), which needs only `repo` scope: `gh pr view` goes through GraphQL and needs
-     * `read:org`, which the bot token lacks (run 37348881584). The JSON is parsed here, not with `--jq .body` — `--jq` prints
-     * a null body as the word "null" and adds a newline. The resource path is argv[1] so gh's failure message names it.
+     * #217 — REST (`GET repos/<repo>/pulls/<n>`), the same resource `editPrBody` writes, so the read-modify-write stays on the
+     * `repo`-scope REST API end to end. The JSON is parsed here, not with `--jq .body` — `--jq` prints a null body as the word
+     * "null" and adds a newline. The resource path is argv[1] so gh's failure message names it.
      */
     async prBody(pr, { timeoutMs = PR_BODY_TIMEOUT_MS, signal = null } = {}) {
       const out = await bounded((s) => gh(["api", `repos/${repo}/pulls/${pr}`], { signal: s }), { ms: timeoutMs, what: `gh api GET repos/${repo}/pulls/${pr}`, signal });
@@ -961,8 +961,10 @@ export function makeGh({ run, repo, sleep = realSleep }) {
         .map((p) => ({ number: p.number, title: p.title, headRefName: p.headRefName, headRefOid: p.headRefOid }));
     },
     /**
-     * #201 — 열린 PR의 제목과 본문을 바꾼다. 본문은 `editPrBody`처럼 stdin(`--body-file -`)으로만 넘긴다 — argv에
-     * 넣으면 `>`로 시작하는 줄 하나가 셸·훅에서 리다이렉션으로 읽힌다. 실패는 삼키지 않는다(호출자가 판단한다).
+     * #201 — 열린 PR의 제목과 본문을 바꾼다. 본문은 stdin(`--body-file -`)으로만 넘긴다 — argv에 넣으면 `>`로 시작하는
+     * 줄 하나가 셸·훅에서 리다이렉션으로 읽힌다. 실패는 삼키지 않는다(호출자가 판단한다).
+     * #217 — `editPrBody`와 같은 경로가 아니다: 이것은 아직 `gh pr edit`(GraphQL, `read:org` 필요)이고 `editPrBody`는
+     * REST `patchBody`다. REST로 옮기는 일은 #268(retro/publish.js의 push-후-편집 순서 포함).
      */
     async editPr(pr, { title, body }) {
       await gh(["pr", "edit", String(pr), "-R", repo, "--title", title, "--body-file", "-"], { input: body });

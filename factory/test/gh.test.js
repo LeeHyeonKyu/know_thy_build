@@ -837,8 +837,8 @@ test("test_201_gh_open_prs_by_head_prefix_filters_prefix_and_forks_with_an_expli
 });
 
 // ── #217 — the PR-body read and write use only the REST `pulls/<n>` resource (repo scope), never GraphQL ───────────────────────
-// `gh pr view`/`gh pr edit` go through GraphQL and need `read:org` (run 37348881584); the recording run below answers those
-// the way the bot token does, so the old commands fail here on behaviour, not only on argv shape.
+// `gh pr edit` goes through GraphQL and needed `read:org` (run 37348881584); the recording run below refuses every GraphQL-backed
+// `gh pr` command the way a repo-scope-only token would, so the old commands fail here on behaviour, not only on argv shape.
 test("test_217_gh_patch_pr_body_uses_repo_scope_only", async () => {
   const denied = { code: 1, stdout: "", stderr: "GraphQL: Your token has not been granted the required scopes to execute this query. requires one of the following scopes: ['read:org']" };
   const isPatch = (a) => a.includes("-X") && a[a.indexOf("-X") + 1] === "PATCH";
