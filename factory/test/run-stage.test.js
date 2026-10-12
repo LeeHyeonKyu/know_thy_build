@@ -10889,3 +10889,147 @@ test("test_199_missing_findings_skips_with_a_record_line (an unreachable reviewe
   const line = selfGateDetailLine199(r, { runId: "1", runnerId: "gha-1", ktbVersion: "1.4.0" });
   expect(JSON.parse(line.slice(SGD_PREFIX_199.length)).skipped.filter((s) => s.check === "rework-scope")).toEqual([{ check: "rework-scope", reason: sk[0].reason, detail: sk[0].detail }]);
 });
+
+// ── #288 — the workflow self-loaded `.factory/out/loaded.json` (the dispatcher passed no `args.loaded`) ─────────────────────────
+// The workflow return is produced by the shipped template through runWorkflow; loaded.json is written by the real buildContext.
+// The run record must say the dispatcher skipped the payload, and the length the workflow reports must match the file on disk —
+// a reader that dropped or cut a field must block loudly before gates/verify, never run as a fresh build.
+import { SELF_LOADED_LINE } from "../bin/run-stage.js";
+import { runWorkflow as runWorkflow288 } from "./helpers/run-workflow.js";
+import { buildContext as buildContext288 } from "../lib/context.js";
+
+const WF288 = (name) => new URL(`../../templates/factory/claude/workflows/factory-${name}.js`, import.meta.url).pathname;
+const fenced288 = (o) => "Workflow finished.\n```json\n" + JSON.stringify(o, null, 2) + "\n```";
+/** A repo root + a real buildContext run for `stage`; implement's history is a rework round (must_fix + a dispute). */
+async function loadedRoot288(stage) {
+  const r = mkdtempSync(join(tmpdir(), `rs288${stage}-`));
+  mkdirSync(join(r, ".factory"), { recursive: true }); mkdirSync(join(r, "docs/factory"), { recursive: true });
+  writeFileSync(join(r, ".factory/harness.toml"), `schema = 1\n[harness]\nmaturity = "M0"\n[factory]\norchestration = "workflow"\n[commands]\nunit = "npm test"\n[gates]\nrequired = ["unit"]\nfast = ["unit"]\nfull = ["unit"]\ndeep = ["unit"]\n`);
+  writeFileSync(join(r, "docs/factory/CHARTER.md"), `---\nschema: factory.charter.v1\nstatus: ready\ntier_default: standard\nroster:\n  standard: [correctness]\nplan_roles:\n  default: [architect, skeptic]\nplan_rounds: { docs: 2, default: 3 }\n---\n`);
+  writeFileSync(join(r, ".factory/roles.toml"), `[triage]\nagent = "t.md"\nmodel = "sonnet"\n[implement.builder]\nagent = "b.md"\nmodel = "opus"\n[implement.verifier]\nagent = "v.md"\nmodel = "opus"\ncold_read = true\n`);
+  const issue = 42, pr = 41, H = "d".repeat(40);
+  const mustFix = [{ id: "cf1", where: "src/a.js:1", claim: "CLAIM-ONE-288", evidence: "EV-ONE" }, { id: "cf2", where: "src/b.js:2", claim: "CLAIM-TWO-288", evidence: "EV-TWO" }];
+  const comments = stage === "implement" ? [
+    { body: renderHandoff({ stage: "plan", issue, summary: "s", data: { schema: "factory.plan.v1", issue, done_when: [{ id: "dw1", text: "t", level: "unit", check: { kind: "test", ref: "test_42_a" }, covers: ["cf1", "cf2"] }] } }), author: "factory-bot", createdAt: "2026-10-01T00:00:00Z" },
+    { body: renderHandoff({ stage: "implement", issue, summary: "s", data: { schema: "factory.implement.v1", issue, pr, head_sha: H } }), author: "factory-bot", createdAt: "2026-10-01T00:00:01Z" },
+    { body: renderHandoff({ stage: "review", issue, summary: "s", data: { schema: "factory.review.v1", issue, pr, head_sha: H, round: 1, orchestration: "workflow", decision: "rework", verdicts: [{ role: "correctness", verdict: "reject", confidence: "high", must_fix: mustFix, should_fix: [], verified: [] }] } }), author: "factory-bot", createdAt: "2026-10-01T00:00:02Z" },
+  ] : [];
+  const response = { schema: "factory.rework-response.v1", issue, responses: [{ id: "cf1", status: "fixed", commit: "abc" }, { id: "cf2", status: "disputed", reason: "DISPUTE-REASON-288" }] };
+  const gh = {
+    issue: async () => ({ number: issue, title: "T", body: "", labels: ["factory:in-progress"] }),
+    comments: async (n) => (n === pr ? [{ id: 9, body: "```json\n" + JSON.stringify(response) + "\n```", createdAt: "2026-10-02T00:00:00Z" }] : comments.slice()),
+  };
+  const ctx = await buildContext288({ root: r, gh, issue, stage });
+  const path = join(r, ".factory/out/loaded.json");
+  return { ctx, path, text: readFileSync(path, "utf8") };
+}
+const readerStub288 = (readerText, roles) => async (prompt, opts) => (opts.label === "load:reader" ? { loaded_json: readerText } : roles(prompt, opts));
+const triageRole288 = async (prompt, opts) => (opts.agentType === "factory-triage" ? { disposition: "ready", tier: "standard", reason: "r", summary: "s" } : null);
+const implRole288 = async (prompt, opts) => {
+  if (opts.agentType === "factory-builder") {
+    return { head_sha: "a".repeat(40), pr: 41, branch: "claude/fq-42", summary: "s", tests_added: ["test_42_a"], commits: ["a".repeat(40)], rework_response: { responses: [{ id: "cf1", status: "fixed", commit: "abc1234" }, { id: "cf2", status: "disputed", reason: "non_goals" }] } };
+  }
+  if (opts.agentType === "factory-verifier") return { verdict: "accepted", findings: [], prove_test_read: true };
+  return null;
+};
+
+test("test_run_stage_records_the_payload_source", async () => {
+  const { ctx, path, text } = await loadedRoot288("triage");
+  const self = (await runWorkflow288(WF288("triage"), { agent: readerStub288(text, triageRole288), args: { issue: 42, context: ".factory/out/context.json" } })).result;
+  const viaArgs = (await runWorkflow288(WF288("triage"), { agent: readerStub288(text, triageRole288), args: { issue: 42, context: ".factory/out/context.json", loaded: JSON.parse(text) } })).result;
+  expect(self.loaded_source).toBe("file");
+  expect(viaArgs.loaded_source).toBe("args");
+  const { loaded_source: _drop, ...absent } = viaArgs;
+
+  const runWith = async (result) => {
+    const lines = [];
+    const d = baseDeps({
+      buildContext: async () => ctx,
+      claudeP: async () => ({ is_error: false, result: fenced288(result) }),
+      verifyStage: ({ out }) => ({ ok: true, reasons: [], data: JSON.parse(String(out.result).split("```json\n")[1].split("\n```")[0]) }),
+      loadedJsonText: () => readFileSync(path, "utf8"),
+      transition: vi.fn(async ({ to }) => ({ ok: true, to })),
+      runRecord: (l) => lines.push(...l),
+    });
+    const code = await runStage({ stage: "triage", issue: 42, deps: d, runnerId: "r" });
+    return { code, lines, d };
+  };
+  const file = await runWith(self);
+  const args = await runWith(viaArgs);
+  const none = await runWith(absent);
+  expect(SELF_LOADED_LINE).toBe("loaded: self-loaded by the workflow (dispatcher passed no payload)");
+  expect(file.lines).toContain(SELF_LOADED_LINE);
+  expect(args.lines).not.toContain(SELF_LOADED_LINE);
+  expect(none.lines).not.toContain(SELF_LOADED_LINE);
+  expect(args.lines.some((l) => /self-loaded/.test(l))).toBe(false);
+  // the self-loaded run succeeds exactly like the dispatcher-passed one: same exit code, same hand-off transition
+  expect(file.code).toBe(args.code);
+  expect(file.code).toBe(none.code);
+  expect(file.d.transition.mock.calls.map(([t]) => t.to)).toEqual(args.d.transition.mock.calls.map(([t]) => t.to));
+  expect(file.d.transition).not.toHaveBeenCalledWith(expect.objectContaining({ to: "factory:blocked" }));
+});
+
+test("test_288_self_loaded_payload_length_mismatch_blocks_loudly", async () => {
+  const { ctx, path, text } = await loadedRoot288("implement");
+  expect(JSON.parse(text).must_fix.length).toBeGreaterThan(0);                    // the real producer wrote a rework payload
+  const args = { raw: "42 false", context: ".factory/out/context.json" };
+  const faithful = (await runWorkflow288(WF288("implement"), { agent: readerStub288(text, implRole288), args })).result;
+  // a reader that dropped must_fix — the shape #111 lost fields in; it still names the right issue and stage
+  const { must_fix: _gone, ...lossy } = JSON.parse(text);
+  const dropped = (await runWorkflow288(WF288("implement"), { agent: readerStub288(JSON.stringify(lossy), implRole288), args })).result;
+  expect(faithful.loaded_source).toBe("file");
+  expect(dropped.loaded_source).toBe("file");
+  expect(dropped.loaded_json_length).not.toBe(faithful.loaded_json_length);
+
+  const GREEN = { schema: "factory.gates.v1", level: "full", status: "GREEN", failing: [], passed: 1, failed: 0, skipped: [], misconfigured: [], gates: { unit: { status: "GREEN" } }, tests: { failing: [], excluded: [] }, head_sha: "a".repeat(40) };
+  const runWith = async (result) => {
+    const lines = [];
+    const gates = vi.fn(async () => GREEN);
+    const verify = vi.fn(({ stage, out, gates: g }) => verifyStage({ stage, out, agentsLog: { starts: [], stops: [], completed: [], orphans: [] }, roster: [], orchestration: "workflow", gates: g }));
+    const d = implDeps({
+      buildContext: async () => ctx,
+      claudeP: async () => ({ is_error: false, result: fenced288(result) }),
+      loadedJsonText: () => readFileSync(path, "utf8"),
+      gates, verifyStage: verify,
+      runRecord: (l) => lines.push(...l),
+    });
+    const code = await runStage({ stage: "implement", issue: 42, deps: d, runnerId: "r" });
+    return { code, lines, d, gates, verify };
+  };
+
+  // match: the length comes from the real workflow return — the stage proceeds to gates and verify
+  const ok = await runWith(faithful);
+  expect(ok.gates).toHaveBeenCalled();
+  expect(ok.verify).toHaveBeenCalled();
+  expect(ok.lines).toContain(SELF_LOADED_LINE);
+  expect(ok.d.transition).not.toHaveBeenCalledWith(expect.objectContaining({ reason: expect.stringContaining("self-loaded payload") }));
+
+  // mismatch (a real lossy reader), missing, non-numeric: blocked with a named reason, never gates/verify
+  const { loaded_json_length: _len, ...noLength } = faithful;
+  for (const [why, result] of [
+    ["mismatch", dropped],
+    ["missing", noLength],
+    ["non-numeric", { ...faithful, loaded_json_length: String(faithful.loaded_json_length) }],
+  ]) {
+    const r = await runWith(result);
+    expect(r.code, why).toBe(2);
+    expect(r.gates, why).not.toHaveBeenCalled();
+    expect(r.verify, why).not.toHaveBeenCalled();
+    const t = r.d.transition.mock.calls.at(-1)[0];
+    expect([t.to, t.cause], why).toEqual(["factory:blocked", "undecidable"]);
+    expect(t.reason, why).toContain("self-loaded payload");
+    expect(t.reason, why).toMatch(why === "mismatch" ? /length mismatch/ : /no numeric loaded_json_length/);
+    expect(r.lines.some((l) => l.includes("self-loaded payload")), why).toBe(true);
+    expect(r.d.transition, why).not.toHaveBeenCalledWith(expect.objectContaining({ to: "factory:needs-human" }));
+  }
+  // the reason names both lengths when it has them
+  const mm = (await runWith(dropped)).d.transition.mock.calls.at(-1)[0].reason;
+  expect(mm).toContain(String(dropped.loaded_json_length));
+  expect(mm).toContain(String(JSON.stringify(JSON.parse(text)).length));
+
+  // the check runs only on a self-loaded return: a dispatcher-passed artifact with no length is not blocked by it
+  const passed = (await runWorkflow288(WF288("implement"), { agent: readerStub288(text, implRole288), args: { ...args, loaded: JSON.parse(text) } })).result;
+  const p = await runWith(passed);
+  expect(p.gates).toHaveBeenCalled();
+  expect(p.lines).not.toContain(SELF_LOADED_LINE);
+});
