@@ -319,8 +319,6 @@ export async function runSelfGate({
     else if (Number.isInteger(reworkScope.round) && reworkScope.round >= REWORK_SCOPE_MIN_ROUND) {
       ranChecks.push("rework-scope");
       findings.push(...judgeReworkScope(reworkScope));
-      // Files and exports were judged; the test-id part needs the plan and the issue number, and its absence is recorded, not silent.
-      if (typeof reworkScope.idsSkipped === "string") skip("rework-scope", `skipped — test ids not judged — ${reworkScope.idsSkipped}`);
     }
   }
 
@@ -339,12 +337,12 @@ export async function runSelfGate({
  *   · `newTestIds` — `{ path, id }` for a `test_<issue>_<slug>` id in this round's added test lines that the plan's done_when
  *     (`verify` / `check.ref`) does not own and the reviewed head's copy of that file did not carry (the "new done_when" proxy);
  *   · `where` — the file paths in the previous review's `must_fix[].where` (`wherePaths`, locators stripped);
- *   · `restartPaths` — the K-restart brief's paths when one is loaded (null otherwise).
+ *   · `restartPaths` — the K-restart brief's paths when restart-brief ran, i.e. its input carried no error (null otherwise: then
+ *     no check owns a new file but this one, so it reports it — one cause, one finding, never zero).
  * A runner-written path (`runnerWrittenPath`, the rule #200 `scope` uses — the mirror commit's `.factory/lib|bin/**` copies, run
  * records) is never a builder addition: the builder cannot write it, so a finding on it could not be followed (#199 review cf1/qa1).
- * This function only judges. One cause, one finding: in a restart round `restart-brief` owns new files outside its brief; an export or
- * an id inside a new file that already has a file finding is not reported again (a new file the brief allows still has its exports
- * judged here). Edits and deletions never reach here.
+ * This function only judges. One cause, one finding: in a restart round `restart-brief` owns new files; an id inside a new file that
+ * already has a file finding is not reported again. Edits and deletions never reach here.
  */
 export const REWORK_SCOPE_MIN_ROUND = 2;
 
@@ -364,11 +362,11 @@ export function judgeReworkScope({ round, where = [], newFiles = [], newExports 
     findings.push({ check: "rework-scope", blocking: true, detail: `new file outside the review findings: ${f} — ${rule}: ${how}` });
   }
   for (const e of Array.isArray(newExports) ? newExports : []) {
-    if (!(e && typeof e.path === "string" && typeof e.name === "string") || exempt(e.path) || fileFinding.has(e.path)) continue;
+    if (!(e && typeof e.path === "string" && typeof e.name === "string") || exempt(e.path)) continue;
     findings.push({ check: "rework-scope", blocking: true, detail: `new export outside the review findings: ${e.name} in ${e.path} — ${rule}: ${how}` });
   }
-  for (const t of Array.isArray(newTestIds) ? newTestIds : []) {
-    if (!(t && typeof t.path === "string" && typeof t.id === "string") || fileFinding.has(t.path)) continue;
+  for (const t of Array.isArray(newTestIds) ? newTestIds : []) {      // an id is judged inside `where` too, but never on a runner path
+    if (!(t && typeof t.path === "string" && typeof t.id === "string") || runnerWrittenPath(t.path) || fileFinding.has(t.path)) continue;
     findings.push({ check: "rework-scope", blocking: true, detail: `new done_when id outside the plan: ${t.id} in ${t.path} — ${rule}: a test id the plan's done_when does not own is a new done_when; reuse a plan id or ask the reviewer` });
   }
   return findings;

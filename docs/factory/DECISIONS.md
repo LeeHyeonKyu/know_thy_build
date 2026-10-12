@@ -4332,7 +4332,8 @@ push할 수 있는 누구든 상태 파일에 `closed_at`을 써 넣어 차단�
 - **극성은 fail open, 기록과 함께.** 리뷰 핸드오프·`head_sha`·파일 경로가 있는 `where`가 없거나, git 읽기가 실패하거나, 라운드 수를 못 읽거나,
   diff가 scope 바이트 상한을 넘으면 검사를 건너뛰고 run 기록의 `self-gate-detail` 줄에 `rework-scope` 항목과 `skipped — <이유>`를 남긴다 — 이 검사는
   품질 보조이지 안전 장치가 아니다(`test_199_missing_findings_skips_with_a_record_line`). K 재시작 라운드에서는 새 파일을 `restart-brief`만
-  보고하고(원인 하나에 finding 하나) export는 여전히 이 검사가 본다(`test_199_restart_round_does_not_double_report`).
+  보고하고(원인 하나에 finding 하나) export는 여전히 이 검사가 본다(`test_199_restart_round_does_not_double_report`). "restart-brief가
+  돌았다"는 브리프가 실려 있다는 사실이 아니라 그 입력에 error가 없다는 사실로 읽는다 — 입력이 깨졌으면 새 파일은 이 검사가 직접 보고한다(0건이 되지 않는다).
 
 ## ADR-036 엔진 크래시는 이슈의 R·예산을 먹지 않는다 — 생산자는 runStage의 catch 하나, 상한은 sweeper에 — 2026-10-04 (#196)
 
