@@ -11569,3 +11569,22 @@ test("test_236_local_merge_runs_merge_stage_with_the_operator_token_and_no_veto_
   expect(isOperatorMerge236({ stage: "merge", env: { FACTORY_OPERATOR_MERGE: "1", FACTORY_RUNNER_ID: "local/laptop" } })).toBe(true);
   expect(isOperatorMerge236({ stage: "merge", env: { FACTORY_OPERATOR_MERGE: "1" } })).toBe(true);
 });
+
+// ── #236 rework sec1/arch2 — the local door is not only its status producer: the code that consumes `factory/integrity` and decides
+// whether a merge may skip the veto wait (merge-stage.js localIntegrityVerdict / operatorPresent, run-stage.js isOperatorMerge /
+// makeOperatorMergeDeps) is door code too, so a PR touching it — installed copy included — is never merged by the operator door. ──
+test("test_236_local_merge_refuses_door_files_and_non_green_checks — the local door's own decision code is a door file", async () => {
+  const local = ["factory/lib/merge-stage.js", ".factory/lib/merge-stage.js", "factory/bin/run-stage.js", ".factory/bin/run-stage.js"];
+  for (const f of local) {
+    expect(DOOR_FILES236, f).toContain(f);
+    expect(isDoorFile236(f), f).toBe(true);
+    expect(isDoorFile236(`./${f}`), f).toBe(true);
+    // CHARTER operator_merge_judge on, engine repo, everything else green: a PR that only rewrites the local door is still refused.
+    const v = operatorMergeVerdict236(prJson236({ files: [{ path: f }] }), { defaultBranch: "main", engine: true, judgeAllowed: true });
+    expect(v.ok, f).toBe(false);
+    expect(v.reasons.join("\n"), f).toMatch(/the door cannot open itself/);
+  }
+  // Control: an ordinary engine module next to them is still operator-mergeable under the same switch.
+  const ctl = operatorMergeVerdict236(prJson236({ files: [{ path: "factory/lib/status.js" }] }), { defaultBranch: "main", engine: true, judgeAllowed: true });
+  expect(ctl.reasons.join("\n")).not.toMatch(/the door cannot open itself/);
+});
