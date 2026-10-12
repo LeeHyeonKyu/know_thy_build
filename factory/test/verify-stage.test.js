@@ -851,6 +851,16 @@ test("test_239_signoff_objections_do_not_require_a_covering_done_when", async ()
   expect(plain.ok).toBe(true);
   expect("signoff_objections" in plain.data).toBe(false);
   expect(plain.planNotes).toEqual([NO_ITEMS_LINE]);   // only #232's line: the issue body here is empty
+
+  // dw1 "exactly one line": with an issue whose done_when items are all covered, #232 adds no line and planNotes is the
+  // sign-off line alone.
+  const coveredIssue = planFix({
+    dissent_log: [signoff],
+    done_when: [{ id: "dw1", text: "POST /notes returns 201 with the created id", check: { kind: "test", ref: "test_7_create" }, rubric: "r", level: "unit" }],
+  });
+  const one = verifyPlan(coveredIssue, { issueBody: "## done_when\n- [ ] `test_7_create` — POST /notes returns 201\n" });
+  expect(one.ok).toBe(true);
+  expect(one.planNotes).toEqual([`plan: unresolved sign-off objection from skeptic: ${objection.slice(0, 120)}`]);
 });
 
 /**
@@ -896,6 +906,36 @@ test("test_239_skeptic_items_beyond_max_done_when_are_dropped_not_rejected", asy
   expect(o.ok).toBe(false);
   expect(o.reasons.join("; ")).toMatch(/dissent without done_when: d9/);
   expect(validatePlanHandoff(orphan, { maxDoneWhen: 6 }).join()).toMatch(/dissent without done_when: d9/);
+
+  // Case (b), #232 rule (e): the dropped skeptic item was the only cover for an issue done_when id — once by check.ref
+  // (a `test_…` id), once by covers (a positional `issue-dw<n>` id). Both are rejected naming the issue id: a dropped
+  // item is a ghost and covers nothing. Six planner items cover every other issue item, so the dropped one is the only gap.
+  const issueRef = "test_239_ghost_ref";
+  const issueBodyB = [
+    "## done_when",
+    ...six.map((d) => `- [ ] \`${d.check.ref}\` — ${d.text}`),
+    `- [ ] \`${issueRef}\` — covered only by the dropped skeptic item's check.ref`,
+  ].join("\n");
+  const byRef = planFix({ done_when: [...six, dw239(7, { source: "skeptic", check: { kind: "test", ref: issueRef } })] });
+  const ghostRef = verifyPlan(byRef, { ...limits, issueBody: issueBodyB });
+  expect(ghostRef.ok).toBe(false);
+  expect(ghostRef.reasons.filter((x) => x.startsWith("issue done_when not covered by the plan:")))
+    .toEqual([`issue done_when not covered by the plan: ${issueRef} — "covered only by the dropped skeptic item's check.ref" (cover it: a plan item with check.ref "${issueRef}" or covers: ["${issueRef}"])`]);
+  expect(validatePlanHandoff(byRef, { maxDoneWhen: 6, issueBody: issueBodyB }).filter((x) => x.startsWith("issue done_when not covered by the plan:")))
+    .toEqual([`issue done_when not covered by the plan: ${issueRef} — "covered only by the dropped skeptic item's check.ref" (cover it: a plan item with check.ref "${issueRef}" or covers: ["${issueRef}"])`]);
+  // Control: the same skeptic item kept under the cap (planner 5 + skeptic 1) does cover it — the rejection above is the drop's.
+  const keptRef = planFix({ done_when: [...six.slice(0, 5), dw239(7, { source: "skeptic", check: { kind: "test", ref: issueRef } })] });
+  const issueBodyKept = issueBodyB.split("\n").filter((l) => !l.includes("test_239_item_6")).join("\n");
+  expect(validatePlanHandoff(keptRef, { maxDoneWhen: 6, issueBody: issueBodyKept })).toEqual([]);
+
+  const issueBodyPos = "## done_when\n- [ ] the export carries a header row\n";   // no test id → positional id issue-dw1
+  const byCovers = planFix({ done_when: [...six, dw239(7, { source: "skeptic", covers: ["issue-dw1"] })] });
+  const ghostCovers = verifyPlan(byCovers, { ...limits, issueBody: issueBodyPos });
+  expect(ghostCovers.ok).toBe(false);
+  expect(ghostCovers.reasons.filter((x) => x.startsWith("issue done_when not covered by the plan:")))
+    .toEqual([`issue done_when not covered by the plan: issue-dw1 — "the export carries a header row" (cover it: add covers: ["issue-dw1"] to the plan item that checks it)`]);
+  const keptCovers = planFix({ done_when: [...six.slice(0, 5), dw239(7, { source: "skeptic", covers: ["issue-dw1"] })] });
+  expect(validatePlanHandoff(keptCovers, { maxDoneWhen: 6, issueBody: issueBodyPos })).toEqual([]);
 });
 
 /**
