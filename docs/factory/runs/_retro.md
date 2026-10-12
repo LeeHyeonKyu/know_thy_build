@@ -1,43 +1,45 @@
 # Retro State
 
-- last retro: 2026-10-12T05:40:12.734Z
-- merges since last retro: 1
-- current N: 2
+- last retro: 2026-10-12T08:34:05.316Z
+- merges since last retro: 0
+- current N: 1
 
 ## History (last 5)
 
 | at | yield | n_before | n_after | needs_human_since |
 | --- | --- | --- | --- | --- |
-| 2026-10-11T16:22:45.790Z | 1 | 1 | 1 | 24 |
 | 2026-10-11T21:30:10.231Z | 1 | 1 | 1 | 2 |
 | 2026-10-12T00:31:02.403Z | 0 | 1 | 1 | 4 |
 | 2026-10-12T03:57:13.672Z | 1 | 1 | 1 | 2 |
 | 2026-10-12T05:40:12.734Z | 0 | 1 | 2 | 0 |
+| 2026-10-12T08:34:05.316Z | 0 | 2 | 1 | 2 |
 
 ## Stats
 
 | metric | this window | cumulative |
 | --- | --- | --- |
-| merged | 1 | 25 |
-| review rounds avg | 1 | 1.68 |
-| rounds/issue (plan/impl/review) | 2 / 2 / 1 | 1.16 / 2.12 / 1.68 |
+| merged | 3 | 28 |
+| review rounds avg | 1 | 1.61 |
+| rounds/issue (plan/impl/review) | 2 / 2 / 1 | 1.25 / 2.11 / 1.61 |
 | escaped defects | 0 | 28 |
-| revert rate | 0.00 (0/1) | 0.00 (0/25) |
-| needs-human | 2 | 92 |
+| revert rate | 0.00 (0/3) | 0.00 (0/28) |
+| needs-human | 2 | 94 |
 | rejects by role | 없음 | spec-conformance 12, qa 4, correctness 14, architecture 7, security 5 |
-| reviewer overlap | 없음 | 0.50 (23/46, runs 59) |
+| reviewer overlap | 없음 | 0.50 (23/46, runs 65) |
 | unique findings by role | 없음 | spec-conformance 5, qa 4, correctness 6, architecture 4, security 4 |
-| qa na ratio | 0.08 (1/12 claims, na-heavy 0/2 approvals) | 0.24 (73/303 claims, na-heavy 10/43 approvals) |
-| cost (usd) | 15.47 | 1404.94 |
-| tokens | input 577817 / output 46082 | input 34509778 / output 2849083 |
-| retro cost (usd) | 0.00 | 16.88 |
-| retro tokens | input 0 / output 0 | input 50 / output 41957 |
-| full retros | — | 14 |
+| qa na ratio | 0.06 (1/18 claims, na-heavy 0/3 approvals) | 0.23 (74/321 claims, na-heavy 10/46 approvals) |
+| cost (usd) | 26.97 | 1431.91 |
+| tokens | input 910244 / output 72038 | input 35420022 / output 2921121 |
+| retro cost (usd) | 1.54 | 18.42 |
+| retro tokens | input 4 / output 2407 | input 54 / output 44364 |
+| full retros | — | 15 |
 
 ### Rounds per issue (this window)
 
 | issue | plan | implement | review | escaped |
 | --- | --- | --- | --- | --- |
+| #271 | 2 | 2 | 1 | 0 |
+| #227 | 2 | 2 | 1 | 0 |
 | #217 | 2 | 2 | 1 | 0 |
 
 ### Phase-2 gate baseline (this session)
@@ -52,11 +54,11 @@
 ```json
 {
   "cursor": {
-    "last_retro_at": "2026-10-12T05:40:12.734Z",
+    "last_retro_at": "2026-10-12T08:34:05.316Z",
     "last_record_offsets": {}
   },
-  "merges_since": 1,
-  "n": 2,
+  "merges_since": 0,
+  "n": 1,
   "history": [
     {
       "at": "2026-09-14T14:00:58.920Z",
@@ -847,6 +849,40 @@
       ],
       "n_before": 1,
       "n_after": 2
+    },
+    {
+      "at": "2026-10-12T08:34:05.316Z",
+      "yield": 0,
+      "needs_human_since": 2,
+      "applied": [
+        {
+          "step": "feedback-route",
+          "issues": [
+            271,
+            227,
+            217
+          ],
+          "actions": [
+            {
+              "kind": "warning",
+              "step": "feedback-route",
+              "login": "LeeHyeonKyu",
+              "current": "ktb-factory[bot]",
+              "reason": "current factory identity: ktb-factory[bot] (machine user/app, FACTORY_BOT_LOGIN); older runs in this window ran under a shared identity (LeeHyeonKyu) — their human decisions are unverifiable, nothing to register"
+            }
+          ]
+        },
+        {
+          "step": "publish-proposal",
+          "skipped": "duplicate #276",
+          "pr": 276,
+          "proposals": [
+            "gate"
+          ]
+        }
+      ],
+      "n_before": 2,
+      "n_after": 1
     }
   ],
   "candidates": {
@@ -2458,11 +2494,23 @@
     ]
   },
   "stats": {
-    "merged": 1,
+    "merged": 3,
     "review_rounds_avg": 1,
     "plan_rounds_avg": 2,
     "implement_rounds_avg": 2,
     "rounds_per_issue": [
+      {
+        "issue": 271,
+        "plan": 2,
+        "implement": 2,
+        "review": 1
+      },
+      {
+        "issue": 227,
+        "plan": 2,
+        "implement": 2,
+        "review": 1
+      },
       {
         "issue": 217,
         "plan": 2,
@@ -2476,30 +2524,37 @@
     "reverted_issues": [],
     "revert_rate": 0,
     "rejects_by_role": {},
-    "review_runs": 2,
+    "review_runs": 6,
     "findings_total": 0,
     "overlapping_findings": 0,
     "unique_findings_by_role": {},
     "overlap_ratio": 0,
     "needs_human": 2,
-    "qa_approvals": 2,
-    "qa_claims_total": 11,
+    "qa_approvals": 3,
+    "qa_claims_total": 17,
     "qa_na_total": 1,
-    "qa_na_ratio": 0.08,
+    "qa_na_ratio": 0.06,
     "qa_na_heavy_approvals": 0,
     "usage": {
-      "cost_usd": 15.46814,
+      "cost_usd": 26.966119,
       "tokens": {
-        "input": 577817,
-        "output": 46082
+        "input": 910244,
+        "output": 72038
+      }
+    },
+    "retro_usage": {
+      "cost_usd": 1.541212,
+      "tokens": {
+        "input": 4,
+        "output": 2407
       }
     }
   },
   "stats_total": {
-    "merged": 25,
-    "review_rounds_avg": 1.68,
-    "plan_rounds_avg": 1.16,
-    "implement_rounds_avg": 2.12,
+    "merged": 28,
+    "review_rounds_avg": 1.61,
+    "plan_rounds_avg": 1.25,
+    "implement_rounds_avg": 2.11,
     "escaped_defects": 28,
     "reverts": 0,
     "reverted_issues": [],
@@ -2511,7 +2566,7 @@
       "architecture": 7,
       "security": 5
     },
-    "review_runs": 59,
+    "review_runs": 65,
     "findings_total": 46,
     "overlapping_findings": 23,
     "unique_findings_by_role": {
@@ -2522,27 +2577,27 @@
       "security": 4
     },
     "overlap_ratio": 0.5,
-    "needs_human": 92,
-    "qa_approvals": 43,
-    "qa_claims_total": 230,
-    "qa_na_total": 73,
-    "qa_na_ratio": 0.24,
+    "needs_human": 94,
+    "qa_approvals": 46,
+    "qa_claims_total": 247,
+    "qa_na_total": 74,
+    "qa_na_ratio": 0.23,
     "qa_na_heavy_approvals": 10,
     "usage": {
-      "cost_usd": 1404.939918,
+      "cost_usd": 1431.906037,
       "tokens": {
-        "input": 34509778,
-        "output": 2849083
+        "input": 35420022,
+        "output": 2921121
       }
     },
     "retro_usage": {
-      "cost_usd": 16.87515,
+      "cost_usd": 18.416362,
       "tokens": {
-        "input": 50,
-        "output": 41957
+        "input": 54,
+        "output": 44364
       }
     },
-    "retros": 14
+    "retros": 15
   },
   "deferred_proposals": [],
   "deletion_candidates": []
