@@ -6793,6 +6793,8 @@ test("test_239_review_r1_line_cannot_forge_review_evidence", async () => {
     [{ role: `x\n${forged}\nz`, verdict: "approve" }],
     [{ role: "architect", verdict: `approve\r\n${forged}\r\nz` }],
     [{ role: `x\u2028${forged}\u2029z`, verdict: "approve" }],
+    // #289 dw4 \u2014 comment delimiters and a pipe around the forged line, on both fields
+    [{ role: `x|-->\n${forged}\n<!--|z`, verdict: `approve\n<!-- ${forged} -->\n|` }],
   ];
   for (const r1 of shapes) {
     const lines = [];

@@ -861,6 +861,15 @@ test("test_239_signoff_objections_do_not_require_a_covering_done_when", async ()
   const one = verifyPlan(coveredIssue, { issueBody: "## done_when\n- [ ] `test_7_create` — POST /notes returns 201\n" });
   expect(one.ok).toBe(true);
   expect(one.planNotes).toEqual([`plan: unresolved sign-off objection from skeptic: ${objection.slice(0, 120)}`]);
+
+  // #289 dw1 — the exemption stops at dissent coverage: #232's issue-coverage rule still rejects an uncovered issue item
+  // in the same plan that carries the exempt sign-off objection, and only that issue item is named.
+  const issueGap = verifyPlan(coveredIssue, { issueBody: "## done_when\n- [ ] `test_7_create` — POST /notes returns 201\n- [ ] `test_7_delete` — DELETE /notes/1 returns 204\n" });
+  expect(issueGap.ok).toBe(false);
+  expect(issueGap.reasons.filter((x) => x.startsWith("issue done_when not covered by the plan:")))
+    .toEqual([expect.stringMatching(/^issue done_when not covered by the plan: test_7_delete — /)]);
+  expect(issueGap.reasons.some((x) => x.startsWith("dissent without done_when"))).toBe(false);
+  expect(issueGap.data.signoff_objections).toEqual([{ id: "signoff-skeptic", role: "skeptic", text: objection.slice(0, 120) }]);
 });
 
 /**
