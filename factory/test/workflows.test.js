@@ -2852,6 +2852,39 @@ test("test_299_schema_and_signoff_objections_survive_normalization", async () =>
   const vc = verify299(clean, planLoaderFix());
   expect(vc.reasons).toEqual([]);
   expect("signoff_objections" in vc.data).toBe(false);
+
+  // the workflow is the ONLY author of signoff_objections: a writer (single-mode planner, debate synthesizer or sign-off
+  // revision) that returns the field itself — a role that never voted, or a stale objection carried from a rejected plan
+  // — never reaches the posted handoff. verifyStage posts the field unchanged (the dissent_log line is low), so a forged
+  // entry here would read to the operator as real dissent.
+  const FORGED = [{ id: "signoff-skeptic", role: "skeptic", text: "FORGED — this role never objected" }];
+  const forging = (inner) => async (prompt, opts) => {
+    const out = await inner(prompt, opts);
+    const writes = opts.agentType === "plan-synthesizer" || opts.label?.startsWith("plan:");
+    return writes && out ? { ...out, signoff_objections: FORGED } : out;
+  };
+  for (const [name, loaded] of [["single", await realPlanLoaded299("single")], ["debate", planLoaderFix()]]) {
+    const forged = await runWorkflow(FACTORY_PLAN_WORKFLOW, { agent: forging(cleanStub299()), args: { issue: 42, context: ".factory/out/context.json", loaded } });
+    expect("signoff_objections" in forged.result, `${name}: clean pass, writer-supplied field`).toBe(false);
+    const vf = verify299(forged, loaded);
+    expect(vf.reasons, name).toEqual([]);
+    expect("signoff_objections" in vf.data, `${name}: posted`).toBe(false);
+  }
+  // a real objection plus a forging writer (synthesis AND revision forge): only the roles that actually objected are posted
+  const mixed = await runWorkflow(FACTORY_PLAN_WORKFLOW, { agent: forging(stub), args: { issue: 42, context: ".factory/out/context.json", loaded: planLoaderFix() } });
+  expect(verify299(mixed, planLoaderFix()).data.signoff_objections).toEqual([
+    { id: "signoff-architect", role: "architect", text: OBJ.architect },
+    { id: "signoff-operator", role: "operator", text: OBJ.operator },
+  ]);
+
+  // cf1 — the posted text keeps the engine's 120-character cap (verify-stage SIGNOFF_TEXT_MAX), the first 120 verbatim;
+  // the dissent_log line keeps the whole objection
+  const LONG = "the rollback path is unspecified: ".padEnd(300, "x");
+  const longStub = async (prompt, opts) => (opts.label === "sign:architect" ? { vote: "object", reason: LONG } : stub(prompt, opts));
+  const long = await runWorkflow(FACTORY_PLAN_WORKFLOW, { agent: longStub, args: { issue: 42, context: ".factory/out/context.json", loaded: planLoaderFix() } });
+  const vl = verify299(long, planLoaderFix());
+  expect(vl.data.signoff_objections.find((o) => o.role === "architect").text).toBe(LONG.slice(0, 120));
+  expect(vl.data.dissent_log.find((d) => d.id === "signoff-architect").objection).toBe(LONG);
 });
 
 test("test_299_single_mode_skeptic_cap_keeps_orphaned_dissent", async () => {

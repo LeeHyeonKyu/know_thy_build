@@ -339,7 +339,8 @@ const repairDirective = planRepair.length
     // for a plain object), and loaded.json never says which case this is — so the writer is told both cases, never that
     // the key IS there.
     `If \`plan_repair_previous\` in \`${args.context}\` is present, that is the rejected plan — start from it, and keep ` +
-    `every dissent_log entry and every signoff_objections entry it carries unless a reason above names it. ` +
+    `every dissent_log entry it carries unless a reason above names it (signoff_objections are written by the ` +
+    `workflow from this turn's sign-off, never carried). ` +
     `If it is absent, the rejected plan was not carried: fix the reasons above in the plan you write, and do not ` +
     `invent what the rejected plan said.`
   : '';
@@ -348,6 +349,13 @@ const repairDirective = planRepair.length
 // records it as the agent's claim and never resolves or classifies on it (planRepairCostLine).
 const repairOf = planRepair.length ? `plan_repair_previous in ${args.context}` : null;
 const withRepairOf = (o) => (repairOf ? { ...o, repair_of: repairOf } : o);
+// #299 (skeptic) — `signoff_objections` has ONE author: the debate sign-off below. A writer answers in PLAN_V1, which
+// declares the field, but whatever it puts there (a role that never voted, a stale objection carried from a rejected
+// plan) is dropped before the handoff — verifyStage posts the field unchanged, so a writer-made entry would read to the
+// operator as real dissent.
+const withoutWriterObjections = (p) => { const { signoff_objections: _writer, ...rest } = p || {}; return rest; };
+// cf1 — the posted text keeps the engine's cap (verify-stage.js SIGNOFF_TEXT_MAX), the first 120 characters verbatim.
+const SIGNOFF_TEXT_MAX = 120;
 // #299 — a non-empty `plan_repair` is the ONLY repair trigger; there is no second switch. The repair turn still
 // dispatches the whole roster (single: planner + skeptic; debate: R1, R2, synthesis, sign-off): run-stage resets
 // agents.jsonl before it and verify-stage requires every roster role completed, so a writer-only turn would be
@@ -453,7 +461,7 @@ if (mode === 'single') {
   phase('Sign-off');
 
   return withRepairOf({
-    ...(plan || {}),
+    ...withoutWriterObjections(plan),
     issue,
     tier,
     roles: rosterNames,
@@ -536,6 +544,7 @@ let plan = r1.length > 0
 phase('Sign-off');
 
 let votes = [];
+let signoffObjections = null;   // set only by the second failed sign-off — the field's one author (see withoutWriterObjections)
 if (plan) {
   for (let attempt = 0; attempt < 2; attempt++) {
     votes = (await parallel(active.map((r) => () =>
@@ -561,10 +570,11 @@ if (plan) {
       const log = Array.isArray(plan.dissent_log) ? plan.dissent_log : [];
       const superseded = log.filter((d) => !objections.some((o) => d && d.role === o.role && d.objection === o.reason));
       // #243 (P-13) — the same objection objects feed both the dissent_log line and the top-level signoff_objections
-      // entry, so the two can never say different things (same role, same text, same id).
+      // entry, so the two can never say different things (same role, same id; the posted text is the first 120
+      // characters of the dissent_log line's objection, as the engine's own sweep would post it).
+      signoffObjections = objections.map((o) => ({ id: `signoff-${o.role}`, role: o.role, text: String(o.reason ?? '').slice(0, SIGNOFF_TEXT_MAX) }));
       plan = {
         ...plan,
-        signoff_objections: objections.map((o) => ({ id: `signoff-${o.role}`, role: o.role, text: o.reason })),
         dissent_log: [
           ...superseded,
           // 1.4.43: a surviving sign-off objection is injected by the WORKFLOW, after synthesis — like the
@@ -573,8 +583,9 @@ if (plan) {
           // contracted and test_243_* pin it. Since #239 the validator exempts an exact `signoff-<role>` at any
           // severity, so medium would not force a repair turn either; the trade-off of `low` is that the engine's
           // sweep (normalizePlanHandoff) skips it, so no `plan: unresolved sign-off objection` run-record line is
-          // written for it. The objection is surfaced as the top-level `signoff_objections` entry above, which
-          // verifyStage posts unchanged in the handoff.
+          // written for it — test_243_* pin both `low` and the workflow-side field, so neither can change here
+          // without an engine change (#299 non_goals). The objection is surfaced as the top-level
+          // `signoff_objections` (signoffObjections above), which verifyStage posts unchanged in the handoff.
           ...objections.map((o) => ({
             id: `signoff-${o.role}`,
             severity: 'low',
@@ -601,7 +612,8 @@ if (plan) {
 }
 
 return withRepairOf({
-  ...(plan || {}),
+  ...withoutWriterObjections(plan),
+  ...(signoffObjections ? { signoff_objections: signoffObjections } : {}),
   issue,
   tier,
   roles: rosterNames,
