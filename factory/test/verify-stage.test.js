@@ -1173,3 +1173,120 @@ test("test_289_signoff_role_cannot_forge_review_evidence", async () => {
     }
   }
 });
+
+// ── #287 — triage의 tier 올림이 merge의 판정 경로 분류와 같은 답을 낸다 ─────────────────────────────────────────────
+// merge(merge-stage.js의 자기 변경 경로)는 diff의 경로를 `protectedPaths`(integrity.js, 살아 있는 additive_only 면제)로 거른 뒤
+// `classifyProtected(..., {engine:true}).judge`로 판정 경로를 고른다. 판정 경로가 든 PR은 load-bearing 로스터의 만장일치
+// 리뷰가 있어야 팩토리가 머지한다("judge path needs a unanimous review"). triage가 같은 경로를 standard로 두면 그 PR은
+// 리뷰를 다 통과하고도 머지에서 사람에게 간다(#232/PR #263). 그래서 triage는 [load_bearing].paths에 더해 merge와 같은
+// 두 단계를 같은 순서로 다시 댄다 — 엔진 저장소(engine=true)에서만. 올린 사유는 러너의 `judge_path_hit`에 남는다.
+import { loadHarness } from "../lib/config.js";
+import { protectedPaths } from "../lib/integrity.js";
+import { classifyProtected } from "../lib/non-judge-paths.js";
+import { execFileSync } from "node:child_process";
+import { existsSync } from "node:fs";
+
+const REPO_287 = join(dirname(fileURLToPath(import.meta.url)), "../..");
+const HARNESS_287 = loadHarness(REPO_287);
+const triage287 = (data) => ({ is_error: false, result: JSON.stringify({ schema: "factory.triage.v1", issue: 287, disposition: "ready", reason: "r", orchestration: "workflow", ...data }) });
+const triageOn287 = (impact_paths, { tier = "standard", engine = true, extra = {}, prot = HARNESS_287.protected } = {}) =>
+  verifyStage({ stage: "triage", out: triage287({ tier, impact_paths, ...extra }), agentsLog: log([]), loadBearing: HARNESS_287.load_bearing.paths, engine, protected: prot });
+
+test("test_tier_raise_uses_the_merge_stage_judge_path_classification", () => {
+  // 픽스처의 모든 경로는 트리에 실재한다(이슈 초안의 factory/lib/board/**는 없다 — plan d2).
+  const judge = ["factory/lib/verify-stage.js", "factory/lib/context.js", "factory/bin/gates.js", "bin/cli.js"];
+  const nonJudge = ["factory/lib/status.js", "factory/lib/board-static.js", "docs/TECHNICAL.md"];
+  const unprotected = ["README.md"];
+  const additiveAgent = [".claude/agents/plan-skeptic.md"];
+  for (const p of [...judge, ...nonJudge, ...unprotected, ...additiveAgent, "factory/lib/merge-stage.js"]) expect(existsSync(join(REPO_287, p)), p).toBe(true);
+
+  // 판정 경로 하나만 — standard·docs 신고 모두 load-bearing으로 오르고, 덮어쓴 신고와 올린 경로가 남는다
+  for (const p of judge) {
+    for (const declared of ["standard", "docs"]) {
+      const v = triageOn287([p], { tier: declared });
+      expect(v.ok, p).toBe(true);
+      expect([v.data.tier, v.data.tier_declared], `${p} (${declared})`).toEqual(["load-bearing", declared]);
+      expect(v.data.judge_path_hit, p).toEqual([{ path: p, source: "judge-path" }]);
+      expect(v.data.load_bearing_hit, p).toBeUndefined();            // [load_bearing].paths 밖이다 — 그 올림과 구분된다
+    }
+  }
+  // 섞이면 판정 경로만 이름이 붙는다
+  const mixed = triageOn287(["docs/TECHNICAL.md", "factory/lib/context.js", "README.md", "factory/lib/verify-stage.js"]);
+  expect(mixed.data.tier).toBe("load-bearing");
+  expect(mixed.data.judge_path_hit).toEqual([{ path: "factory/lib/context.js", source: "judge-path" }, { path: "factory/lib/verify-stage.js", source: "judge-path" }]);
+
+  // 비판정·비보호·살아 있는 additive_only 에이전트 파일 — 신고 tier 그대로, 흔적 없음
+  for (const p of [...nonJudge, ...unprotected, ...additiveAgent]) {
+    const v = triageOn287([p]);
+    expect(v.ok, p).toBe(true);
+    expect([v.data.tier, v.data.tier_declared, v.data.judge_path_hit, v.data.load_bearing_hit], p).toEqual(["standard", undefined, undefined, undefined]);
+  }
+  const allQuiet = triageOn287([...nonJudge, ...unprotected, ...additiveAgent], { tier: "docs" });
+  expect([allQuiet.data.tier, allQuiet.data.judge_path_hit]).toEqual(["docs", undefined]);
+
+  // 이미 load-bearing이면 내리지도, "올렸다"고 적지도 않는다
+  const lb = triageOn287(["factory/lib/verify-stage.js"], { tier: "load-bearing" });
+  expect([lb.data.tier, lb.data.tier_declared, lb.data.judge_path_hit]).toEqual(["load-bearing", undefined, undefined]);
+  const lbQuiet = triageOn287(["docs/TECHNICAL.md"], { tier: "load-bearing" });
+  expect(lbQuiet.data.tier).toBe("load-bearing");
+
+  // #254의 [load_bearing].paths 올림은 그대로 산다 — merge-stage.js는 load_bearing_hit에도 남는다
+  const ms = triageOn287(["factory/lib/merge-stage.js"]);
+  expect([ms.data.tier, ms.data.tier_declared]).toEqual(["load-bearing", "standard"]);
+  expect(ms.data.load_bearing_hit).toEqual([{ path: "factory/lib/merge-stage.js", glob: "factory/lib/merge-stage.js" }]);
+  expect(ms.data.judge_path_hit).toEqual([{ path: "factory/lib/merge-stage.js", source: "judge-path" }]);
+});
+
+test("test_287_engine_false_keeps_only_load_bearing_paths", () => {
+  // 채택자·설치본(engine=false, 또는 engine/protected를 넘기지 않음) — 오늘처럼 [load_bearing].paths만 올린다
+  const cases = [
+    (paths) => triageOn287(paths, { engine: false }),
+    (paths) => verifyStage({ stage: "triage", out: triage287({ tier: "standard", impact_paths: paths }), agentsLog: log([]), loadBearing: HARNESS_287.load_bearing.paths, protected: HARNESS_287.protected }),   // engine를 넘기지 않음
+    (paths) => triageOn287(paths, { engine: "true" }),                         // 정확히 true일 때만 — 닫힌 쪽이 기본
+    (paths) => verifyStage({ stage: "triage", out: triage287({ tier: "standard", impact_paths: paths }), agentsLog: log([]), loadBearing: HARNESS_287.load_bearing.paths }),
+  ];
+  for (const [i, run] of cases.entries()) {
+    const vs = run(["factory/lib/verify-stage.js"]);
+    expect(vs.ok, `case ${i}`).toBe(true);
+    expect([vs.data.tier, vs.data.tier_declared, vs.data.judge_path_hit], `case ${i}`).toEqual(["standard", undefined, undefined]);
+    const ms = run(["factory/lib/merge-stage.js"]);
+    expect([ms.data.tier, ms.data.tier_declared], `case ${i}`).toEqual(["load-bearing", "standard"]);
+    expect(ms.data.load_bearing_hit, `case ${i}`).toEqual([{ path: "factory/lib/merge-stage.js", glob: "factory/lib/merge-stage.js" }]);
+    expect(ms.data.judge_path_hit, `case ${i}`).toBeUndefined();
+  }
+  // engine=true여도 보호 목록이 넘어오지 않으면 아무것도 판정 경로가 아니다(없는 규칙을 발명하지 않는다)
+  const noProt = triageOn287(["factory/lib/verify-stage.js"], { prot: null });
+  expect([noProt.data.tier, noProt.data.judge_path_hit]).toEqual(["standard", undefined]);
+});
+
+test("test_tier_raise_and_merge_judge_classification_agree_on_main", async () => {
+  // 우주: main의 추적 파일 전부 + factory/**의 .factory/ 미러 + README.md (factory/lib/**만이 아니다 — plan d3)
+  const tracked = execFileSync("git", ["ls-files"], { cwd: REPO_287, encoding: "utf8" }).split("\n").filter(Boolean);
+  const universe = [...new Set([...tracked, ...tracked.filter((p) => p.startsWith("factory/")).map((p) => `.${p}`), "README.md"])].sort();
+  for (const must of ["factory/lib/verify-stage.js", "factory/lib/status.js", "bin/cli.js", ".claude/agents/plan-skeptic.md", "README.md", ".factory/lib/context.js"]) expect(universe, must).toContain(must);
+
+  // merge 쪽: merge가 실제로 부르는 생산 함수 — protectedPaths(이 경로들을 살아 있는 변경 "M"으로 보는 name-status diff) 다음
+  // classifyProtected(..., {engine:true}).judge (merge-stage.js의 자기 변경 경로와 같은 두 단계·같은 순서).
+  const run = async (cmd, args) => {
+    expect([cmd, args.slice(0, 3)]).toEqual(["git", ["diff", "--no-renames", "--name-status"]]);
+    return { code: 0, stdout: universe.map((p) => `M\t${p}`).join("\n") + "\n", stderr: "" };
+  };
+  const prot = await protectedPaths({ run, cwd: REPO_287, base: "b".repeat(40), harness: HARNESS_287 });
+  expect(prot.ok).toBe(true);
+  const mergeJudge = new Set(classifyProtected(prot.files, { engine: true }).judge);
+
+  // triage 쪽: standard로 신고한 한 경로짜리 이슈가 실제 verifyStage triage 분기를 지나 load-bearing으로 오르는가
+  const disagree = [];
+  for (const p of universe) {
+    const v = triageOn287([p]);
+    if (!v.ok) { disagree.push(`${p}: triage verify failed — ${v.reasons.join("; ")}`); continue; }
+    const raised = v.data.tier === "load-bearing";
+    if (raised !== mergeJudge.has(p)) disagree.push(`${p}: triage ${raised ? "raises" : "keeps standard"}, merge ${mergeJudge.has(p) ? "needs a unanimous load-bearing review" : "does not"}`);
+  }
+  expect(disagree).toEqual([]);
+  // 비어 있는 일치가 아니다 — 양쪽 모두 실제로 갈린다
+  expect(mergeJudge.has("factory/lib/verify-stage.js")).toBe(true);
+  expect(mergeJudge.has("factory/lib/status.js")).toBe(false);
+  expect(mergeJudge.has(".claude/agents/plan-skeptic.md")).toBe(false);
+  expect(mergeJudge.has("README.md")).toBe(false);
+});

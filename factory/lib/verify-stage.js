@@ -1,6 +1,8 @@
 import { validate } from "./schemas.js";
 import { extractStageArtifact } from "./stage-artifact.js";
 import { matchesAny } from "./glob.js";
+import { isProtectedLivePath } from "./integrity.js";
+import { classifyProtected } from "./non-judge-paths.js";
 import { citedClaimIds, ALL_NA_PREFIX } from "./qa-evidence.js";
 
 /**
@@ -493,7 +495,21 @@ export function neverAutomateHits(paths, globs) {
   return hits;
 }
 
-export function verifyStage({ stage, out, transcriptText, agentsLog, roster = [], rolePrefix = "", expectedRounds, orchestration, gates, planLimits, issueBody, neverAutomate = [], loadBearing = [], qaManifest = null }) {
+/**
+ * #287 — merge가 "판정 경로"라고 부르는 impact path들. merge(merge-stage.js의 자기 변경 경로)는 diff를 `protectedPaths`
+ * (integrity.js `isProtectedEntry` — 살아 있는 additive_only 파일은 면제)로 거른 뒤 `classifyProtected(..., {engine:true}).judge`로
+ * 판정 경로를 고르고, 그런 PR은 load-bearing 로스터의 만장일치 리뷰 없이는 팩토리가 머지하지 않는다. triage가 그 경로를 standard로
+ * 두면 리뷰를 통과한 PR이 머지에서 사람에게 간다(#232/PR #263). 그래서 같은 두 술어를 같은 순서로 쓴다 — 글롭을 여기 다시 적지 않는다.
+ * merge가 `d.engine === true`일 때만 판정 경로를 보듯, `engine`이 정확히 true이고 보호 설정이 넘어왔을 때만 답한다(채택자·설치본 불변).
+ * @returns {Array<{path: string, source: "judge-path"}>}
+ */
+export function judgePathHits(paths, { engine = false, protectedCfg = null } = {}) {
+  if (engine !== true || !protectedCfg || typeof protectedCfg !== "object") return [];
+  const live = [...new Set((Array.isArray(paths) ? paths : []).filter((p) => typeof p === "string" && isProtectedLivePath(p, protectedCfg)))];
+  return classifyProtected(live, { engine: true }).judge.map((path) => ({ path, source: "judge-path" }));
+}
+
+export function verifyStage({ stage, out, transcriptText, agentsLog, roster = [], rolePrefix = "", expectedRounds, orchestration, gates, planLimits, issueBody, neverAutomate = [], loadBearing = [], engine = false, protected: protectedCfg = null, qaManifest = null }) {
   const reasons = [];
   /** A-SF1 — qa 리뷰어 자신의 증거 부족. 스테이지 실패가 아니라 **이 라운드의 판정 재료**로 나간다. */
   let qaShortfall = null;
@@ -592,11 +608,14 @@ export function verifyStage({ stage, out, transcriptText, agentsLog, roster = []
      */
     delete data.load_bearing_hit;
     delete data.tier_declared;
+    delete data.judge_path_hit;
     const lbHits = neverAutomateHits(data.impact_paths, loadBearing);
-    if (lbHits.length && data.tier !== "load-bearing") {
+    const jpHits = judgePathHits(data.impact_paths, { engine, protectedCfg });
+    if ((lbHits.length || jpHits.length) && data.tier !== "load-bearing") {
       data.tier_declared = data.tier;
       data.tier = "load-bearing";
-      data.load_bearing_hit = lbHits;
+      if (lbHits.length) data.load_bearing_hit = lbHits;
+      if (jpHits.length) data.judge_path_hit = jpHits;
     }
   }
   if (data && orchestration && data.orchestration !== orchestration) reasons.push(`orchestration ${data.orchestration} != configured ${orchestration}`);
