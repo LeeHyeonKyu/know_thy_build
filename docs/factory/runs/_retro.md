@@ -1,7 +1,7 @@
 # Retro State
 
 - last retro: 2026-10-12T10:20:44.131Z
-- merges since last retro: 0
+- merges since last retro: 1
 - current N: 2
 
 ## History (last 5)
@@ -18,21 +18,27 @@
 
 | metric | this window | cumulative |
 | --- | --- | --- |
-| merged | 0 | 29 |
-| review rounds avg | 0 | 1.59 |
-| rounds/issue (plan/impl/review) | 0 / 0 / 0 | 1.24 / 2.07 / 1.59 |
+| merged | 1 | 29 |
+| review rounds avg | 1 | 1.59 |
+| rounds/issue (plan/impl/review) | 1 / 1 / 1 | 1.24 / 2.07 / 1.59 |
 | escaped defects | 0 | 28 |
-| revert rate | 없음 | 0.00 (0/29) |
-| needs-human | 0 | 94 |
+| revert rate | 0.00 (0/1) | 0.00 (0/29) |
+| needs-human | 1 | 94 |
 | rejects by role | 없음 | spec-conformance 12, qa 4, correctness 14, architecture 7, security 5 |
 | reviewer overlap | 없음 | 0.50 (23/46, runs 66) |
 | unique findings by role | 없음 | spec-conformance 5, qa 4, correctness 6, architecture 4, security 4 |
-| qa na ratio | 0.00 (0/5 claims, na-heavy 0/1 approvals) | 0.23 (74/327 claims, na-heavy 10/47 approvals) |
-| cost (usd) | 8.18 | 1440.93 |
-| tokens | input 296143 / output 23856 | input 35693114 / output 2944673 |
+| qa na ratio | 0.00 (0/7 claims, na-heavy 0/2 approvals) | 0.23 (74/327 claims, na-heavy 10/47 approvals) |
+| cost (usd) | 16.62 | 1440.93 |
+| tokens | input 803266 / output 54977 | input 35693114 / output 2944673 |
 | retro cost (usd) | 0.00 | 19.56 |
 | retro tokens | input 0 / output 0 | input 58 / output 46237 |
 | full retros | — | 16 |
+
+### Rounds per issue (this window)
+
+| issue | plan | implement | review | escaped |
+| --- | --- | --- | --- | --- |
+| #279 | 1 | 1 | 1 | 0 |
 
 ### Phase-2 gate baseline (this session)
 
@@ -49,7 +55,7 @@
     "last_retro_at": "2026-10-12T10:20:44.131Z",
     "last_record_offsets": {}
   },
-  "merges_since": 0,
+  "merges_since": 1,
   "n": 2,
   "history": [
     {
@@ -1929,6 +1935,14 @@
           239
         ],
         "source": "must_fix"
+      },
+      {
+        "role": "correctness",
+        "text": "The template emits the R1 record only as `rounds: [round1, round2]`. The consumer that is already on HEAD (#239, re-landed in #289/PR #290, commit 6dcd666) reads `v.data.r1_verdicts`, not `rounds`. After merge, every review run record will therefore still say `review-r1: (not carried by this workflow)` and `r2_flipped` will never be counted. #244 exists to give #239 that flip count; the issue says the count is #239's job, and it is the count that gates turning on `review_r2: skip`. So the change fails its purpose end to end, and its tests still pass because they only check the shape the workflow emits.",
+        "runs": [
+          244
+        ],
+        "source": "must_fix"
       }
     ],
     "examples": [
@@ -2525,37 +2539,49 @@
         "issue": 212,
         "reason": "gates file missing",
         "at": "2026-10-11T23:16:36Z"
+      },
+      {
+        "issue": 279,
+        "reason": "existing tests modified or deleted — human merge required: factory/test/rehearse.test.js (see PR #296)",
+        "at": "2026-10-12T11:52:34Z"
       }
     ]
   },
   "stats": {
-    "merged": 0,
-    "review_rounds_avg": 0,
-    "plan_rounds_avg": 0,
-    "implement_rounds_avg": 0,
-    "rounds_per_issue": [],
+    "merged": 1,
+    "review_rounds_avg": 1,
+    "plan_rounds_avg": 1,
+    "implement_rounds_avg": 1,
+    "rounds_per_issue": [
+      {
+        "issue": 279,
+        "plan": 1,
+        "implement": 1,
+        "review": 1
+      }
+    ],
     "escaped_defects": 0,
     "escaped_defects_detail": [],
     "reverts": 0,
     "reverted_issues": [],
-    "revert_rate": null,
+    "revert_rate": 0,
     "rejects_by_role": {},
-    "review_runs": 0,
+    "review_runs": 1,
     "findings_total": 0,
     "overlapping_findings": 0,
     "unique_findings_by_role": {},
     "overlap_ratio": 0,
-    "needs_human": 0,
-    "qa_approvals": 1,
-    "qa_claims_total": 5,
+    "needs_human": 1,
+    "qa_approvals": 2,
+    "qa_claims_total": 7,
     "qa_na_total": 0,
     "qa_na_ratio": 0,
     "qa_na_heavy_approvals": 0,
     "usage": {
-      "cost_usd": 8.176703,
+      "cost_usd": 16.616269,
       "tokens": {
-        "input": 296143,
-        "output": 23856
+        "input": 803266,
+        "output": 54977
       }
     }
   },
