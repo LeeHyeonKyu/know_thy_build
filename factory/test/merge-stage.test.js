@@ -4461,3 +4461,24 @@ test("test_236_operator_present_skips_only_the_veto_window — and a standing fa
     expect(d.transition.mock.calls.map((x) => x[0].to), label).toContain("factory:blocked");
   }
 });
+
+// ── #236 skeptic r6 — dw3 says the operator path "never reads the veto window". The one label read sec1 added is not the
+// window: it is a single point read at this run's own clock (since = now, so no window-era event can be in it), it happens
+// once, the clock never moves (nothing waits), and no window status/announcement exists for it to read. A poll, a since that
+// reaches back to an opened window, or a second read would each be the window coming back — this case fails on all three. ──
+test("test_236_operator_present_skips_only_the_veto_window — the standing-veto read is one point read at now, never the window", async () => {
+  for (const route of ["non_judge", "judge"]) {
+    const judge = route === "judge"
+      ? { protectedPaths: vi.fn(async () => ({ ok: true, files: BASE_FIXTURES_179.judge.files })), selfChange: { auto_merge_non_judge: false, auto_merge_judge: true, veto_minutes: 60 }, reviewRoster: vi.fn(async () => ({ ok: true, roles: ["correctness", "qa"], tier: "load-bearing" })) }
+      : {};
+    const d = operatorD236(judge);
+    const { code } = await run179(d);
+    expect(code, route).toBe(0);
+    expect(d.vetoLabel, route).toHaveBeenCalledTimes(1);
+    const nowValues = d.now.mock.results.map((r) => r.value);
+    expect(new Set(nowValues).size, route).toBe(1);                                   // the clock never advanced: no wait of any length
+    expect(d.vetoLabel.mock.calls[0][0], route).toEqual({ since: new Date(nowValues[0]).toISOString() });
+    for (const dep of [d.vetoWindow.open, d.vetoWindow.read, d.sleep]) expect(dep, route).not.toHaveBeenCalled();
+    expect(d.vetoWindow.statuses, route).toEqual([]);                                 // no window status was ever put up to be read
+  }
+});

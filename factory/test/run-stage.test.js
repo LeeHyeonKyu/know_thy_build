@@ -11608,3 +11608,73 @@ test("test_236_local_merge_refuses_door_files_and_non_green_checks — the local
   const ctl = operatorMergeVerdict236(prJson236({ files: [{ path: "factory/lib/status.js" }] }), { defaultBranch: "main", engine: true, judgeAllowed: true });
   expect(ctl.reasons.join("\n")).not.toMatch(/the door cannot open itself/);
 });
+
+// ── #236 skeptic r6 (dw4) — one run fed by the env the CLI actually spawns, not a hand-written one. The steps of main() that read
+// process.env (git auth, the local-entry hook, the operator deps, the self-change deps) are each the production factory main()
+// calls, fed `spawnInherit`'s captured env; then one runStage call goes approved → merged. A laptop env that one of those steps
+// refuses — the runner-only parts the skeptic named — stops this run before mergePr. The process-level spawn of main() itself
+// (real git/gh) is the end-to-end chain the plan defers to P-7a (non_goal). ──
+test("test_236_local_merge_one_run_through_run_stage_with_mains_wiring — from the CLI's spawned env to merged in one run", async () => {
+  const root = mkdtempSync(join(tmpdir(), "factory-236-chain-"));
+  mkdirSync(join(root, ".factory/bin"), { recursive: true });
+  writeFileSync(join(root, ".factory/bin/run-stage.js"), "// stub\n");
+  mkdirSync(join(root, ".factory/node_modules/smol-toml"), { recursive: true });
+  writeFileSync(join(root, ".factory/node_modules/smol-toml/package.json"), "{}\n");
+  const cliRun = makeFakeRun([
+    { match: (c, a) => c === "gh" && a[0] === "auth", result: { code: 0, stdout: "Logged in\n", stderr: "" } },
+  ]);
+  const spawnInherit = vi.fn(() => 0);
+  const io = { out: () => {}, err: () => {} };
+  expect(await runCommand236({ root, argv: ["merge", "7"], io, run: cliRun, spawnInherit, env: { PATH: "/usr/bin", HOME: "/home/op" } })).toBe(0);
+  const env = spawnInherit.mock.calls[0][2].env;   // exactly what main() sees as process.env
+
+  // main() prelude: off a runner with no GH_TOKEN, no git auth is forced on the engine (the operator's own git credentials stand).
+  expect(mergeGitAuth({ stage: "merge", env })).toBeNull();
+  expect(isOperatorMerge236({ stage: "merge", env })).toBe(true);
+
+  const charter = { self_change: { auto_merge_non_judge: true, auto_merge_judge: false, operator_merge_judge: false, veto_minutes: 15 }, never_automate: [] };
+  const gh = {
+    viewerLogin: vi.fn(async () => "alice"),
+    userType: vi.fn(async (l) => ({ alice: "User" })[l] ?? null),
+    commitStatuses: vi.fn(async () => [LOCAL_OK_236, ...FACTORY_STATUSES_236]),
+    mergePr: vi.fn(async () => {}),
+    setStatus: vi.fn(async () => {}),
+    labelEvents: vi.fn(async () => []),
+    issueLabels: vi.fn(async () => []),
+    issue: vi.fn(async () => ({ labels: ["factory:approved"] })),
+    setFactoryLabel: vi.fn(async () => {}),
+    comment: vi.fn(async () => {}),
+  };
+  const sink = [], log = [];
+  const d = mergeHappyDeps({
+    checkoutHead: vi.fn(async () => ({ ok: true, sha: HEAD_236, pr: 9 })),
+    protectedPaths: async () => ({ ok: true, files: ["factory/lib/status.js", "docs/factory/ops/runbook.md"] }),
+    runRecord: (l) => sink.push(...l),
+    transition: vi.fn(async ({ to }) => ({ ok: true, to })),
+    factoryLogins: async () => ({ ok: true, logins: ["ktb-bot"] }),
+    commitStatuses: async () => FACTORY_STATUSES_236,
+    breaker: vi.fn(async () => ({ ok: true, open: false, since: null, reason: null, detail: "closed" })),
+    persistSelfMerge: vi.fn(async () => ({ ok: true })),
+    sleep: vi.fn(async () => {}),
+    // main()'s local-entry hook, built by the production factory from the spawned env (FACTORY_LOCAL_ENTRY=1 is in it).
+    localEntry: makeLocalEntry({ gh, issue: 7, stage: "merge", env, rehearsal: async () => ({ ok: false, reason: "fixture: no rehearsal" }), admission: async () => ({ ok: false }) }),
+  });
+  wireOperatorMerge236(d, {
+    stage: "merge", env, run: prViewRun236(prJson236()), repo: "o/r", gh,
+    factoryLogins: async () => ({ ok: true, logins: ["ktb-bot"] }),
+    getCharter: () => charter, getEngine: () => true, getDefaultBranch: () => "main", log: (l) => log.push(l),
+  });
+  Object.defineProperties(d, Object.getOwnPropertyDescriptors(makeMergeSelfChangeDeps({ gh, issue: 7, getCharter: () => charter, getEngine: () => true, env })));
+
+  expect(env.FACTORY_LOCAL_ENTRY).toBe("1");
+  expect(await runStage({ stage: "merge", issue: 7, deps: d, runnerId: `local/${env.HOME}` })).toBe(0);
+  expect(gh.setFactoryLabel).not.toHaveBeenCalled();                         // the local-entry hook stayed out of a merge run
+  expect(gh.mergePr).toHaveBeenCalledTimes(1);
+  expect(gh.mergePr.mock.calls[0][0]).toBe(9);
+  expect(d.transition.mock.calls.map((c) => c[0].to)).toContain("factory:merged");
+  expect(gh.setStatus.mock.calls.map((c) => c[0].context)).not.toContain(VETO_WINDOW_CONTEXT236);
+  expect(d.sleep).not.toHaveBeenCalled();
+  const audit = `local-merge pr=9 sha=${HEAD_236} actor=alice veto=skipped`;
+  expect(sink).toContain(audit);
+  expect(log).toContain(audit);
+});
