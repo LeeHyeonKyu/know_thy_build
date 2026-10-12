@@ -335,11 +335,17 @@ const repairDirective = planRepair.length
     `turn — a handoff that still breaks a rule goes to a human.\n` +
     // #243 (P-14) — the rejected plan itself is not in the workflow's payload (loaded.json) and the workflow cannot read
     // files; the writer reads it from its own context file and repairs THAT plan rather than writing a new one.
-    `The rejected plan is \`plan_repair_previous\` in \`${args.context}\` — start from it. Keep every dissent_log ` +
-    `entry and every signoff_objections entry it carries unless a reason above names it.`
+    // #299 — run-stage carries it only when it is carryable (run-stage.js:1202-1203 → context.js:386 writes the key only
+    // for a plain object), and loaded.json never says which case this is — so the writer is told both cases, never that
+    // the key IS there.
+    `If \`plan_repair_previous\` in \`${args.context}\` is present, that is the rejected plan — start from it, and keep ` +
+    `every dissent_log entry and every signoff_objections entry it carries unless a reason above names it. ` +
+    `If it is absent, the rejected plan was not carried: fix the reasons above in the plan you write, and do not ` +
+    `invent what the rejected plan said.`
   : '';
 // #243 (P-14) — what the handoff says it repairs. Nothing in the payload carries a head for the rejected plan, so this
-// names where it lives; run-stage records it as the agent's claim and never classifies on it (planRepairCostLine).
+// names the slot it is carried in (absent when run-stage could not carry it — the writer is told so above); run-stage
+// records it as the agent's claim and never resolves or classifies on it (planRepairCostLine).
 const repairOf = planRepair.length ? `plan_repair_previous in ${args.context}` : null;
 const withRepairOf = (o) => (repairOf ? { ...o, repair_of: repairOf } : o);
 // #299 — a non-empty `plan_repair` is the ONLY repair trigger; there is no second switch. The repair turn still

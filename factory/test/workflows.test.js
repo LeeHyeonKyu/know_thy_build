@@ -450,6 +450,10 @@ test("factory-plan.js: an objection that survives the re-synthesis is recorded i
   expect(labelled(calls, "sign:")).toHaveLength(8);
   // 1.4.43: the injected entry carries a deterministic id and a severity (own-calendar #111 — an entry without
   // them is named by position by the validator and can never be covered).
+  // #299 tests_changed_allowed — P-13 pin, 1 of 2 (the other is the same injected line in the "superseded, not duplicated"
+  // test below). The issue counted the branch's two changed lines as "P-15·P-13"; both are in fact this one P-13 downgrade
+  // (medium → low, the objection moves to signoff_objections). P-15 changed no existing pin: its cap is new behaviour,
+  // pinned only by the new test_243_single_mode_* / test_299_single_mode_* tests.
   expect(result.dissent_log).toEqual([
     { id: "signoff-skeptic", severity: "low", role: "skeptic", objection: "the rollback path is still unspecified", resolution: "unresolved — proceeding; surfaced in signoff_objections" },
   ]);
@@ -592,6 +596,7 @@ test("factory-plan.js: an objection the synthesizer already logged is superseded
   expect(result.dissent_log.filter((d) => d.role === "skeptic" && d.objection === OBJECTION)).toHaveLength(1);
   expect(result.dissent_log).toEqual([
     { role: "architect", objection: "files_expected is too wide", resolution: "narrowed to two paths" },
+    // #299 tests_changed_allowed — P-13 pin, 2 of 2 (see "survives the re-synthesis" above for why both are P-13, none P-15)
     { id: "signoff-skeptic", severity: "low", role: "skeptic", objection: OBJECTION, resolution: "unresolved — proceeding; surfaced in signoff_objections" },
   ]);
 });
@@ -2725,8 +2730,8 @@ test("test_243_signoff_objection_survives_verify_stage_normalization", async () 
     args: { issue: 42, context: ".factory/out/context.json", loaded: planLoaderFix() },
   });
   expect(result.signoff_objections?.length).toBe(1);
-  // the dissent_log line is LOW, so verify-stage's own sign-off sweep skips it and the signoff_objections on the
-  // posted data can only be the one the workflow wrote
+  // the state dw5 is about: the dissent_log line is LOW, so verify-stage's own sign-off sweep skips it and the
+  // signoff_objections on the posted data can only be the one the workflow wrote
   const line = result.dissent_log.find((d) => d.id === "signoff-skeptic");
   expect(line.severity).toBe("low");
   const roster = PLAN_ROSTER.map((r) => r.name);
@@ -2752,7 +2757,9 @@ test("test_243_signoff_objection_survives_verify_stage_normalization", async () 
  */
 
 // A real loaded.json / context.json pair written by the real producer (buildContext) — same CHARTER shape as test_238's.
-const realPlanLoaded299 = async (mode, { planRepair = null, planRepairPrevious = null } = {}) => {
+const realPlanLoaded299 = async (mode, opts = {}) => (await realPlanPair299(mode, opts)).loaded;
+// The same, plus the context.json the writer reads (where run-stage's `plan_repair_previous` lands, never loaded.json).
+const realPlanPair299 = async (mode, { planRepair = null, planRepairPrevious = null } = {}) => {
   const r = mkdtempSync(join(tmpdir(), `wf299${mode}-`));
   mkdirSync238(join(r, ".factory"), { recursive: true }); mkdirSync238(join(r, "docs/factory"), { recursive: true });
   writeFileSync(join(r, ".factory/harness.toml"), `schema = 1\n[harness]\nmaturity = "M0"\n[factory]\norchestration = "workflow"\n[commands]\nunit = "npm test"\n[gates]\nrequired = ["unit"]\nfast = ["unit"]\nfull = ["unit"]\ndeep = ["unit"]\n`);
@@ -2762,7 +2769,7 @@ const realPlanLoaded299 = async (mode, { planRepair = null, planRepairPrevious =
   await buildContext238({ root: r, gh, issue: 42, stage: "plan", planRepair, planRepairPrevious });
   const loaded = JSON.parse(readFileSync(join(r, ".factory/out/loaded.json"), "utf8"));
   expect(loaded.plan?.mode, mode).toBe(mode);
-  return loaded;
+  return { loaded, context: JSON.parse(readFileSync(join(r, ".factory/out/context.json"), "utf8")) };
 };
 
 // A writer that returns a plan the real validator accepts (check + rubric on every item), and a sign-off that accepts.
@@ -2884,8 +2891,13 @@ test("test_299_plan_repair_turn_reaches_planned_without_second_switch", async ()
     const baseline = await runWorkflow(FACTORY_PLAN_WORKFLOW, { agent: cleanStub299(), args: { issue: 42, context: ".factory/out/context.json", loaded: await realPlanLoaded299(mode) } });
     for (const previous of [rejected, null]) {
       const label = `${mode}${previous ? " +previous" : ""}`;
-      const loaded = await realPlanLoaded299(mode, { planRepair: R1_REPAIR_REASONS, planRepairPrevious: previous });
+      const { loaded, context } = await realPlanPair299(mode, { planRepair: R1_REPAIR_REASONS, planRepairPrevious: previous });
       expect(loaded.plan_repair, label).toEqual(R1_REPAIR_REASONS);
+      // the pointer's target as the real producer writes it: in context.json only when run-stage carried a plan
+      // (run-stage.js:1202-1203 → context.js:386), never in loaded.json — so the workflow cannot know which case it is in
+      expect("plan_repair_previous" in loaded, label).toBe(false);
+      if (previous) expect(context.plan_repair_previous, label).toEqual(previous);
+      else expect("plan_repair_previous" in context, label).toBe(false);
       const run = await runWorkflow(FACTORY_PLAN_WORKFLOW, { agent: cleanStub299(), args: { issue: 42, context: ".factory/out/context.json", loaded } });
       // every roster role is dispatched — the same dispatch as a normal turn
       expect(dispatch299(run.calls), label).toEqual(dispatch299(baseline.calls));
@@ -2895,6 +2907,13 @@ test("test_299_plan_repair_turn_reaches_planned_without_second_switch", async ()
       expect(writer.prompt, label).toContain("REPAIR TURN (KTB-51)");
       for (const reason of R1_REPAIR_REASONS) expect(writer.prompt, label).toContain(reason);
       expect(writer.prompt, label).toContain("`plan_repair_previous` in `.factory/out/context.json`");
+      // ...and, since that key may be absent (the `null` case above), the writer is never told it IS there: it is told
+      // what to do in both cases, so a repair without a carried plan does not chase a missing key
+      expect(writer.prompt, label).not.toContain("The rejected plan is `plan_repair_previous`");
+      expect(writer.prompt, label).toContain("If `plan_repair_previous` in `.factory/out/context.json` is present, that is the rejected plan — start from it");
+      expect(writer.prompt, label).toContain("If it is absent, the rejected plan was not carried");
+      // repair_of names the slot the rejected plan is carried in (the best identifier the payload has); run-stage records
+      // it as the agent's claim and never resolves or classifies on it (planRepairCostLine)
       expect(run.result.repair_of, label).toBe(POINTER);
       // the real verifier lets this repair reach factory:planned (no roster refusal, no reason at all)
       expect(verify299(run, loaded).reasons, label).toEqual([]);

@@ -63,9 +63,10 @@ hooks:
 9. **이슈 done_when을 전부 덮는다 (#243, P-6)**: cover every item under the issue body's `## done_when`.
    이슈 항목에 답하는 계획 항목마다 `covers_issue: [<그 이슈 항목의 test_… id, 또는 test id가 없는 n번째 항목이면
    issue-dw<n>>]`을 단다. 이슈에 없는 항목을 더하는 것은 된다(상한 안에서); 이슈 항목을 빠뜨리면 거부된다.
-10. **수리 턴(REPAIR TURN)**: 프롬프트가 수리 턴이라고 말하면, 거부된 직전 계획은 context 파일의
-   `plan_repair_previous`에 있다. 새로 쓰지 말고 그 계획에서 출발해 사유에 적힌 것만 고친다 — 사유가 지목하지 않은
-   `dissent_log`·`signoff_objections` 항목은 그대로 둔다.
+10. **수리 턴(REPAIR TURN)**: 프롬프트가 수리 턴이라고 말하면, 거부된 직전 계획은 context 파일에
+   `plan_repair_previous`가 **있으면** 거기 있다. 새로 쓰지 말고 그 계획에서 출발해 사유에 적힌 것만 고친다 — 사유가
+   지목하지 않은 `dissent_log`·`signoff_objections` 항목은 그대로 둔다. 그 키가 **없으면** 러너가 계획을 싣지 못한
+   것이다: 사유에 적힌 것을 고친 계획을 쓰고, 거부된 계획의 내용을 지어내지 않는다.
 
 ## Output — schema `factory.plan.v1`
 ```yaml
