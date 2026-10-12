@@ -45,7 +45,7 @@ import { syncRecords, hydrateRecord, readRecordsDetailed } from "../lib/records-
 import { budgetCheck, budgetLine } from "../lib/budget.js";
 import { trustWorkspace } from "./trust-workspace.js";
 import { scrubText, secretValues } from "./scrub-artifacts.js";
-import { runMergeStage, idlessFailedSuites, VETO_WINDOW_CONTEXT, localIntegrityVerdict } from "../lib/merge-stage.js";
+import { runMergeStage, idlessFailedSuites, VETO_WINDOW_CONTEXT, localIntegrityVerdict, ciRunnerMarker } from "../lib/merge-stage.js";
 import { operatorMergeVerdict } from "../lib/operator-merge.js";
 import { readBreaker, makeRecordsUploadGuard, makeMergeAbortVouch, persistSelfMergeEvidence } from "../lib/breaker.js";
 import { isEngineCheckout } from "../lib/non-judge-paths.js";
@@ -4378,10 +4378,9 @@ export const OPERATOR_MERGE_ENV = "FACTORY_OPERATOR_MERGE";
 // 그 한 줄을 지우고 표식을 심을 때 행위자 검사까지 지나간다. 그래서 러너 표식을 넷 더 본다: GitHub이 모든 러너 스텝에 싣고
 // `$GITHUB_ENV`로 덮을 수 없는 `GITHUB_RUN_ID`·`RUNNER_TEMP`(GITHUB_*·RUNNER_*), 그리고 factory-merge.yml의 Run stage 스텝 env가 싣는
 // `FACTORY_TWO_ACTOR`와 `FACTORY_RUNNER_ID=gha-<run_id>`. 어느 하나라도 있으면(빈 값도) 러너다. 그것들을 전부 지우는 것은 그 스텝 안에서
-// 도는 엔진 코드 자신뿐이다 — 이것은 여전히 거름망이고, 그 한계는 ADR-044 §2가 적는다.
-const RUNNER_MARKERS = ["GITHUB_ACTIONS", "GITHUB_RUN_ID", "RUNNER_TEMP", "FACTORY_TWO_ACTOR"];
-export const isOperatorMerge = ({ stage, env }) => stage === "merge" && env?.[OPERATOR_MERGE_ENV] === "1"
-  && RUNNER_MARKERS.every((k) => env?.[k] === undefined) && !/^gha-/.test(String(env?.FACTORY_RUNNER_ID ?? ""));
+// 도는 엔진 코드 자신뿐이다 — 이것은 여전히 거름망이고, 그 한계는 ADR-044 §2가 적는다. 규칙은 merge-stage `ciRunnerMarker` 한 곳이다
+// (rework arch1 — cli/run.js·cli/integrity.js가 같은 함수를 부른다).
+export const isOperatorMerge = ({ stage, env }) => stage === "merge" && env?.[OPERATOR_MERGE_ENV] === "1" && ciRunnerMarker(env) === null;
 /**
  * 운영 door(`bin/operator-merge-check.js`)가 `gh pr view`로 읽는 필드 그대로 + 이 런이 머지할 head. 공유되는 것은 판정 함수
  * (`operatorMergeVerdict`)와 CHARTER 스위치다. 필드 목록을 `lib/operator-merge.js`의 export로 옮기면 door 파일 두 개
@@ -4401,32 +4400,24 @@ export const OPERATOR_PR_FIELDS = "number,isDraft,mergeable,baseRefName,files,st
  *   - `runRecord` — run 기록에 쓰는 줄을 stderr에도 낸다: 운영자가 거부 사유와 감사 줄을 그 자리에서 읽는다.
  */
 /**
- * 로컬 머지의 "팩토리 계정" 해석 한 곳(#236 skeptic r3). 러너 밖에서 `gh api user`는 운영자 자신이라 쓰지 않으므로(resolveFactoryLogins ②)
- * env의 FACTORY_BOT_LOGIN(①)과 이 이슈의 하트비트 작성자(③④)로 푼다 — 단 **러너가 쓴** 하트비트만(`runner: gha-<id>`, 워크플로가 심는
- * FACTORY_RUNNER_ID). 로컬 런의 하트비트(`local/<host>`)는 운영자 토큰으로 쓰인다: 이 머지 런 자신의 하트비트(runStage가 머지 전에 단다)와
- * 앞선 로컬 스테이지의 것이 그렇다 — 그것을 세면 운영자가 팩토리 계정이 되어 모든 로컬 머지가 스스로를 거부한다. 둘 다 없으면 ok:false → 거부.
+ * 로컬 머지의 "팩토리 계정" 해석 한 곳(#236 skeptic r3·r5). 러너 밖에서 `gh api user`는 운영자 자신이라 쓰지 않으므로(resolveFactoryLogins ②)
+ * 팩토리 계정은 운영자 env의 `FACTORY_BOT_LOGIN`(①) **하나에서만** 온다 — CI가 env와 러너 뷰어에서 얻는 것처럼, 코멘트를 쓸 수 있는 누구도
+ * 고를 수 없는 자리다. 이슈 코멘트(하트비트)는 보지 않는다: 하트비트의 `runner: gha-<id>`는 코멘트 **본문**이라 누구든 적고, 러너가 한 번도
+ * 돌지 않은 Actions 없는 저장소에서는 위조 하나가 유일한 "러너 하트비트"가 되어 그 작성자가 H1b의 팩토리 계정이 된다(skeptic r5 — H1b를 푸는
+ * 것은 plan non_goal이다). 없으면 ok:false → H1b와 door가 둘 다 거부하고, 사유가 `FACTORY_BOT_LOGIN`을 말한다.
  * H1b(merge-stage verifyReview의 `d.factoryLogins`)와 운영 door가 **같은** 해석을 쓴다(wireOperatorMerge).
  */
-// #236 skeptic r4 — `runner: gha-<id>`은 코멘트 **본문**이라 코멘트를 쓸 수 있는 누구든 적는다. H1b에게 팩토리 계정이 늘어나는 것은
-// 통과가 넓어지는 쪽이므로: 운영자의 env가 `FACTORY_BOT_LOGIN`으로 팩토리를 말하면 그것만 쓰고(코멘트는 아무도 더하지 않는다),
-// 말하지 않으면 러너 하트비트의 작성자가 **정확히 한 계정**일 때만 쓴다 — 둘 이상이면 어느 것이 위조인지 모르므로 ok:false(거부).
-// 남는 것: 러너가 한 번도 돌지 않은 이슈에 위조 하트비트 하나뿐이면 그 작성자가 팩토리가 된다 — 그 쓰기 권한자는 L0 context를 이미
-// 직접 올릴 수 있다(ADR-044 남는 것, plan open_risks d2). 운영자가 `FACTORY_BOT_LOGIN`을 두면 닫힌다.
-function operatorFactoryLogins({ gh, env, issue, injected }) {
+function operatorFactoryLogins({ gh, env, injected }) {
   if (injected) return injected;
   return async () => {
     if (String(env?.FACTORY_BOT_LOGIN ?? "").trim()) return resolveFactoryLogins({ gh, env, comments: [] });
-    const comments = await gh.comments(issue);
-    const runnerWritten = (Array.isArray(comments) ? comments : []).filter((c) => /^gha-\d+$/.test(String(parseHeartbeatComment(c?.body)?.runner ?? "")));
-    const authors = [...new Set(runnerWritten.map((c) => String(c?.author ?? "").toLowerCase()).filter(Boolean))];
-    if (authors.length > 1) return { ok: false, reason: `runner heartbeats on #${issue} name ${authors.length} different authors (${authors.map((a) => `@${a}`).join(", ")}) — a heartbeat's runner field is comment text, so the factory account is ambiguous; set FACTORY_BOT_LOGIN` };
-    return resolveFactoryLogins({ gh, env, comments: runnerWritten });
+    return { ok: false, reason: "FACTORY_BOT_LOGIN is not set in the operator's env — off a runner the factory account comes only from it, never from issue comments (a heartbeat's runner field is comment text anyone can write); set FACTORY_BOT_LOGIN to the factory's login" };
   };
 }
 
-export function makeOperatorMergeDeps({ stage, env, issue, run: runner, repo, gh, factoryLogins: injectedFactoryLogins, getCharter = () => null, getEngine = () => false, getDefaultBranch = () => "main", runRecord, log = (l) => console.error(l) } = {}) {
+export function makeOperatorMergeDeps({ stage, env, run: runner, repo, gh, factoryLogins: injectedFactoryLogins, getCharter = () => null, getEngine = () => false, getDefaultBranch = () => "main", runRecord, log = (l) => console.error(l) } = {}) {
   if (!isOperatorMerge({ stage, env })) return {};
-  const factoryLogins = operatorFactoryLogins({ gh, env, issue, injected: injectedFactoryLogins });
+  const factoryLogins = operatorFactoryLogins({ gh, env, injected: injectedFactoryLogins });
   const operatorMergeCheck = async ({ pr, sha }) => {
     const reasons = [];
     let actor = null;
@@ -4476,7 +4467,7 @@ export function makeOperatorMergeDeps({ stage, env, issue, run: runner, repo, gh
 export function wireOperatorMerge(deps, args) {
   const op = makeOperatorMergeDeps({ ...args, runRecord: deps.runRecord });
   // #236 skeptic r3 — 운영 모드면 H1b도 door와 같은 팩토리 계정 해석을 쓴다(main의 기본 해석은 코멘트 없이 env만 본다: 노트북에서는 풀리지 않는다).
-  if (op.operatorPresent) deps.factoryLogins = operatorFactoryLogins({ gh: args.gh, env: args.env, issue: args.issue, injected: args.factoryLogins });
+  if (op.operatorPresent) deps.factoryLogins = operatorFactoryLogins({ gh: args.gh, env: args.env, injected: args.factoryLogins });
   return Object.assign(deps, op);
 }
 

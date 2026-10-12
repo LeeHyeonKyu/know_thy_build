@@ -55,6 +55,11 @@ export const DOOR_FILES = Object.freeze([
   "factory/lib/config.js", ".factory/lib/config.js",
   // #236 (ADR-044) — 로컬 `factory/integrity`의 생산자. 로컬 머지 door가 그 상태를 GREEN의 근거로 믿는다(설치본 `.factory/cli/`는 없다).
   "factory/cli/integrity.js",
+  // #236 rework sec1/arch2 — 로컬 머지 door의 **판정 코드** 자체: 위 상태를 소비해 거부권 창의 기다림을 건너뛸지 정하는 곳
+  // (merge-stage.js `localIntegrityVerdict`·`ciRunnerMarker`·`operatorPresent`, run-stage.js `isOperatorMerge`·`makeOperatorMergeDeps`).
+  // 생산자만 두면 소비자를 약하게 고친 PR이 운영 door로 머지되고, 그 뒤의 모든 로컬 머지가 약해진 문을 지난다.
+  "factory/lib/merge-stage.js", ".factory/lib/merge-stage.js",
+  "factory/bin/run-stage.js", ".factory/bin/run-stage.js",
 ]);
 export const isDoorFile = (p) => DOOR_FILES.includes(String(p ?? "").replace(/^\.\//, ""));
 
