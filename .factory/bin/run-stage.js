@@ -45,7 +45,8 @@ import { syncRecords, hydrateRecord, readRecordsDetailed } from "../lib/records-
 import { budgetCheck, budgetLine } from "../lib/budget.js";
 import { trustWorkspace } from "./trust-workspace.js";
 import { scrubText, secretValues } from "./scrub-artifacts.js";
-import { runMergeStage, idlessFailedSuites, VETO_WINDOW_CONTEXT } from "../lib/merge-stage.js";
+import { runMergeStage, idlessFailedSuites, VETO_WINDOW_CONTEXT, localIntegrityVerdict } from "../lib/merge-stage.js";
+import { operatorMergeVerdict } from "../lib/operator-merge.js";
 import { readBreaker, makeRecordsUploadGuard, makeMergeAbortVouch, persistSelfMergeEvidence } from "../lib/breaker.js";
 import { isEngineCheckout } from "../lib/non-judge-paths.js";
 import { HARNESS_OPENS } from "../lib/protected-paths.js";
@@ -4365,6 +4366,67 @@ export function mergeGitAuth({ stage, env }) {
   return gitAuthEnv({ token: env?.GH_TOKEN, serverUrl: env?.GITHUB_SERVER_URL || undefined });
 }
 
+/**
+ * ── #236 (ADR-044) — 로컬 머지: 운영 세션이 `factory run merge <issue> --operator`로 부른 merge ───────────────────────────
+ * `cli/run.js`가 러너가 아닐 때만 `FACTORY_OPERATOR_MERGE=1`을 심고, 여기서도 **다시** 묻는다: 그 표식은 env 한 줄이라 누구든
+ * 심을 수 있으므로 `GITHUB_ACTIONS`가 있으면(러너, 곧 스테이지) 무시한다 — 러너는 어떤 철자로도 기다림 없는 머지에 닿지 못한다.
+ * 정확히 "1"일 때만, merge 스테이지에서만 참이다.
+ */
+export const OPERATOR_MERGE_ENV = "FACTORY_OPERATOR_MERGE";
+export const isOperatorMerge = ({ stage, env }) => stage === "merge" && env?.[OPERATOR_MERGE_ENV] === "1" && !env?.GITHUB_ACTIONS;
+/** 운영 door(`bin/operator-merge-check.js`)가 `gh pr view`로 읽는 필드 그대로 + 이 런이 머지할 head. */
+export const OPERATOR_PR_FIELDS = "number,isDraft,mergeable,baseRefName,files,statusCheckRollup,headRefOid";
+
+/**
+ * 로컬 머지의 deps. 운영 모드가 아니면 `{}`이다 — main의 deps는 한 글자도 바뀌지 않는다. 운영 모드면:
+ *   - `operatorPresent: true` — merge-stage가 거부권 창의 **기다림만** 건너뛴다(차단기·리뷰 재검증·게이트·head 재확인은 그대로).
+ *   - `operatorMergeCheck({pr, sha})` — mergePr 직전의 문: 운영 door와 같은 `operatorMergeVerdict`(같은 필드·같은 CHARTER 스위치
+ *     `self_change.operator_merge_judge`·같은 엔진 판정)에, 이 head의 `factory/integrity`가 GREEN인지(`localIntegrityVerdict`)와
+ *     PR head가 이 런이 검증한 sha인지를 더한다. 행위자(`gh api user`)를 모르면 거부한다 — 익명으로 머지하지 않는다.
+ *   - `runRecord` — run 기록에 쓰는 줄을 stderr에도 낸다: 운영자가 거부 사유와 감사 줄을 그 자리에서 읽는다.
+ */
+export function makeOperatorMergeDeps({ stage, env, run: runner, repo, gh, factoryLogins, getCharter = () => null, getEngine = () => false, getDefaultBranch = () => "main", runRecord, log = (l) => console.error(l) } = {}) {
+  if (!isOperatorMerge({ stage, env })) return {};
+  const operatorMergeCheck = async ({ pr, sha }) => {
+    const reasons = [];
+    let actor = null;
+    try { actor = String((await gh.viewerLogin()) ?? "").trim() || null; } catch { actor = null; }
+    if (!actor || /\s/.test(actor)) reasons.push("the operator's login could not be resolved (gh api user) — a local merge is not made anonymously");
+    const view = await runner("gh", ["pr", "view", String(pr), ...(repo ? ["-R", repo] : []), "--json", OPERATOR_PR_FIELDS]);
+    if (view?.code !== 0) return { ok: false, reasons: [...reasons, `gh pr view ${pr} failed: ${String(view?.stderr || view?.stdout || "").trim() || `exit ${view?.code}`}`] };
+    let prJson;
+    try { prJson = JSON.parse(view.stdout); } catch (e) { return { ok: false, reasons: [...reasons, `gh pr view ${pr} returned no JSON: ${e.message}`] }; }
+    if (!sha || prJson?.headRefOid !== sha) reasons.push(`PR head moved — this run verified ${String(sha || "unknown").slice(0, 7)}, PR #${pr} head is ${String(prJson?.headRefOid || "unknown").slice(0, 7)}`);
+    const door = operatorMergeVerdict(prJson, { defaultBranch: getDefaultBranch(), engine: getEngine() === true, judgeAllowed: getCharter()?.self_change?.operator_merge_judge === true });
+    reasons.push(...door.reasons);
+    let logins;
+    try { logins = await factoryLogins(); } catch (e) { logins = { ok: false, reason: `${e?.message || e}` }; }
+    let statuses;
+    try { statuses = await gh.commitStatuses(sha); } catch (e) { statuses = null; reasons.push(`commit statuses for ${String(sha).slice(0, 7)} unreadable: ${e?.message || e}`); }
+    const integrity = await localIntegrityVerdict({
+      sha, statuses: statuses ?? [], rollup: prJson?.statusCheckRollup,
+      factoryLogins: logins?.ok && Array.isArray(logins.logins) ? logins.logins : [],
+      userType: (login) => gh.userType(login),
+    });
+    reasons.push(...integrity.reasons);
+    const files = Array.isArray(prJson?.files) ? prJson.files.length : 0;
+    return { ok: reasons.length === 0, reasons, actor, detail: `${files} file(s), checks green, ${door.judge.length} judge path(s), factory/integrity green on ${String(sha).slice(0, 7)}, actor @${actor}` };
+  };
+  return {
+    operatorPresent: true,
+    operatorMergeCheck,
+    runRecord: (lines) => { for (const l of lines) log(l); return runRecord(lines); },
+  };
+}
+
+/**
+ * main()이 쓰는 운영 머지 배선 한 곳(#236 skeptic): 운영 deps를 deps에 얹고, 기록은 **이미 있는** `deps.runRecord`(run 기록)로 보낸다.
+ * main은 이것을 merge 자기 변경 deps(`makeMergeSelfChangeDeps`)보다 먼저 부른다 — 두 묶음의 키는 겹치지 않는다(테스트가 고정한다).
+ */
+export function wireOperatorMerge(deps, args) {
+  return Object.assign(deps, makeOperatorMergeDeps({ ...args, runRecord: deps.runRecord }));
+}
+
 async function main() {
   const argv = process.argv.slice(2);
   const [stage, issueArg] = argv;
@@ -4956,6 +5018,11 @@ async function main() {
         : undefined,
     }),
   };
+  // #236 (ADR-044) — 운영 세션의 로컬 머지(러너가 아닐 때만; 아니면 `{}`라 deps는 그대로다).
+  wireOperatorMerge(deps, {
+    stage, env: process.env, run, repo, gh, factoryLogins: () => resolveFactoryLogins({ gh, env: process.env }),
+    getCharter: () => charter, getEngine: () => engineAtBase, getDefaultBranch: () => harness?.project?.default_branch ?? "main",
+  });
   // #179 (ADR-033) — merge의 자기 변경 deps. 게터(selfChange·engine)를 살리려고 펼치지 않고 속성 서술자로 옮긴다.
   Object.defineProperties(deps, Object.getOwnPropertyDescriptors(makeMergeSelfChangeDeps({
     gh, issue, getCharter: () => charter, getEngine: () => engineAtBase, env: process.env,
