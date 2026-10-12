@@ -378,15 +378,19 @@ export function validatePlanHandoff(plan, { maxDoneWhen = 6, issueBody = "", not
     for (const d of doneWhen) {
       if (d?.check && typeof d.check === "object" && typeof d.check.ref === "string") byRef.add(norm(d.check.ref));
       if (Array.isArray(d?.covers_issue)) for (const c of d.covers_issue) byCoversIssue.add(norm(c));
+      // dw5 (plan d10·d11): the plan workflow's structured output keeps only the done_when fields CONTRACT_ITEM declares
+      // (.claude/workflows/factory-plan.js) and drops `covers_issue` — so the declared `covers` array covers issue ids too.
+      // Dissent ids and issue ids never collide (`d<n>`/named vs `test_…`/`issue-dw<n>`), so (a) is unaffected.
+      if (Array.isArray(d?.covers)) for (const c of d.covers) byCoversIssue.add(norm(c));
     }
     for (const it of issueItems) {
       const id = norm(it.id);
       const covered = byCoversIssue.has(id) || (id.startsWith("test_") && byRef.has(id));
-      // 사유가 고칠 길을 말한다 — 수리 턴이 받는 것은 이 문장뿐이고, 계획 프롬프트는 아직 `covers_issue`를 모른다(cf2).
-      // 위치 id(`issue-dw<n>`, 문서 전용 이슈 템플릿의 항목)는 check.ref로는 덮을 수 없으니 covers_issue만 권한다.
+      // 사유가 고칠 길을 말한다 — 수리 턴이 받는 것은 이 문장뿐이다(cf2). 권하는 필드는 계획 스키마가 실어 나르는 것이어야 한다:
+      // `covers_issue`는 구조화 출력에서 지워지므로 `covers`를 권한다(dw5). 위치 id(`issue-dw<n>`)는 check.ref로 덮을 수 없다.
       const remedy = id.startsWith("test_")
-        ? `(cover it: a plan item with check.ref "${it.id}" or covers_issue: ["${it.id}"])`
-        : `(cover it: add covers_issue: ["${it.id}"] to the plan item that checks it)`;
+        ? `(cover it: a plan item with check.ref "${it.id}" or covers: ["${it.id}"])`
+        : `(cover it: add covers: ["${it.id}"] to the plan item that checks it)`;
       if (!covered) reasons.push(`${ISSUE_NOT_COVERED} ${it.id} — "${[...it.text].slice(0, 80).join("")}" ${remedy}`);
     }
   }

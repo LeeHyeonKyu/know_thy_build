@@ -1,5 +1,8 @@
 import { test, expect } from "vitest";
 import { verifyStage, hitApiError, apiErrorReason, deriveReworkPins } from "../lib/verify-stage.js";
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 const review = { schema: "factory.review.v1", issue: 7, pr: 9, head_sha: "a".repeat(40), round: 1, orchestration: "workflow", guarantee: "verified",
   verdicts: [{ role: "correctness", verdict: "approve", confidence: "high", must_fix: [], should_fix: [], verified: [] }, { role: "qa", verdict: "approve", confidence: "high", must_fix: [], should_fix: [], verified: [] }] };
@@ -502,9 +505,11 @@ const ISSUE_232_IDS = [
 ];
 const dw232 = (ref, extra = {}) => ({ id: ref, text: `plan item for ${ref}`, check: { kind: "test", ref }, rubric: "observable", level: "unit", ...extra });
 const NOT_COVERED = "issue done_when not covered by the plan:";
-// cf2 — the reason names its remedy: the repair turn reads only this sentence, and the plan prompt does not know covers_issue
-const FIX_TEST = (id) => ` (cover it: a plan item with check.ref "${id}" or covers_issue: ["${id}"])`;
-const FIX_POS = (id) => ` (cover it: add covers_issue: ["${id}"] to the plan item that checks it)`;
+// cf2 — the reason names its remedy: the repair turn reads only this sentence, and the plan prompt does not know covers_issue.
+// dw5 (plan d10/d11): the remedy names `covers`, a field the plan workflow schema carries — `covers_issue` is stripped from the
+// structured output, so advice to write it could never be followed (this branch-only text predates dw5; not on main).
+const FIX_TEST = (id) => ` (cover it: a plan item with check.ref "${id}" or covers: ["${id}"])`;
+const FIX_POS = (id) => ` (cover it: add covers: ["${id}"] to the plan item that checks it)`;
 const NO_ITEMS_LINE = "done_when: issue has no items — the plan's contract stands alone";
 
 test("test_232_plan_must_cover_every_issue_done_when_item", async () => {
@@ -679,6 +684,63 @@ test("test_232_admitted_done_when_with_items_never_reads_as_no_items", async () 
   expect(admitted(ordered)).toBe(true);
   expect(issueDoneWhenItems(ordered)).toEqual([{ id: "test_9_a", text: "first" }, { id: "test_9_b", text: "second" }]);
   rejectsDropped(ordered, "test_9_a", "test_9_b", "second");
+});
+
+// dw5 (plan d10, d11) — a plan reaches the validator only after the plan workflow's structured output, which keeps just the
+// done_when properties CONTRACT_ITEM declares (.claude/workflows/factory-plan.js; undeclared fields are dropped, 1.4.43 #111).
+// The declared set is read from that file, not typed here, so the test follows the schema the planner actually answers in.
+const CONTRACT_ITEM_FIELDS = (() => {
+  const src = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "../../.claude/workflows/factory-plan.js"), "utf8");
+  const block = src.slice(src.indexOf("const CONTRACT_ITEM = {")).split(/\n};/)[0];
+  const props = block.slice(block.indexOf("properties: {"));
+  return [...props.matchAll(/^ {4}([A-Za-z_]\w*):/gm)].map((m) => m[1]);
+})();
+const throughSchema = (plan) => ({
+  ...plan,
+  done_when: plan.done_when.map((d) => Object.fromEntries(Object.entries(d).filter(([k]) => CONTRACT_ITEM_FIELDS.includes(k)))),
+});
+
+test("test_232_schema_carried_plan_covers_issue_items_within_cap", async () => {
+  const { validatePlanHandoff } = await import("../lib/verify-stage.js");
+  // the schema read is real: it declares the contract fields (if this parse broke, every item would be stripped empty)
+  expect(CONTRACT_ITEM_FIELDS).toEqual(expect.arrayContaining(["id", "text", "check", "rubric", "level"]));
+  const coverageOrCap = (reasons) => reasons.filter((r) => r.startsWith(NOT_COVERED) || /done_when has \d+ items/.test(r));
+  // every field the remedy tells the planner to write must survive the schema — advice to write a stripped field cannot be followed
+  const remedyFields = (reason) => [...(reason.match(/\(cover it: (.*)\)$/)?.[1] ?? "").matchAll(/\b([a-z_]+)(?:\.ref\b|: \[)/g)].map((m) => m[1]);
+
+  // (a) an issue whose items carry no test id (the docs-only template form) — positional ids, coverable by a carried field
+  const docsOnly = "## done_when (draft)\n- [ ] `README.md`의 Quickstart가 X를 설명한다\n- [ ] 문서 외 파일은 diff에 없다\n";
+  const docsItem = { id: "dw1", text: "Quickstart explains X", check: { kind: "rubric", ref: "README.md" }, rubric: "a reader can follow it", level: "unit" };
+  const docsPlan = throughSchema(planFix({
+    done_when: [{ ...docsItem, covers: ["issue-dw1", " ISSUE-DW2 ", "d1"], covers_issue: ["issue-dw1", "issue-dw2"] }],
+    dissent_log: [{ id: "d1", role: "skeptic", severity: "medium", objection: "o", resolution: "r" }],
+  }));
+  expect(validatePlanHandoff(docsPlan, { issueBody: docsOnly })).toEqual([]);
+  expect(verifyPlan(docsPlan, { issueBody: docsOnly }).ok).toBe(true);
+  // drop one: the reason names the id and a field the schema carries
+  const docsDropped = throughSchema(planFix({ done_when: [{ ...docsItem, covers: ["issue-dw1"] }] }));
+  const [docsReason, ...docsRest] = coverageOrCap(validatePlanHandoff(docsDropped, { issueBody: docsOnly }));
+  expect(docsRest).toEqual([]);
+  expect(docsReason.startsWith(`${NOT_COVERED} issue-dw2 — "문서 외 파일은 diff에 없다"`)).toBe(true);
+  expect(remedyFields(docsReason).length).toBeGreaterThan(0);
+  for (const f of remedyFields(docsReason)) expect(CONTRACT_ITEM_FIELDS).toContain(f);
+
+  // (b) seven test-id items, covered by six plan items (the default max_done_when) — one item covers two issue ids
+  const ids = ["a", "b", "c", "d", "e", "f", "g"].map((x) => `test_9_${x}`);
+  const seven = `## done_when\n${ids.map((id) => `- [ ] \`${id}\` — behaviour ${id.slice(-1)}`).join("\n")}\n`;
+  const sixItems = ids.slice(0, 6).map((id) => dw232(id));
+  sixItems[5] = dw232(ids[5], { covers: [ids[6]] });
+  const sixPlan = throughSchema(planFix({ done_when: sixItems }));
+  expect(sixPlan.done_when).toHaveLength(6);
+  expect(validatePlanHandoff(sixPlan, { issueBody: seven, maxDoneWhen: 6 })).toEqual([]);
+  expect(verifyPlan(sixPlan, { issueBody: seven, planLimits: { max_done_when: 6 } }).ok).toBe(true);
+  // drop the doubled-up cover: rejected by that id, with advice the schema can carry and that needs no seventh item
+  const fiveCover = throughSchema(planFix({ done_when: ids.slice(0, 6).map((id) => dw232(id)) }));
+  const [r7, ...rest7] = coverageOrCap(validatePlanHandoff(fiveCover, { issueBody: seven, maxDoneWhen: 6 }));
+  expect(rest7).toEqual([]);
+  expect(r7.startsWith(`${NOT_COVERED} ${ids[6]} — "behaviour g"`)).toBe(true);
+  expect(r7).toContain(`covers: ["${ids[6]}"]`);
+  for (const f of remedyFields(r7)) expect(CONTRACT_ITEM_FIELDS).toContain(f);
 });
 
 // ── #233 → #254 (gap P-12 / ledger M-6) — triage 검증이 impact_paths를 [load_bearing].paths에 다시 댄다 ──
