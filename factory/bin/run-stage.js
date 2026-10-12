@@ -1114,7 +1114,8 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runAt
      * a targeted repair, never a blind retry.
      *
      * #238 (P-14, M-8) — the repair turn also carries the WHOLE rejected plan (`v.data`) as `planRepairPrevious` →
-     * `loaded.plan_repair_previous` (a sibling of `plan_repair`, which stays today's string[]), so a workflow can rerun only the
+     * `plan_repair_previous` in context.json / context.<role>.json (never loaded.json — the dispatcher's 4096-byte copy, dw1;
+     * `plan_repair` stays today's string[]), so a workflow can rerun only the
      * synthesis. Carried whole or left out (`carryableRejectedPlan`) — a missing plan never stops the repair. After a repair turn
      * that RAN, exactly one cost line says what it cost (`planRepairCostLine`), read from that turn's agents log, never from the
      * handoff's `repair_of` claim (test_238_plan_repair_records_whether_the_workflow_reused_the_plan). The roster guard is
@@ -1131,10 +1132,12 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runAt
       record([`plan repair (KTB-51): one repair turn — feeding ${repairReasons.length} validator reason(s) back: ${repairReasons.join("; ")}`]);
       let repairOut = null;
       let repairRoster = ctx?.roster;
+      let repairMode = ctx?.plan?.mode;                              // #238 dw4 — single mode excludes the workflow's planner, not "synthesizer"
       let repairCtx = null;
       try {
         repairCtx = await d.buildContext({ setupDirty, planRepair: repairReasons, ...previousArg });
         if (Array.isArray(repairCtx?.roster)) repairRoster = repairCtx.roster;
+        if (repairCtx?.plan?.mode) repairMode = repairCtx.plan.mode;
         /**
          * Task 1 (리뷰 SF-5) — 이 두 번째 `buildContext`가 `context.<role>.json`을 **다시 쓰고**
          * `plan_repair`를 투영에 더한다. 곧 리페어 턴의 플래너가 실제로 읽은 문맥은 이것인데, 첫
@@ -1186,7 +1189,7 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runAt
           if (v.source) record([`artifact: ${v.source} (repair)`]);
           record([`plan repair (KTB-51): ${v.ok ? "resolved → factory:planned" : "still red → escalating unchanged"}`]);
         } finally {
-          record([planRepairCostLine({ agentsLog: turnLog, roster: repairRoster, rolePrefix: ROLE_PREFIX.plan, repairOf: repairedHandoff?.repair_of })]);
+          record([planRepairCostLine({ agentsLog: turnLog, roster: repairRoster, mode: repairMode, rolePrefix: ROLE_PREFIX.plan, repairOf: repairedHandoff?.repair_of })]);
         }
       }
     }
@@ -3594,8 +3597,12 @@ export const PLAN_REPAIR_FULL_RERUN = "plan repair: full rerun (workflow ignored
  * (unsure is never "cheap"). A debate role counts once it STARTED (completed, orphaned or merely started). The handoff's
  * `repair_of` is the agent's claim: any value it holds (null too) is appended as its JSON text and never consulted for the
  * classification.
+ *
+ * Which role is "the synthesis" follows the shipped workflow (templates/factory/claude/workflows/factory-plan.js): in `single`
+ * mode the plan is written by `roster.find(name === "synthesizer") || roster[0]` — CHARTER `plan_roles.single` may rename it —
+ * so THAT role is excluded; otherwise (debate, or mode unknown) the synthesizer is (test_238_…_single_mode_planner).
  */
-export function planRepairCostLine({ agentsLog, roster, rolePrefix = "plan-", repairOf } = {}) {
+export function planRepairCostLine({ agentsLog, roster, mode, rolePrefix = "plan-", repairOf } = {}) {
   const completed = Array.isArray(agentsLog?.completed) ? agentsLog.completed : null;
   // a debate role that STARTED but never stopped (crash/timeout mid-debate) still ran and cost money — it counts as a rerun too.
   const seen = completed === null ? null : new Set([
@@ -3603,7 +3610,9 @@ export function planRepairCostLine({ agentsLog, roster, rolePrefix = "plan-", re
     ...(Array.isArray(agentsLog.orphans) ? agentsLog.orphans : []),
     ...(Array.isArray(agentsLog.starts) ? agentsLog.starts.map((s) => s?.agent_type) : []),
   ]);
-  const debate = (Array.isArray(roster) ? roster : []).filter((r) => typeof r === "string" && r && r !== "synthesizer");
+  const names = (Array.isArray(roster) ? roster : []).filter((r) => typeof r === "string" && r);
+  const writer = mode === "single" ? (names.includes("synthesizer") ? "synthesizer" : names[0]) : "synthesizer";
+  const debate = names.filter((r) => r !== writer);
   const reran = seen === null || debate.length === 0 || debate.some((r) => seen.has(rolePrefix + r));
   const head = reran ? PLAN_REPAIR_FULL_RERUN : PLAN_REPAIR_SYNTHESIS_ONLY;
   if (repairOf === undefined) return head;                        // no `repair_of` key in the handoff → no claim to record
@@ -3636,7 +3645,7 @@ export function turnAgentsLog(root) {
  * 것은 판정 불가이지 "바닥 없음"이 아니지만, **여기서** 스테이지를 죽이지는 않는다: 곧이어 도는 `gates` dep이 같은 `mergeBase()`로
  * MergeBaseError를 올려 `factory:blocked`로 보낸다(게이트가 없는 triage/plan은 애초에 diff를 판정 재료로 쓰지 않는다). 대신 그 사실을
  * 런 레코드에 남긴다. Task 9 (KTB-51): plan repair 턴의 validator 사유는 `plan_repair`로 `loaded.json`에 실린다.
- * #238: 그 사유가 겨눈 거부된 계획 전체는 `planRepairPrevious`로 실려 `loaded.plan_repair_previous`가 된다.
+ * #238: 그 사유가 겨눈 거부된 계획 전체는 `planRepairPrevious`로 실려 context.json·context.<role>.json의 `plan_repair_previous`가 된다(loaded.json에는 싣지 않는다 — dw1).
  * #143 (S3b): 빌더에게 넘긴 base 병합의 충돌 경로는 `mergeConflicts`로 실려 `loaded.merge_conflicts`가 된다 — 이 배선을 테스트가
  * 직접 부를 수 있도록 main() 밖으로 꺼냈다(셀프 비판 f1: 이 고리가 목록을 떨어뜨려도 아무 테스트도 실패하지 않았다).
  */

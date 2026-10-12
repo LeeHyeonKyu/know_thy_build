@@ -6784,6 +6784,42 @@ test("test_238_plan_repair_records_whether_the_workflow_reused_the_plan", async 
   expect(costLines238(thrower.lines)).toEqual([SYNTH_ONLY_238]);
 });
 
+/**
+ * #238 dw4 (single mode) — the workflow picks its single-mode planner as `synthesizer`, else `roster[0]`
+ * (templates/factory/claude/workflows/factory-plan.js), and CHARTER `plan_roles.single` may rename both roles. The cost line
+ * must exclude THAT planner, not the literal "synthesizer": a planner-only repair under a renamed single roster is
+ * synthesis-only, and the skeptic running again is a rerun. The roster and mode come from the real buildContext.
+ */
+import { makeBuildContextDep as makeBuildContextDep238 } from "../bin/run-stage.js";
+test("test_238_plan_repair_records_whether_the_workflow_reused_the_plan_single_mode_planner", async () => {
+  const realCtx = (singleRoles) => {
+    const r = mkdtempSync(join(tmpdir(), "rs238s-"));
+    mkdirSync(join(r, ".factory"), { recursive: true }); mkdirSync(join(r, "docs/factory"), { recursive: true });
+    writeFileSync(join(r, ".factory/harness.toml"), `schema = 1\n[harness]\nmaturity = "M0"\n[factory]\norchestration = "workflow"\n[commands]\nunit = "npm test"\n[gates]\nrequired = ["unit"]\nfast = ["unit"]\nfull = ["unit"]\ndeep = ["unit"]\n`);
+    writeFileSync(join(r, "docs/factory/CHARTER.md"), `---\nschema: factory.charter.v1\nstatus: ready\ntier_default: standard\nroster:\n  standard: [correctness]\nplan_roles:\n  default: [architect, skeptic]\n${singleRoles ? `  single: [${singleRoles.join(", ")}]\n` : ""}plan_rounds: { docs: 2, default: 3 }\n---\n`);
+    writeFileSync(join(r, ".factory/roles.toml"), `[review.correctness]\nagent = "c.md"\nmodel = "opus"\n[plan.architect]\nagent = "a.md"\nmodel = "opus"\n[plan.skeptic]\nagent = "s.md"\nmodel = "opus"\n[plan.synthesizer]\nagent = "syn.md"\nmodel = "opus"\n[plan.planner]\nagent = "p.md"\nmodel = "opus"\n`);
+    const gh = { issue: async () => ({ number: 238, title: "T", body: "", labels: ["factory:ready"] }), comments: async () => [] };
+    return makeBuildContextDep238({ root: r, gh, issue: 238, stage: "plan", run: null, mergeBase: async () => null, recordLine: () => {} });
+  };
+  // the real context really is single mode with the renamed roster — the precondition this test is about.
+  const probe = await realCtx(["planner", "skeptic"])({});
+  expect(probe.plan.mode).toBe("single");
+  expect(probe.roster).toEqual(["planner", "skeptic"]);
+
+  for (const [singleRoles, repairTurn, expected] of [
+    [["planner", "skeptic"], ["plan-planner"], SYNTH_ONLY_238],                     // renamed planner alone → reused
+    [["planner", "skeptic"], ["plan-planner", "plan-skeptic"], FULL_RERUN_238],     // the skeptic ran again → rerun
+    [["skeptic", "planner"], ["plan-skeptic"], SYNTH_ONLY_238],                     // roster[0] is the planner, whatever its name
+    [["skeptic", "planner"], ["plan-skeptic", "plan-planner"], FULL_RERUN_238],
+    [null, ["plan-synthesizer"], SYNTH_ONLY_238],                                   // default single roster [synthesizer, skeptic]
+    [null, ["plan-synthesizer", "plan-skeptic"], FULL_RERUN_238],
+  ]) {
+    const s = repairDeps238({ perTurn: [["plan-x"], repairTurn], over: { buildContext: realCtx(singleRoles) } });
+    await runStage({ stage: "plan", issue: 238, deps: s.deps, runnerId: "r1" });
+    expect(costLines238(s.lines), `${JSON.stringify(singleRoles)} ${JSON.stringify(repairTurn)}`).toEqual([expected]);
+  }
+});
+
 test("test_238_no_cost_line_or_previous_plan_outside_a_completed_repair_turn", async () => {
   // a normal plan run that validates first time: one context, no previous plan anywhere, no plan-repair lines at all.
   const lines = [];
