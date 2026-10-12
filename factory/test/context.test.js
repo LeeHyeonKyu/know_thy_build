@@ -902,6 +902,63 @@ test("test_227_a_transient_gh_failure_or_merged_pr_never_triggers_a_rebuild — 
 });
 
 /**
+ * #227 cf-s2 — dw1 says the gone number is absent from EVERYTHING the builder reads. After a K restart (#174) the builder also reads
+ * `loaded.k_restart_brief`, whose `pr` comes from the engine's restart brief comment, not from the handoffs the drop rewrites. The history
+ * is written by the real producers: the brief by `kRestartComment`, the rework transition that makes it the window's used restart by the
+ * real `transition()`. Then the same implement front half as above: runStage → makeBuildContextDep → buildContext → the files on disk.
+ */
+async function kRestartRound227(view) {
+  const { r, gh } = implement227(view);
+  const history = (await gh.comments(227)).slice();
+  let label = "factory:awaiting-review", tick = 0;
+  const writer = {
+    issue: async () => ({ number: 227, title: "T", body: "", labels: [label] }),
+    comments: async () => history.slice(),
+    comment: async (_n, body) => { history.push({ body, author: "factory-bot", createdAt: new Date(Date.UTC(2026, 9, 10, 1, 0, tick++)).toISOString() }); },
+    setFactoryLabel: async (_n, to) => { label = to; },
+  };
+  await writer.comment(227, kRestartComment174({ issue: 227, pr: 220, head: H227, findings: [{ id: "k1", where: "factory/lib/context.js:300", claim: "the K-restart finding" }] }));
+  await transition174({ gh: writer, issue: 227, to: "factory:rework", reason: "k restart", by: "factory:run-1", stage: "review", env: {} });
+  gh.comments = vi.fn(async (n) => (n === 220 ? [{ id: 9, body: reworkResponse227, createdAt: "2026-10-10T01:00:00Z" }] : history.slice()));
+  const lines = [];
+  const seen = {};
+  const deps = {
+    charterReady: async () => true, trustWorkspace: async () => {}, claim: async () => ({ ok: true }),
+    heartbeat: async () => ({ stop() {} }), assertHandoff: async () => ({ ok: true }),
+    buildContext: makeBuildContextDep({ root: r, gh, issue: 227, stage: "implement", run: null, mergeBase: async () => null, recordLine: (l) => lines.push(l) }),
+    resetAgentsLog: async () => {},
+    claudeP: vi.fn(async () => {
+      seen.loaded = read227(r, "loaded.json");
+      seen.builder = read227(r, "context.builder.json");
+      return { is_error: false, result: "{}" };
+    }),
+    gates: async () => null, verifyStage: () => ({ ok: true, reasons: [], data: {} }), writeHandoff: async () => {},
+    transition: vi.fn(async ({ to }) => ({ ok: true, to })), runRecord: (l) => lines.push(...l), release: async () => true,
+  };
+  await runStage({ stage: "implement", issue: 227, deps });
+  return { lines, seen };
+}
+
+test("test_227_implement_drops_an_invisible_pr_number_and_the_builder_opens_a_new_one — the K-restart brief", async () => {
+  const gone = await kRestartRound227({ stderr: GH_NOT_FOUND_227 });
+  // the brief still reaches the builder (its findings are the restart's scope) — only the dead number goes
+  expect(gone.seen.loaded.k_restart_brief.findings.map((f) => f.id)).toEqual(["k1"]);
+  expect(gone.seen.loaded.k_restart_brief.pr ?? null).toBe(null);
+  expect(gone.seen.loaded.pr).toBeUndefined();
+  expect(JSON.stringify(gone.seen.loaded)).not.toContain("220");
+  expect(JSON.stringify(gone.seen.builder.handoffs)).not.toContain("220");
+  expect(gone.lines.filter((l) => l.startsWith(DROPPED_227))).toHaveLength(1);
+
+  // A visible OPEN PR on claude/fq-227: the brief keeps its number.
+  const ok = await kRestartRound227({ state: "OPEN", headRefName: "claude/fq-227" });
+  expect(ok.seen.loaded.k_restart_brief.pr).toBe(220);
+  expect(ok.seen.loaded.pr).toBe(220);
+  // ...and a transient gh failure proves nothing, so the brief keeps it too.
+  const blip = await kRestartRound227({ stderr: GH_502_227 });
+  expect(blip.seen.loaded.k_restart_brief.pr).toBe(220);
+});
+
+/**
  * #238 (P-14, M-8) dw1 — the plan repair turn carries the **whole rejected plan** next to the reasons. The chain is the real one:
  * runStage → makeBuildContextDep (main()'s dep) → buildContext → `loaded.json` + every `context.<role>.json`, and the verdict comes
  * from the real `verifyStage` (its `v.data` is the object the repair turn must see). `plan_repair` stays today's string[] — the

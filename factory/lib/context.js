@@ -294,7 +294,8 @@ export async function buildContext({ root, gh, issue, stage, run = null, base = 
   /**
    * #227 — implement only, and only when the caller names the expected branch (run-stage passes `stageBranch(issue)`). A `gone` PR is
    * removed from every input the builder reads BEFORE anything is derived from it: `loaded.pr`/`head_sha`/`disputed` (loadedFor reads
-   * these handoffs and skips the PR's comments when there is no number) and the `handoffs` block of `context.json`/`context.<role>.json`.
+   * these handoffs and skips the PR's comments when there is no number), `loaded.k_restart_brief.pr` (loadedFor, from `prCheck`) and the
+   * `handoffs` block of `context.json`/`context.<role>.json`.
    * The review handoff carries the same number on a rework round, so it goes too. The note travels as a NON-enumerable property: it
    * names the dropped number, and nothing the builder reads may carry it. A gh client without `prView` is a caller that did not ask.
    */
@@ -578,7 +579,10 @@ async function loadedFor({ ctx, roleBlock, gh, comments = [] }) {
    * K 카운터와 같은 창(`commentsSinceRequeue`)의 **쓰인** 재시작 하나(`kRestartState`)다 — 뒤에 붙은 마커가 바꾸지 못한다.
    * `loaded.must_fix`는 재시작 뒤 첫 리뷰부터 그 라운드의 것이 되므로 얼린 목록은 여기 따로 간다. 재시작이 없으면 키가 없다.
    */
-  const kRestartBrief = ctx.stage === "implement" ? kRestartState(commentsSinceRequeue(comments)).brief : null;
+  const restartBrief = ctx.stage === "implement" ? kRestartState(commentsSinceRequeue(comments)).brief : null;
+  // #227 cf-s2 — the brief's `pr` comes from the restart comment, not from the handoffs the drop rewrote: a gone number goes here too.
+  const dropped = ctx.prCheck?.state === "gone" ? ctx.prCheck.pr : null;
+  const kRestartBrief = restartBrief && dropped != null && restartBrief.pr === dropped ? { ...restartBrief, pr: null } : restartBrief;
   const review = ctx.handoffs?.review ?? null;
   const conflictOnly = ctx.stage === "implement" && !conflictBoundSpent(comments, ctx.issue?.number)
     ? conflictOnlyOf({ comments: commentsSinceRequeue(comments), mergeConflicts: ctx.merge_conflicts, review }) : null;
