@@ -4419,6 +4419,14 @@ export function makeOperatorMergeDeps({ stage, env, run: runner, repo, gh, facto
   };
 }
 
+/**
+ * main()이 쓰는 운영 머지 배선 한 곳(#236 skeptic): 운영 deps를 deps에 얹고, 기록은 **이미 있는** `deps.runRecord`(run 기록)로 보낸다.
+ * main은 이것을 merge 자기 변경 deps(`makeMergeSelfChangeDeps`)보다 먼저 부른다 — 두 묶음의 키는 겹치지 않는다(테스트가 고정한다).
+ */
+export function wireOperatorMerge(deps, args) {
+  return Object.assign(deps, makeOperatorMergeDeps({ ...args, runRecord: deps.runRecord }));
+}
+
 async function main() {
   const argv = process.argv.slice(2);
   const [stage, issueArg] = argv;
@@ -5011,10 +5019,10 @@ async function main() {
     }),
   };
   // #236 (ADR-044) — 운영 세션의 로컬 머지(러너가 아닐 때만; 아니면 `{}`라 deps는 그대로다).
-  Object.assign(deps, makeOperatorMergeDeps({
+  wireOperatorMerge(deps, {
     stage, env: process.env, run, repo, gh, factoryLogins: () => resolveFactoryLogins({ gh, env: process.env }),
-    getCharter: () => charter, getEngine: () => engineAtBase, getDefaultBranch: () => harness?.project?.default_branch ?? "main", runRecord: deps.runRecord,
-  }));
+    getCharter: () => charter, getEngine: () => engineAtBase, getDefaultBranch: () => harness?.project?.default_branch ?? "main",
+  });
   // #179 (ADR-033) — merge의 자기 변경 deps. 게터(selfChange·engine)를 살리려고 펼치지 않고 속성 서술자로 옮긴다.
   Object.defineProperties(deps, Object.getOwnPropertyDescriptors(makeMergeSelfChangeDeps({
     gh, issue, getCharter: () => charter, getEngine: () => engineAtBase, env: process.env,

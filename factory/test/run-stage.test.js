@@ -11165,3 +11165,90 @@ test("test_236_local_merge_refuses_stale_head_status_and_nonhuman_actor", async 
     expect(log.join("\n")).toMatch(/no factory\/integrity on the current head/);
   }
 });
+
+// ── #236 skeptic self-critique — the local merge as ONE run: the real runStage, with the deps composed the way main() composes
+// them (operator deps first, then the merge self-change deps over the same object), and main() pinned to that composition. ────
+import { wireOperatorMerge as wireOperatorMerge236 } from "../bin/run-stage.js";
+
+test("test_236_local_merge_one_run_through_run_stage_with_mains_wiring", async () => {
+  // (a) main() wires the operator deps from process.env, before the self-change deps, and routes the record through deps.runRecord.
+  const src = readFileSync(new URL("../bin/run-stage.js", import.meta.url), "utf8");
+  const mainSrc = src.slice(src.indexOf("async function main()"));
+  const iDeps = mainSrc.indexOf("const deps = {");
+  const iWire = mainSrc.search(/\n {2}wireOperatorMerge\(deps, \{\s*stage, env: process\.env, run, repo, gh,/);
+  const iSelf = mainSrc.indexOf("Object.defineProperties(deps, Object.getOwnPropertyDescriptors(makeMergeSelfChangeDeps(");
+  expect(iDeps).toBeGreaterThan(-1);
+  expect(iWire).toBeGreaterThan(iDeps);
+  expect(iSelf).toBeGreaterThan(iWire);
+  const wireFn = src.slice(src.indexOf("export function wireOperatorMerge("), src.indexOf("export function wireOperatorMerge(") + 400);
+  expect(wireFn).toMatch(/runRecord: deps\.runRecord/);
+
+  const charter = { self_change: { auto_merge_non_judge: true, auto_merge_judge: false, operator_merge_judge: false, veto_minutes: 15 }, never_automate: [] };
+  const gh = {
+    viewerLogin: vi.fn(async () => "alice"),
+    userType: vi.fn(async (l) => ({ alice: "User" })[l] ?? null),
+    commitStatuses: vi.fn(async () => [LOCAL_OK_236, ...FACTORY_STATUSES_236]),
+    mergePr: vi.fn(async () => {}),
+    setStatus: vi.fn(async () => {}),
+    labelEvents: vi.fn(async () => []),
+    issueLabels: vi.fn(async () => []),
+  };
+  // (b) The two dep sets the composition merges never write the same key — their order cannot silently drop one.
+  const operatorKeys = Object.keys(makeOperatorMergeDeps236({ stage: "merge", env: { [OPERATOR_MERGE_ENV236]: "1" }, gh, run: prViewRun236(prJson236()) }));
+  const selfKeys = Object.keys(Object.getOwnPropertyDescriptors(makeMergeSelfChangeDeps({ gh, issue: 7, getCharter: () => charter, getEngine: () => true, env: {} })));
+  expect(operatorKeys.sort()).toEqual(["operatorMergeCheck", "operatorPresent", "runRecord"]);
+  expect(selfKeys.filter((k) => operatorKeys.includes(k))).toEqual([]);
+
+  const compose = ({ env, sink, log }) => {
+    const d = mergeHappyDeps({
+      checkoutHead: vi.fn(async () => ({ ok: true, sha: HEAD_236, pr: 9 })),
+      // A self-change PR (engine checkout, protected engine paths) — the only kind that has a veto window today.
+      protectedPaths: async () => ({ ok: true, files: ["factory/lib/status.js", "docs/factory/ops/runbook.md"] }),
+      runRecord: (l) => sink.push(...l),
+      transition: vi.fn(async ({ to }) => ({ ok: true, to })),
+      factoryLogins: async () => ({ ok: true, logins: ["ktb-bot"] }),
+      commitStatuses: async () => FACTORY_STATUSES_236,
+      breaker: vi.fn(async () => ({ ok: true, open: false, since: null, reason: null, detail: "closed" })),
+      persistSelfMerge: vi.fn(async () => ({ ok: true })),
+      sleep: vi.fn(async () => {}),
+    });
+    wireOperatorMerge236(d, {
+      stage: "merge", env, run: prViewRun236(prJson236()), repo: "o/r", gh,
+      factoryLogins: async () => ({ ok: true, logins: ["ktb-bot"] }),
+      getCharter: () => charter, getEngine: () => true, getDefaultBranch: () => "main", log: (l) => log.push(l),
+    });
+    Object.defineProperties(d, Object.getOwnPropertyDescriptors(makeMergeSelfChangeDeps({ gh, issue: 7, getCharter: () => charter, getEngine: () => true, env })));
+    return d;
+  };
+
+  // (c) Operator marker, off a runner: one runStage call goes approved → merged with the merged label, through the real gh
+  // mergePr the self-change deps carry; the window is never opened (no veto status posted) nor slept on; the audit line is in
+  // the run record (deps.runRecord) and on stderr.
+  {
+    const sink = [], log = [];
+    const d = compose({ env: { [OPERATOR_MERGE_ENV236]: "1" }, sink, log });
+    expect(await runStage({ stage: "merge", issue: 7, deps: d, runnerId: "r" })).toBe(0);
+    expect(gh.mergePr).toHaveBeenCalledTimes(1);
+    expect(d.transition.mock.calls.map((c) => c[0].to)).toContain("factory:merged");
+    expect(gh.setStatus.mock.calls.map((c) => c[0].context)).not.toContain(VETO_WINDOW_CONTEXT236);
+    expect(d.sleep).not.toHaveBeenCalled();
+    const audit = `local-merge pr=9 sha=${HEAD_236} actor=alice veto=skipped`;
+    expect(sink).toContain(audit);
+    expect(log).toContain(audit);
+  }
+  // (d) The same composition with a forged marker under GITHUB_ACTIONS: no operator mode, so the run opens the veto window
+  // (the fake gh refuses that one status, so the run stops right there instead of waiting 15 minutes — and merges nothing).
+  {
+    gh.mergePr.mockClear(); gh.setStatus.mockClear();
+    gh.setStatus.mockImplementation(async ({ context }) => { if (context === VETO_WINDOW_CONTEXT236) throw new Error("fixture: window posted"); });
+    const sink = [], log = [];
+    const env = { [OPERATOR_MERGE_ENV236]: "1", GITHUB_ACTIONS: "true", FACTORY_JOB_STARTED: String(Math.floor(Date.now() / 1000)), FACTORY_JOB_TIMEOUT_MINUTES: "90" };
+    const d = compose({ env, sink, log });
+    expect(d.operatorPresent).toBeUndefined();
+    expect(await runStage({ stage: "merge", issue: 7, deps: d, runnerId: "r" })).not.toBe(0);
+    expect(gh.mergePr).not.toHaveBeenCalled();
+    expect(gh.setStatus.mock.calls.map((c) => c[0].context)).toContain(VETO_WINDOW_CONTEXT236);
+    expect(sink.some((l) => l.startsWith("local-merge "))).toBe(false);
+    expect(log).toEqual([]);
+  }
+});
