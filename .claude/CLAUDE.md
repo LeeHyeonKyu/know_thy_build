@@ -159,11 +159,11 @@ If none exists: run `/know-thy-build:architect` before implementing.
 
 소유자: "사람 역할 하는 agent를 하나 띄워서 나한테 PR 검토 받지 않고 merge하도록 해." 그래서:
 
-1. **공장이 만든 PR**은 CHARTER `self_change.auto_merge_judge: true` — 만장일치 리뷰 + GREEN + 거부권 창 60분 + 차단기 닫힘이면 공장이 머지한다(ADR-033). 소유자에게 머지를 요청하지 않는다.
+1. **공장이 만든 PR**은 CHARTER `self_change.auto_merge_judge: true` — 만장일치 리뷰 + GREEN + 거부권 창(CHARTER `veto_minutes`, 2026-10-12부터 15분) + 차단기 닫힘이면 공장이 머지한다(ADR-033). 소유자에게 머지를 요청하지 않는다.
 2. **운영 세션이 만든 PR**(`.github/**`·templates·CHARTER·`factory/**` 핫픽스 등 판정 경로 포함)은 운영 세션이 운영 door(`gh pr merge <n> --squash --admin`, CHARTER `operator_merge_judge: true`)로 직접 머지한다. 단, 머지 전에 **반드시**:
    - 전체 스위트(`GITHUB_ACTIONS=true npx vitest run`)와, 워크플로를 건드렸으면 `actionlint`가 clean이고 PR 체크가 GREEN이다.
-   - **대역 리뷰어 에이전트**를 하나 띄운다(`Agent`, fresh `general-purpose`, 읽기 전용): PR diff·이슈·ADR을 cold read로 보고 `approve | reject(must_fix)`를 낸다. reject면 고치고 다시 띄운다. 이 에이전트는 작성자(운영 세션)와 다른 컨텍스트여야 한다 — 같은 세션의 자기 확인은 리뷰가 아니다.
-   - PR 본문에 그 판정 요지(`Stand-in review: approve — …`)를 남긴다.
+   - **대역 리뷰어 에이전트**는 **판정 로직을 새로 바꾸는 엔진 변경**(merge-stage·integrity·게이트·워크플로·훅·CHARTER 규칙의 의미 변경)에만 띄운다(`Agent`, fresh `general-purpose`, 읽기 전용, cold read, `approve | reject(must_fix)`; reject면 고치고 다시). 2026-10-12 소유자 "토큰 사용량이 너무 많다": 대역 리뷰 1회가 90~150k 토큰이라, **이미 공장 리뷰를 통과한 코드의 재착륙(base 머지·번호 정리만)·문서·테스트 핀·숫자 하나짜리 설정 변경**은 운영 세션이 diff를 직접 읽고 PR 본문에 무엇을 확인했는지 적은 뒤 머지한다. 공장 리뷰가 로스터 크기 때문에 멈춘 PR(판정 경로인데 standard 티어)은 빠진 렌즈만 대역 1명으로 메운다.
+   - PR 본문에 그 판정 요지(`Stand-in review: approve — …` 또는 `Operator read: …`)를 남긴다.
 3. 소유자에게 남는 것은 **거부권**(revert·`factory:veto`·차단기 리셋)이다. 사람에게 무언가를 요청하는 것은 토큰·시크릿·계정처럼 **사람만 할 수 있는 것**뿐이다.
 
 ## SDD 비용 정책 (2026-09-21, 소유자 승인)
