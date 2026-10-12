@@ -858,8 +858,12 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
     record([`merge: gates BLOCKED — ${e.message}`, ...refusal(t)]);
     return 2;
   }
-  if (gates && gates.diagnostic !== true && postStatus) {
-    await postStatus({ context: "factory/gates", state: gates.status === "GREEN" ? "success" : "failure", description: verdictLine(gates), sha: gates.head_sha });
+  // #236 (ADR-044) cf1 — a local merge (`operatorPresent`) runs under the operator's token, so a factory/gates it posted would
+  // become the newest one on the head and H1b (6b) would refuse it as non-factory. Its gates still decide the merge below; they
+  // are just never posted under the operator's identity (the factory-posted factory/gates stays the evidence H1b reads).
+  const postGates = d.operatorPresent === true ? null : postStatus;
+  if (gates && gates.diagnostic !== true && postGates) {
+    await postGates({ context: "factory/gates", state: gates.status === "GREEN" ? "success" : "failure", description: verdictLine(gates), sha: gates.head_sha });
   }
   // KTB-21 parity with run-stage (implement/review): `[factory.test.env].compose`가 있으면 게이트가
   // 명령을 돌리기 전에 env를 한 번 더 re-up했다(멱등) — 성공/실패 둘 다 run 기록에 남긴다. `ran`이
@@ -932,8 +936,8 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
       return 2;
     }
     // The required `factory/gates` status must follow the final verdict — a stale failure would refuse a GREEN re-run at (5).
-    if (again && again.diagnostic !== true && postStatus) {
-      await postStatus({ context: "factory/gates", state: again.status === "GREEN" ? "success" : "failure", description: verdictLine(again), sha: again.head_sha });
+    if (again && again.diagnostic !== true && postGates) {
+      await postGates({ context: "factory/gates", state: again.status === "GREEN" ? "success" : "failure", description: verdictLine(again), sha: again.head_sha });
     }
     const againEnvNote = envNoteOf(again);
     // BLOCKED, or no verdict at all: the re-run could not decide anything — blocked (plan dw2), never a merge, never a
@@ -1515,7 +1519,9 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
   try {
     // #179 — 자기 변경 경로는 창 뒤에 다시 검증한 head를 머지 호출에 못 박는다(`--match-head-commit`): 재검증과 머지 사이의
     // push는 GitHub이 거부한다. 오늘의 경로는 호출 모양 그대로다.
-    if (selfPath) await d.mergePr(pr, { matchHeadCommit: sha });
+    // #236 skeptic — 로컬 머지도 같다: 운영 door가 판정한 head(`sha`)를 못 박아, door 검사 뒤의 push가 `factory/integrity`가 판정하지
+    // 않은 tree를 머지하지 못하게 한다(보호 규칙 없는 저장소가 이 모드의 자리다).
+    if (selfPath || operator) await d.mergePr(pr, { matchHeadCommit: sha });
     else await d.mergePr(pr);
   } catch (e) {
     const reason = `merge API failed: ${e?.message || e}`;
