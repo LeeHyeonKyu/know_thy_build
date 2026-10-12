@@ -2416,29 +2416,40 @@ test("factory-retro.js: once() is byte-identical to the four stage workflows', a
 import { mkdirSync as mkdirSync238 } from "node:fs";
 import { buildContext as buildContext238 } from "../lib/context.js";
 test("test_238_current_workflow_still_renders_repair_reasons_from_new_shape", async () => {
-  const r = mkdtempSync(join(tmpdir(), "wf238-"));
-  mkdirSync238(join(r, ".factory"), { recursive: true }); mkdirSync238(join(r, "docs/factory"), { recursive: true });
-  writeFileSync(join(r, ".factory/harness.toml"), `schema = 1\n[harness]\nmaturity = "M0"\n[factory]\norchestration = "workflow"\n[commands]\nunit = "npm test"\n[gates]\nrequired = ["unit"]\nfast = ["unit"]\nfull = ["unit"]\ndeep = ["unit"]\n`);
-  writeFileSync(join(r, "docs/factory/CHARTER.md"), `---\nschema: factory.charter.v1\nstatus: ready\ntier_default: standard\nroster:\n  standard: [correctness]\nplan_roles:\n  default: [skeptic]\nplan_rounds: { docs: 2, default: 3 }\n---\n`);
-  writeFileSync(join(r, ".factory/roles.toml"), `[triage]\nagent = "t.md"\nmodel = "sonnet"\n[review.correctness]\nagent = "c.md"\nmodel = "opus"\n[plan.skeptic]\nagent = "s.md"\nmodel = "opus"\n[plan.synthesizer]\nagent = "syn.md"\nmodel = "opus"\n`);
-  const gh = { issue: async () => ({ number: 42, title: "T", body: "", labels: ["factory:ready"] }), comments: async () => [] };
-  const rejected = { schema: "factory.plan.v1", issue: 42, done_when: [{ id: "dw1", text: "REJECTED-PLAN-MARKER", verify: "test_42_x", level: "unit" }], dissent_log: [{ id: "d2", severity: "high" }] };
-  await buildContext238({ root: r, gh, issue: 42, stage: "plan", planRepair: R1_REPAIR_REASONS, planRepairPrevious: rejected });
-  const loaded = JSON.parse(readFileSync(join(r, ".factory/out/loaded.json"), "utf8"));
-  // the new shape really is the engine's: plan_repair untouched in loaded.json; the rejected plan rides in context.json only (dw1).
-  expect(loaded.plan_repair).toEqual(R1_REPAIR_REASONS);
-  expect(Object.keys(loaded)).not.toContain("plan_repair_previous");
-  expect(JSON.parse(readFileSync(join(r, ".factory/out/context.json"), "utf8")).plan_repair_previous).toEqual(rejected);
+  // One real root per mode: the CHARTER decides the mode (tier standard → single by default; `plan.mode: debate` → debate), and
+  // the loaded object handed to the workflow is the file the real buildContext wrote — roster, rounds and plan block included.
+  const realLoaded = async (mode) => {
+    const r = mkdtempSync(join(tmpdir(), `wf238${mode}-`));
+    mkdirSync238(join(r, ".factory"), { recursive: true }); mkdirSync238(join(r, "docs/factory"), { recursive: true });
+    writeFileSync(join(r, ".factory/harness.toml"), `schema = 1\n[harness]\nmaturity = "M0"\n[factory]\norchestration = "workflow"\n[commands]\nunit = "npm test"\n[gates]\nrequired = ["unit"]\nfast = ["unit"]\nfull = ["unit"]\ndeep = ["unit"]\n`);
+    writeFileSync(join(r, "docs/factory/CHARTER.md"), `---\nschema: factory.charter.v1\nstatus: ready\ntier_default: standard\nroster:\n  standard: [correctness]\nplan_roles:\n  default: [architect, skeptic]\nplan_rounds: { docs: 2, default: 3 }\n${mode === "debate" ? "plan:\n  mode: debate\n" : ""}---\n`);
+    writeFileSync(join(r, ".factory/roles.toml"), `[triage]\nagent = ".claude/agents/factory-triage.md"\nmodel = "sonnet"\n[review.correctness]\nagent = ".claude/agents/review-correctness.md"\nmodel = "opus"\n[plan.architect]\nagent = ".claude/agents/plan-architect.md"\nmodel = "opus"\n[plan.skeptic]\nagent = ".claude/agents/plan-skeptic.md"\nmodel = "opus"\n[plan.synthesizer]\nagent = ".claude/agents/plan-synthesizer.md"\nmodel = "opus"\n`);
+    const gh = { issue: async () => ({ number: 42, title: "T", body: "", labels: ["factory:ready"] }), comments: async () => [] };
+    const rejected = { schema: "factory.plan.v1", issue: 42, done_when: [{ id: "dw1", text: "REJECTED-PLAN-MARKER", verify: "test_42_x", level: "unit" }], dissent_log: [{ id: "d2", severity: "high" }] };
+    await buildContext238({ root: r, gh, issue: 42, stage: "plan", planRepair: R1_REPAIR_REASONS, planRepairPrevious: rejected });
+    const loaded = JSON.parse(readFileSync(join(r, ".factory/out/loaded.json"), "utf8"));
+    // the new shape really is the engine's: plan_repair untouched in loaded.json; the rejected plan rides in context.json only (dw1).
+    expect(loaded.plan_repair).toEqual(R1_REPAIR_REASONS);
+    expect(Object.keys(loaded)).not.toContain("plan_repair_previous");
+    expect(JSON.parse(readFileSync(join(r, ".factory/out/context.json"), "utf8")).plan_repair_previous).toEqual(rejected);
+    return loaded;
+  };
 
   for (const mode of ["debate", "single"]) {
+    const loaded = await realLoaded(mode);
+    // the producer itself chose this mode and roster — nothing below is overridden by the test.
+    expect(loaded.plan?.mode, mode).toBe(mode);
+    expect(loaded.roster.map((x) => x.name), mode).toEqual(mode === "debate" ? ["architect", "skeptic"] : ["synthesizer", "skeptic"]);
     const { calls } = await runWorkflow(FACTORY_PLAN_WORKFLOW, {
       agent: planStub(),
-      args: { issue: 42, context: ".factory/out/context.json", loaded: { ...loaded, roster: PLAN_ROSTER, rounds: 3, plan: { mode, max_done_when: 6 } } },
+      args: { issue: 42, context: ".factory/out/context.json", loaded },
     });
     const writer = mode === "debate"
       ? calls.find((c) => c.opts.agentType === "plan-synthesizer")
       : calls.find((c) => typeof c.opts.label === "string" && c.opts.label.startsWith("plan:"));
     expect(writer, `${mode}: the plan writer was dispatched`).toBeTruthy();
+    if (mode === "debate") expect(calls.some((c) => typeof c.opts.label === "string" && c.opts.label.startsWith("R1:")), "debate ran R1").toBe(true);
+    else expect(calls.some((c) => typeof c.opts.label === "string" && c.opts.label.startsWith("R1:")), "single runs no R1").toBe(false);
     expect(writer.prompt, mode).toContain("REPAIR TURN (KTB-51)");
     for (const reason of R1_REPAIR_REASONS) expect(writer.prompt, `${mode}: ${reason}`).toContain(reason);
   }
