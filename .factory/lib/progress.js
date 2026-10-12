@@ -31,7 +31,7 @@ import { join } from "node:path";
 import { homedir } from "node:os";
 import { costFromUsage } from "./usage.js";
 import { transcriptPathFrom } from "./stage-artifact.js";
-import { SECRET_ENV, scrubText } from "../bin/scrub-artifacts.js";
+import { secretValues, scrubText } from "../bin/scrub-artifacts.js";
 
 /** 코멘트에 싣는 기계 계약. Task B(뷰어)와 `parseProgressMarker`가 이 한 줄만 본다. */
 export const PROGRESS_MARKER_RE = /<!-- factory-progress:v1 (\{.*\}) -->/;
@@ -65,7 +65,6 @@ const ARG_MAX = 60;
  * 통과시킨다: 모양 기반 규칙(Bearer·gh 토큰·sk-ant-·URL userinfo)은 env 없이도 잡고, `SECRET_ENV`
  * 다섯 개는 지금 프로세스의 env에 실제로 있는 값만 리터럴로 잡는다.
  */
-const toolSecrets = (env) => SECRET_ENV.map((n) => env?.[n]).filter((v) => typeof v === "string" && v.length > 0);
 
 /** `<ToolName> <short arg>` 한 조각. 인자를 못 고르면 툴 이름만. */
 export function toolLabel(block, { env = process.env } = {}) {
@@ -77,7 +76,7 @@ export function toolLabel(block, { env = process.env } = {}) {
     const v = input[k];
     if (typeof v !== "string" || !v.trim()) continue;
     const collapsed = v.replace(/\s+/g, " ").trim();
-    const one = scrubText(collapsed, { secrets: toolSecrets(env) }).text;
+    const one = scrubText(collapsed, { secrets: secretValues(env) }).text;
     return `${name} ${one.length > ARG_MAX ? one.slice(0, ARG_MAX) + "…" : one}`;
   }
   return name;
