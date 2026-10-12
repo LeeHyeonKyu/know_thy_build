@@ -4378,3 +4378,35 @@ test("test_236_operator_present_skips_only_the_veto_window", async () => {
   expect(entry).toMatch(/ADR-033/);
   expect(entry).toMatch(/operatorPresent/);
 });
+
+test("test_236_local_merge_pins_the_judged_head_on_mergePr", async () => {
+  // A local merge of an ordinary (non-self-change) PR: the operator door judged HEAD, then a push lands before the squash.
+  // The merge call must carry the judged head, so the forge refuses the moved head instead of squashing a tree no
+  // factory/integrity ever judged. The forge fake behaves like GitHub's --match-head-commit: no pin → it merges whatever is live.
+  const MOVED = "c".repeat(40);
+  let live = HEAD;
+  const merged = [];
+  const d = baseD({
+    operatorPresent: true,
+    operatorMergeCheck: vi.fn(async ({ sha }) => { const v = { ok: sha === live, reasons: sha === live ? [] : ["head moved"], actor: "alice" }; live = MOVED; return v; }),
+    mergePr: vi.fn(async (pr, opts = {}) => {
+      if (opts.matchHeadCommit !== undefined && opts.matchHeadCommit !== live) throw new Error(`Head branch was modified (expected ${opts.matchHeadCommit.slice(0, 7)})`);
+      merged.push(live);
+    }),
+  });
+  const { lines, record } = makeRecord();
+  const code = await run(d, { record });
+  expect(d.operatorMergeCheck).toHaveBeenCalledWith({ pr: 9, sha: HEAD });
+  expect(d.mergePr.mock.calls).toEqual([[9, { matchHeadCommit: HEAD }]]);
+  expect(merged).toEqual([]);                                             // the unjudged head was never squashed
+  expect(code).toBe(2);
+  expect(d.transition.mock.calls.map((x) => x[0].to)).not.toContain("factory:merged");
+  expect(lines.join("\n")).toMatch(/mergePr FAIL — merge API failed: Head branch was modified/);
+
+  // The same fixture with the head standing still merges exactly the judged head.
+  live = HEAD;
+  const still = baseD({ operatorPresent: true, operatorMergeCheck: OPERATOR_OK_236(), mergePr: vi.fn(async () => { merged.push(live); }) });
+  expect(await run(still, makeRecord())).toBe(0);
+  expect(still.mergePr.mock.calls).toEqual([[9, { matchHeadCommit: HEAD }]]);
+  expect(merged).toEqual([HEAD]);
+});

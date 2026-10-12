@@ -1519,7 +1519,9 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
   try {
     // #179 — 자기 변경 경로는 창 뒤에 다시 검증한 head를 머지 호출에 못 박는다(`--match-head-commit`): 재검증과 머지 사이의
     // push는 GitHub이 거부한다. 오늘의 경로는 호출 모양 그대로다.
-    if (selfPath) await d.mergePr(pr, { matchHeadCommit: sha });
+    // #236 skeptic — 로컬 머지도 같다: 운영 door가 판정한 head(`sha`)를 못 박아, door 검사 뒤의 push가 `factory/integrity`가 판정하지
+    // 않은 tree를 머지하지 못하게 한다(보호 규칙 없는 저장소가 이 모드의 자리다).
+    if (selfPath || operator) await d.mergePr(pr, { matchHeadCommit: sha });
     else await d.mergePr(pr);
   } catch (e) {
     const reason = `merge API failed: ${e?.message || e}`;

@@ -65,6 +65,9 @@ export async function runCommand({ root, argv = [], io, run = realRun, spawnInhe
   // run-stage도 같은 조건을 다시 보고, 행위자가 사람 계정인지까지 확인한다(makeOperatorMergeDeps).
   // env를 주입하지 않은 호출자는 러너가 아님을 증명하지 못한다 — process.env로 추측하지 않고 예전 거부를 그대로 낸다(fail-closed;
   // integrityCommand와 같은 규칙). 실제 진입점 cli/index.js는 env를 명시로 넘기므로 운영자는 이 문구를 보지 않는다.
+  // dw4의 "거부 문구가 더는 CI 전용·--remote를 말하지 않는다"는 운영자가 보는 문구(아래 GITHUB_ACTIONS 거부와 env를 넘긴 경로 —
+  // run-cli.test.js가 /runs only in CI|--remote/의 부재를 고정한다)다. 이 줄의 옛 문구는 env 없는 호출자 전용이고, 기존 테스트
+  // ("stage merge → error, runs only in CI")가 그 문구를 단언하므로 남긴다(tests_are_load_bearing — 기존 단언은 바꾸지 않는다).
   if (stage === "merge" && injectedEnv === undefined) { io.err("merge runs only in CI (branch protection) for a caller that injects no env — the local operator merge needs the caller's env (cli/index.js passes it). Nothing was merged."); return 1; }
   if (stage === "merge" && env?.GITHUB_ACTIONS !== undefined) { io.err("factory run merge refused — GITHUB_ACTIONS is set, so this is a CI runner: merge runs locally only from an operator session (ADR-044), and a stage is never the operator. Nothing was merged."); return 1; }
   if (!isRetro && !STAGES.includes(stage) && stage !== "merge") { io.err(USAGE); return 1; }

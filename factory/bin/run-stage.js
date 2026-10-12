@@ -4375,7 +4375,12 @@ export function mergeGitAuth({ stage, env }) {
  */
 export const OPERATOR_MERGE_ENV = "FACTORY_OPERATOR_MERGE";
 export const isOperatorMerge = ({ stage, env }) => stage === "merge" && env?.[OPERATOR_MERGE_ENV] === "1" && env?.GITHUB_ACTIONS === undefined;
-/** 운영 door(`bin/operator-merge-check.js`)가 `gh pr view`로 읽는 필드 그대로 + 이 런이 머지할 head. */
+/**
+ * 운영 door(`bin/operator-merge-check.js`)가 `gh pr view`로 읽는 필드 그대로 + 이 런이 머지할 head. 공유되는 것은 판정 함수
+ * (`operatorMergeVerdict`)와 CHARTER 스위치다. 필드 목록을 `lib/operator-merge.js`의 export로 옮기면 door 파일 두 개
+ * (DOOR_FILES — 사람이 머지한다)를 이 이슈가 고쳐야 하므로 옮기지 않고, 이 목록이 door가 읽는 필드를 전부 담는지를
+ * run-stage.test.js(test_236_local_merge_asks_gh_for_every_field_the_door_reads)가 고정한다.
+ */
 export const OPERATOR_PR_FIELDS = "number,isDraft,mergeable,baseRefName,files,statusCheckRollup,headRefOid";
 
 /**
