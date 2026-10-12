@@ -2448,8 +2448,7 @@ test("test_238_current_workflow_still_renders_repair_reasons_from_new_shape", as
       ? calls.find((c) => c.opts.agentType === "plan-synthesizer")
       : calls.find((c) => typeof c.opts.label === "string" && c.opts.label.startsWith("plan:"));
     expect(writer, `${mode}: the plan writer was dispatched`).toBeTruthy();
-    // #243 dw3 (P-14, M-8): a debate-mode repair turn is one synthesis over the rejected plan — R1 is no longer re-run.
-    if (mode === "debate") expect(calls.some((c) => typeof c.opts.label === "string" && c.opts.label.startsWith("R1:")), "debate repair runs no R1 (#243 dw3)").toBe(false);
+    if (mode === "debate") expect(calls.some((c) => typeof c.opts.label === "string" && c.opts.label.startsWith("R1:")), "debate ran R1").toBe(true);
     else expect(calls.some((c) => typeof c.opts.label === "string" && c.opts.label.startsWith("R1:")), "single runs no R1").toBe(false);
     expect(writer.prompt, mode).toContain("REPAIR TURN (KTB-51)");
     for (const reason of R1_REPAIR_REASONS) expect(writer.prompt, `${mode}: ${reason}`).toContain(reason);
@@ -2610,7 +2609,7 @@ test("test_243_plan_repair_with_previous_reruns_synthesis_only", async () => {
   // single mode, repair turn → exactly one writer call; no skeptic; the prompt has the reasons and points at the rejected plan
   const repair = await runWorkflow(FACTORY_PLAN_WORKFLOW, {
     agent: singleStub,
-    args: { issue: 42, context: ".factory/out/context.json", loaded: singleLoaderFix({ plan_repair: R1_REPAIR_REASONS }) },
+    args: { issue: 42, context: ".factory/out/context.json", loaded: singleLoaderFix({ plan_repair: R1_REPAIR_REASONS, plan_repair_synthesis_only: true }) },
   });
   expect(kinds(repair.calls)).toEqual(["plan:synthesizer"]);
   const writer = repair.calls[0];
@@ -2645,7 +2644,7 @@ test("test_243_plan_repair_with_previous_reruns_synthesis_only", async () => {
   // debate mode, repair turn → the synthesizer is pointed at the rejected plan and the handoff names what it repairs
   const debateRepair = await runWorkflow(FACTORY_PLAN_WORKFLOW, {
     agent: planStub(),
-    args: { issue: 42, context: ".factory/out/context.json", loaded: planLoaderFix({ plan_repair: R1_REPAIR_REASONS }) },
+    args: { issue: 42, context: ".factory/out/context.json", loaded: planLoaderFix({ plan_repair: R1_REPAIR_REASONS, plan_repair_synthesis_only: true }) },
   });
   // only the writer runs: no R1, no R2, no sign-off — exactly one call, and it is the synthesizer
   expect(kinds(debateRepair.calls)).toEqual(["plan-synthesizer"]);
@@ -2660,6 +2659,42 @@ test("test_243_plan_repair_with_previous_reruns_synthesis_only", async () => {
   expect("repair_of" in debateRepair.result).toBe(true);
   expect(debateRepair.result.repair_of).toContain("plan_repair_previous");
   expect(debateRepair.result.summary).toBe(planFix().summary);                       // the writer's plan is the handoff
+
+  /*
+   * review cf1 — the writer-only turn is opt-in by the runner (`loaded.plan_repair_synthesis_only`). Today's run-stage resets
+   * agents.jsonl before the repair turn and the real verify-stage roster check needs every roster role completed, so a repair
+   * WITHOUT the opt-in must dispatch the whole roster again (as before #243) and pass that check; the writer-only turn would not.
+   */
+  const rosterReasons = (run, loaded) => {
+    const completed = [...new Set(run.calls.map((c) => c.opts.agentType).filter(Boolean))];
+    const v = verifyStage243({
+      stage: "plan",
+      out: { is_error: false, result: "```json\n" + JSON.stringify({ schema: "factory.plan.v1", ...run.result }) + "\n```" },
+      agentsLog: { starts: [], stops: [], completed, orphans: [] },
+      roster: loaded.roster.map((r) => r.name), rolePrefix: "plan-", expectedRounds: loaded.rounds, orchestration: "workflow",
+      planLimits: { max_done_when: 6 }, issueBody: "",
+    });
+    return v.reasons.filter((r) => r.startsWith("roster role not completed"));
+  };
+  for (const [name, loaded, stub] of [
+    ["debate", planLoaderFix({ plan_repair: R1_REPAIR_REASONS }), planStub()],
+    ["single", singleLoaderFix({ plan_repair: R1_REPAIR_REASONS }), singleStub],
+  ]) {
+    const run = await runWorkflow(FACTORY_PLAN_WORKFLOW, { agent: stub, args: { issue: 42, context: ".factory/out/context.json", loaded } });
+    if (name === "debate") {
+      expect(labelled(run.calls, "R1:"), name).toHaveLength(4);
+      expect(labelled(run.calls, "R2:"), name).toHaveLength(4);
+      expect(labelled(run.calls, "sign:"), name).toHaveLength(4);
+    } else {
+      expect(kinds(run.calls), name).toEqual(["plan:synthesizer", "skeptic:skeptic"]);
+    }
+    expect(rosterReasons(run, loaded), `${name}: repair without the runner's opt-in passes the roster check`).toEqual([]);
+    for (const reason of R1_REPAIR_REASONS) expect(run.calls.find((c) => c.opts.agentType === "plan-synthesizer" || c.opts.label === "plan:synthesizer").prompt, name).toContain(reason);
+    expect("repair_of" in run.result, name).toBe(true);
+  }
+  // the opted-in writer-only turns are exactly what today's roster check refuses — which is why they wait for the opt-in
+  expect(rosterReasons(debateRepair, planLoaderFix()).length).toBeGreaterThan(0);
+  expect(rosterReasons(repair, singleLoaderFix())).toEqual(["roster role not completed: skeptic"]);
 });
 
 test("test_243_planner_prompt_requires_covering_issue_done_when", async () => {

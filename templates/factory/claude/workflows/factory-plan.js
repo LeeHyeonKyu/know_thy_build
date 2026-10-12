@@ -342,6 +342,12 @@ const repairDirective = planRepair.length
 // names where it lives; run-stage records it as the agent's claim and never classifies on it (planRepairCostLine).
 const repairOf = planRepair.length ? `plan_repair_previous in ${args.context}` : null;
 const withRepairOf = (o) => (repairOf ? { ...o, repair_of: repairOf } : o);
+// #243 (P-14) review cf1 — the writer-only repair (no R1/R2/sign-off, no single-mode skeptic) runs only when the RUNNER
+// says it accepts one: `loaded.plan_repair_synthesis_only === true`. Today run-stage resets agents.jsonl before the repair
+// turn and verify-stage still requires every roster role completed (run-stage.js:1193-1220, verify-stage.js:624-626), so a
+// writer-only turn is always `roster role not completed` → needs-human. Until the roster-continuity change sets this key,
+// a repair turn dispatches the full roster as before (and can still reach factory:planned).
+const synthesisOnly = Boolean(repairOf) && loaded.plan_repair_synthesis_only === true;
 
 // #243 (P-15, M-9) — the single-mode merge never pushes done_when past `max_done_when`. The planner's items are never cut
 // (a planner over the cap is the validator's to reject); skeptic items take only the free slots. An item that is the
@@ -400,8 +406,8 @@ if (mode === 'single') {
   // The skeptic's schema has no field for deleting or rewriting — it can only add. That is the
   // property that makes a second pass cheap: there is no negotiation to converge, so there is no R2.
   let added = null;
-  // #243 (P-14) — a repair turn is the planner's one pass over the rejected plan; the skeptic already had its turn.
-  if (plan && sk && !repairOf) {
+  // #243 (P-14) — an opted-in repair turn (synthesisOnly) is the planner's one pass over the rejected plan; the skeptic already had its turn.
+  if (plan && sk && !synthesisOnly) {
     const add = await once(() => agent(
       `${reading(sk)}\n\n` +
       `Issue #${issue} (tier ${tier}). The plan, in full:\n${JSON.stringify(plan, null, 2)}\n\n` +
@@ -469,8 +475,8 @@ const synthesisReading =
 
 // #243 (P-14, M-8) — a debate-mode repair turn is ONE synthesis over the rejected plan: positions, cross-examination
 // and sign-off already happened on the turn the validator rejected, and re-running them cannot answer a validator
-// reason. The phases stay declared so `meta` is one shape; no R1/R2/sign-off agent is dispatched.
-if (repairOf) {
+// reason. The phases stay declared so `meta` is one shape; no R1/R2/sign-off agent is dispatched. Runner opt-in only (cf1, above).
+if (synthesisOnly) {
   phase('Positions');
   phase('Cross-examination');
   phase('Synthesis');
