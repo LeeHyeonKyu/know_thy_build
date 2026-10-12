@@ -10178,3 +10178,45 @@ test("test_212_crashed_or_parked_rereview_keeps_the_conflict_exemption", async (
   await reviewStage212(rej, { runnerId: "gha-r2", verdicts: [reject212("correctness"), approve212("qa")] });
   expect(rej.capCheck()).toMatchObject({ ok: false, conflictRevokedUsd: 9.5, conflictRevokedRuns: 1 });
 });
+
+/**
+ * #227 self-critique f1 — dw4: "the reason starts with a fixed greppable prefix and names the PR". The transition comment writes
+ * `<from> → <to> — <reason>` on its second line (lib/transition.js), so the reason's start is pinned there with a LITERAL prefix — not
+ * through `prNotVisibleReason`, whose output an assertion must not copy. Review and merge, each of the three gone shapes.
+ */
+test("test_227_review_with_an_invisible_pr_returns_to_planned — the reason starts with the literal pr-not-visible prefix", async () => {
+  const views = [{ stderr: GH_NOT_FOUND_227 }, { state: "OPEN", headRefName: "claude/fq-207" }, { state: "CLOSED", headRefName: "claude/fq-227" }];
+  for (const [label, run] of [["factory:awaiting-review", review227], ["factory:approved", merge227]]) {
+    for (const view of views) {
+      const what = `${label} ${JSON.stringify(view)}`;
+      const gh = gh227({ label, view });
+      await run(gh);
+      expect(gh.label, what).toBe("factory:planned");
+      const reasonLine = (await lastTransitionComment227(gh)).split("\n")[1];
+      expect(reasonLine.startsWith(`${label} → factory:planned — `), what).toBe(true);
+      const reason = reasonLine.slice(`${label} → factory:planned — `.length);
+      expect(reason, what).toMatch(/^pr-not-visible: PR #220 /);
+    }
+  }
+});
+
+/**
+ * #227 self-critique f2 — dw4: "a missing PR number still goes to needs-human". The handoff carries no `pr`, and gh would answer
+ * not-found for any number asked — so a null-pr guard moved below the visibility check, or a null pr classified as gone, would send
+ * the issue to factory:planned. It must reach needs-human with today's reason, without asking gh about a PR at all.
+ */
+test("test_227_review_with_an_invisible_pr_returns_to_planned — a missing PR number still goes to needs-human", async () => {
+  for (const [label, run] of [["factory:awaiting-review", review227], ["factory:approved", merge227]]) {
+    const gh = gh227({ label, pr: null, view: { stderr: GH_NOT_FOUND_227 } });
+    const { code, lines, d } = await run(gh);
+    expect(gh.label, label).toBe("factory:needs-human");
+    expect(code, label).toBe(2);
+    expect(gh.prView, label).not.toHaveBeenCalled();
+    expect(d.transition.mock.calls.map((c) => c[0].to), label).not.toContain("factory:planned");
+    const body = await lastTransitionComment227(gh);
+    expect(body, label).toMatch(/to=factory:needs-human/);
+    expect(body, label).toContain("implement handoff has no PR number");
+    expect(body, label).not.toContain("pr-not-visible:");
+    expect(lines.some((l) => /not visible/.test(l)), label).toBe(false);
+  }
+});

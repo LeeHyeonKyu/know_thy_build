@@ -2041,3 +2041,44 @@ test("test_238_repair_turn_loaded_json_stays_within_the_dispatcher_limit", async
   // ...while the file the planners read (args.context) still carries it whole.
   expect(JSON.parse(readFileSync(join(withPlan.r, ".factory/out/context.json"), "utf8")).plan_repair_previous).toEqual(rejected);
 });
+
+/**
+ * #227 self-critique f3 — dw5's thrown-timeout fixture through the same production path as the stderr fixtures (runStage →
+ * makeBuildContextDep → buildContext → the files the builder reads), with the same full set of assertions: the number, head_sha and
+ * the disputed responses stay, no 'not visible' line is written, and factory:planned is never requested.
+ */
+async function roundTimeout227() {
+  const { r, gh } = implement227({ state: "OPEN", headRefName: "claude/fq-227" });
+  const timeout = await bounded227(() => new Promise(() => {}), { ms: 1, what: "gh pr view" }).then(() => null, (e) => e);
+  gh.prView = vi.fn(async () => { throw timeout; });
+  const lines = [];
+  const seen = {};
+  const deps = {
+    charterReady: async () => true, trustWorkspace: async () => {}, claim: async () => ({ ok: true }),
+    heartbeat: async () => ({ stop() {} }), assertHandoff: async () => ({ ok: true }),
+    buildContext: makeBuildContextDep({ root: r, gh, issue: 227, stage: "implement", run: null, mergeBase: async () => null, recordLine: (l) => lines.push(l) }),
+    resetAgentsLog: async () => {},
+    claudeP: vi.fn(async () => {
+      seen.loaded = read227(r, "loaded.json");
+      seen.builder = read227(r, "context.builder.json");
+      return { is_error: false, result: "{}" };
+    }),
+    gates: async () => null, verifyStage: () => ({ ok: true, reasons: [], data: {} }), writeHandoff: async () => {},
+    transition: vi.fn(async ({ to }) => ({ ok: true, to })), runRecord: (l) => lines.push(...l), release: async () => true,
+  };
+  await runStage({ stage: "implement", issue: 227, deps });
+  return { timeout, lines, seen, gh, deps };
+}
+
+test("test_227_a_transient_gh_failure_or_merged_pr_never_triggers_a_rebuild — implement context, a bounded() timeout through runStage", async () => {
+  const t = await roundTimeout227();
+  expect(t.timeout.message).toBe("gh pr view timed out after 1 ms");
+  expect(t.gh.prView).toHaveBeenCalledWith(220);
+  expect(t.deps.claudeP).toHaveBeenCalledTimes(1);
+  expect(t.seen.loaded.pr).toBe(220);
+  expect(t.seen.loaded.head_sha).toBe(H227);
+  expect(t.seen.loaded.disputed).toEqual([{ id: "cf1", status: "disputed", reason: "out of scope" }]);
+  expect(t.seen.builder.handoffs.implement.pr).toBe(220);
+  expect(t.lines.some((l) => /not visible/.test(l))).toBe(false);
+  expect(t.deps.transition.mock.calls.map((c) => c[0].to)).not.toContain("factory:planned");
+});
