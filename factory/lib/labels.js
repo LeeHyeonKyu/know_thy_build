@@ -93,10 +93,10 @@ export const TRANSITIONS = new Map([
   // 재보고시키는 대신(KTB #3 spec1×2) 하네스 주차와 같은 문법으로 여기 세운다. KTB-23의
   // `in-progress → needs-info` 주차와 같은 계열의 엣지이고, 복귀 경로도 같다(`sweepHarnessUnpark`가
   // 하네스 이슈가 닫히면 `needs-info → queue`로 되돌린다).
-  // awaiting-review → planned · approved → planned (#227, ADR-039): review·merge의 체크아웃이 implement handoff의 PR이 **확실히
+  // awaiting-review → planned · approved → planned (#227, ADR-043): review·merge의 체크아웃이 implement handoff의 PR이 **확실히
   // 없다**(gh "Could not resolve to a PullRequest", 다른 head 브랜치, CLOSED)는 것을 확인하면 이슈를 planned로 되돌려 implement가
   // 새 PR을 열게 한다 — 코드는 브랜치에 있고 PR만 없는 상태의 답은 빌드 재시작이다(#207: 숨겨진 PR #220 → needs-human, 사람이 할
-  // 일이 없었다). rework가 아닌 이유: rework는 리뷰 판정이다(must_fix를 되먹이고 K를 쓴다). 이 엣지를 밟는 것은 run-stage의
+  // 일이 없었다). rework가 아닌 이유: rework 전이는 K 예산을 쓴다(countedTransitionIndices) — 인프라 사고가 K를 쓰면 안 된다. 이 엣지를 밟는 것은 run-stage의
   // not-visible 경로 하나뿐이고(사유가 `pr-not-visible:` 표식으로 시작한다), 재큐 창마다 한 번이다 — 두 번째는 needs-human.
   ["factory:awaiting-review", new Set(["factory:approved", "factory:rework", "factory:needs-human", "factory:blocked", "factory:needs-info", "factory:planned"])],
   ["factory:rework", new Set(["factory:in-progress", "factory:needs-human", "factory:blocked"])],
