@@ -4921,11 +4921,18 @@ dep을 싣는지는 소스 문자열 핀으로 고정하지 않는다(계획 non
    팩토리 계정이거나 사람(`User`)이 아니면 거부한다. 운영 모드의 팩토리 계정(H1b와 door가 같이 쓴다)은 운영자 env의 `FACTORY_BOT_LOGIN`
    **하나에서만** 온다 — 이슈 코멘트(하트비트)는 보지 않는다: 하트비트의 runner 필드는 코멘트 본문이라 누구든 적고, 러너가 돈 적 없는 Actions
    없는 저장소에서는 위조 하나가 그 작성자를 H1b의 팩토리 계정으로 만든다(skeptic r5 — H1b를 푸는 것은 plan non_goal). 없으면 거부하고 사유가
-   `FACTORY_BOT_LOGIN`을 말한다. `--remote`는 그대로다.
+   `FACTORY_BOT_LOGIN`을 말한다. `--remote`는 그대로다. 거부 문구: 운영자가 보는 거부(러너 표식, env를 넘긴 경로)는 CI 전용·`--remote`를
+   말하지 않는다(dw4). env를 **주입하지 않은** `runCommand` 호출자에게만 옛 문구 "merge runs only in CI (branch protection)"가 남는다 —
+   그 호출자는 러너가 아님을 증명하지 못하므로 거부하고, 기존 테스트(`run-cli.test.js` "stage merge → error, runs only in CI")가 그 문구를
+   단언하는데 이슈 본문에 `tests_changed_allowed:`가 없어 그 단언을 바꿀 수 없다(tests_are_load_bearing). 실제 진입점 `cli/index.js`는 env를
+   넘기므로 운영자는 그 문구를 보지 않는다 — dw4의 문구 조항은 이 범위로 읽는다.
    — `test_236_local_merge_runs_merge_stage_with_the_operator_token_and_no_veto_wait`
 3. **ADR-033 개정**: merge-stage의 새 dep `operatorPresent`(정확히 `true`일 때만)는 거부권 창의 **기다림 하나**만 지운다 — 창 상태·알림 코멘트·
    라벨 폴링·sleep이 없다. 다만 이미 서 있는 `factory:veto`는 기다림이 아니므로 **한 번** 읽는다: 붙어 있으면 사람에게 넘기고, 읽지 못하면
-   막힌 것으로 본다(rework sec1). 창 앞뒤의 차단기, 창 자리의 리뷰 재검증(H1b 포함), mergeGates, ready 뒤 재확인(head가 움직였는지 포함)은
+   막힌 것으로 본다(rework sec1). **이것은 plan dw3의 "never … reads the veto window"를 이 ADR이 명시적으로 고친 것이다**: 그 읽기는
+   창이 아니라 이 런의 시계 한 점(`since` = 지금)에서 한 번 하는 라벨 읽기이고, 창 상태·알림·폴링·시계 진행은 없다. 대신 새 거부 경로가
+   하나 생긴다 — 라벨을 읽지 못하면 머지하지 않는다(창이 있을 때도 같은 실패는 판정 불가였다). 소유자가 이 개정을 받지 않으면 되돌릴 것은
+   merge-stage `standingVeto` 한 곳이다. — `test_236_operator_present_skips_only_the_veto_window — the standing-veto read is one point read at now, never the window`. 창 앞뒤의 차단기, 창 자리의 리뷰 재검증(H1b 포함), mergeGates, ready 뒤 재확인(head가 움직였는지 포함)은
    그대로이고 각각 이름을 대고 거부한다. H1b는 풀리지 않는다: `factory/review`·`factory/gates`는 여전히 팩토리 계정이 올린 것이어야 하고,
    로컬 머지의 거부 사유가 그 말을 덧붙인다. dep이 없으면 같은 PR이 오늘처럼 창을 연다. 근거: 로컬 머지를 부른 운영 세션이 곧 거부권자다
    (소유자에게 남는 것은 revert·`factory:veto`·차단기 리셋 — ADR-039 §4). — `test_236_operator_present_skips_only_the_veto_window`
@@ -4935,6 +4942,13 @@ dep을 싣는지는 소스 문자열 핀으로 고정하지 않는다(계획 non
    들어갔다. 그 상태를 소비해 기다림을 건너뛸지 정하는 판정 코드 — `factory/lib/merge-stage.js`·`factory/bin/run-stage.js`와 그 설치본 —
    도 DOOR_FILES다(rework sec1/arch2): 생산자만 두면 소비자를 약하게 고친 PR이 운영 door로 머지되고 그 뒤의 모든 로컬 머지가 약해진
    문을 지난다. 그래서 이 두 엔진 파일을 건드리는 PR은 운영 door로 머지되지 않는다(공장의 자기 변경 머지는 그대로다).
+   **소유자 서명 사항**: 이 네 항목(두 파일과 설치본)은 dw5가 요구한 `factory/cli/integrity.js` 하나를 넘는다. `operator-merge.js`의
+   `files.filter(isDoorFile)`이 이 목록을 읽으므로, `operator-merge*.js`를 고치지 않고도 운영 door(`operator-merge-check.js`, ADR-039 §2·
+   CLAUDE.md "운영 머지" 2번의 `factory/**` 핫픽스 경로)의 동작이 바뀐다 — run-stage.js·merge-stage.js를 건드리는 **모든** 운영 머지가
+   "the door cannot open itself — a person merges"로 사람에게 간다. plan non_goal("Changes to operator-merge.js, operator-merge-check.js …")은
+   파일을 지키고 이 변경은 그 파일을 고치지 않지만, door의 거동을 바꾼다는 점에서 그 의도와 부딪친다. rework must_fix sec1/arch2가 요구해 남겼다.
+   이 PR은 door 파일을 바꾸므로 소유자가 머지한다; 소유자가 이 확장을 받지 않으면 되돌릴 것은 `non-judge-paths.js` DOOR_FILES의 그 네 줄이다(그때 로컬 머지 door는
+   생산자만 지킨다).
    — `test_236_local_merge_refuses_door_files_and_non_green_checks`
 5. `factory/integrity`는 이 head에 있어야 한다(`operatorMergeVerdict`는 없는 체크를 묻지 않는다): CI check run이 GREEN이거나, 이 head의
    모든 `factory/integrity` 상태가 `local:<login>`·success·생성자 로그인 = 설명의 로그인·팩토리 계정 아님·사람 계정(`User`)이어야 한다.
