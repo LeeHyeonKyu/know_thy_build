@@ -376,6 +376,10 @@
       "owner": "factory"
     },
     {
+      "dest": ".factory/lib/doctor/platform.js",
+      "owner": "factory"
+    },
+    {
       "dest": ".factory/lib/doctor/report.js",
       "owner": "factory"
     },

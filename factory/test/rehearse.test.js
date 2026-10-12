@@ -112,7 +112,9 @@ test("runRehearsal: every stage-shaped step runs on the runner, in order, and a 
   expect(cmds).toMatch(/npx vitest run 'factory\/test\/labels\.test\.js'/);
   expect(cmds).toMatch(/-t 'labels: the graph refuses a skip'/);
   expect(cmds).toMatch(/node factory\/bin\/lint\.js --file 'factory\/lib\/labels\.js'/);
-  expect(cmds).toMatch(/gh api user/);
+  // ADR-038: 설치 토큰은 `gh api user`를 부를 수 없다(403) — 저장소 메타데이터 읽기로 토큰·접근을 묻는다
+  expect(cmds).toMatch(/gh api repos\/\{owner\}\/\{repo\} --jq \.full_name/);
+  expect(cmds).not.toMatch(/gh api user/);
   expect(cmds).toMatch(/gh label list/);
   expect(cmds).toMatch(/factory\/rehearsal-9001/);
   // 모든 명령에는 상한이 있다 — 러너에서 무한히 도는 게이트는 리허설이 아니라 새 사고다.
