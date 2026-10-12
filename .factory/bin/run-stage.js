@@ -2579,7 +2579,7 @@ async function newSinceHead({ run, cwd, head, added = [], label }) {
   catch (e) { r = { code: 1, stderr: e?.message || String(e) }; }
   if (r?.code !== 0) return { error: `${label} ${head.slice(0, 7)} cannot be read — ${String(r?.stderr || "").trim().split("\n")[0] || `exit ${r?.code}`}` };
   const tree = new Set(String(r.stdout || "").split("\0").filter(Boolean));
-  return { newFiles: (Array.isArray(added) ? added : []).filter((f) => !tree.has(f)), tree };
+  return { newFiles: (Array.isArray(added) ? added : []).filter((f) => !tree.has(f)) };
 }
 
 /**
@@ -2701,13 +2701,10 @@ export async function scopeInput({ run, cwd, base, issue, plan, maxBytes = SCOPE
  * new since the head the last review judged (`handoffs.review.head_sha`): round-1 work is not new in round 2, and a file that came in
  * through the base merge is not in `<merge-base>...HEAD` at all. Reuses `addedPathsNoRenames`, the restart check's tree read
  * (`newSinceHead`), the scope check's bounded `-U0` read and `addedLinesByPath`, and `wherePaths` — no second parser.
- * Anything it cannot read is `{ round?, error }`: the gate skips with that reason in the record (fail open, never RED). The plan and
- * the issue number feed only the test-id judgement: without them files and exports are still judged and `idsSkipped` says why ids
- * were not. A changed file the reviewed tree lacks came in through the base merge: its old copy is the merge-base one. Exports are
- * matched with leading indentation, on both sides, so a re-indented pre-existing export keeps its name.
+ * Anything it cannot read is `{ round?, error }`: the gate skips with that reason in the record (fail open, never RED).
  */
-const REWORK_EXPORT_RE = /^[ \t]*export (?:const|function|class|async function) (\w+)/;
-export async function reworkScopeInput({ run, cwd, base, ctx, reviewRounds, testPaths = [], maxBytes = SCOPE_DIFF_MAX_BYTES }) {
+const REWORK_EXPORT_RE = /^export (?:const|function|class|async function) (\w+)/;
+export async function reworkScopeInput({ run, cwd, base, ctx, reviewRounds, testPaths = [], restartBrief = null, maxBytes = SCOPE_DIFF_MAX_BYTES }) {
   let round;
   try { round = await reviewRounds(); }
   catch (e) { return { error: `the rework round count cannot be read — ${e?.message || e}` }; }
@@ -2723,10 +2720,10 @@ export async function reworkScopeInput({ run, cwd, base, ctx, reviewRounds, test
   const where = [...new Set(mustFix.flatMap((m) => wherePaths(m?.where)))];
   if (!where.length) return fail("no must_fix where in the review handoff names a file path");
   const plan = ctx?.handoffs?.plan;
+  if (!(plan && Array.isArray(plan.done_when))) return fail("no plan handoff with done_when in this run's context, so the plan's test ids are unknown");
   const issue = Number(ctx?.issue?.number);
-  const idsSkipped = !(plan && Array.isArray(plan.done_when)) ? "no plan handoff with done_when in this run's context, so the plan's test ids are unknown"
-    : !(Number.isInteger(issue) && issue > 0) ? "this run carries no issue number to read test ids by" : null;
-  const planIds = new Set(idsSkipped ? [] : plan.done_when.flatMap((d) => [d?.verify, d?.check?.ref]).filter((x) => typeof x === "string" && x));
+  if (!(Number.isInteger(issue) && issue > 0)) return fail("this run carries no issue number to read test ids by");
+  const planIds = new Set(plan.done_when.flatMap((d) => [d?.verify, d?.check?.ref]).filter((x) => typeof x === "string" && x));
   const added = await addedPathsNoRenames({ run, cwd, base });
   if (added.error) return fail(added.error);
   const fresh = await newSinceHead({ run, cwd, head, added: added.added, label: "reviewed head" });
@@ -2734,33 +2731,34 @@ export async function reworkScopeInput({ run, cwd, base, ctx, reviewRounds, test
   const diff = await scopeDiffRead({ run, cwd, base, args: SCOPE_ADDED_LINES, maxBytes });
   if (diff.error) return fail(diff.error);
   const newFiles = new Set(fresh.newFiles);
-  const tests = new Set(idsSkipped ? [] : (Array.isArray(testPaths) ? testPaths : []).filter((p) => typeof p === "string"));
+  const tests = new Set((Array.isArray(testPaths) ? testPaths : []).filter((p) => typeof p === "string"));
   const idRe = new RegExp(`(?<![A-Za-z0-9_])test_${issue}_[A-Za-z0-9_]+`, "g");
   const idsIn = (text) => new Set(String(text).match(idRe) ?? []);
   const exportsIn = (lines) => new Set(lines.map((l) => REWORK_EXPORT_RE.exec(l)?.[1]).filter(Boolean));
   const newExports = [], newTestIds = [];
   for (const [path, lines] of addedLinesByPath(diff.out)) {
-    // The `where` exemption and the one-cause rule (a new file's exports and ids are dropped when the file itself is a finding) live
-    // in ONE place, the judge (`judgeReworkScope`) — not here too. A new file reports every export and non-plan id it carries.
+    // The `where` exemption lives in ONE place, the judge (`judgeReworkScope`) — not here too. A new file is judged as a file:
+    // its exports are never compared (the `newFiles` branch below carries only its ids).
     const exp = exportsIn(lines);
     const ids = tests.has(path) ? [...idsIn(lines.join("\n"))].filter((id) => !planIds.has(id)) : [];
     if (!exp.size && !ids.length) continue;
-    if (newFiles.has(path)) { for (const name of exp) newExports.push({ path, name }); for (const id of ids) newTestIds.push({ path, id }); continue; }
-    const at = fresh.tree.has(path) ? head : base;                   // absent from the reviewed tree → it came through the base merge
+    if (newFiles.has(path)) { for (const id of ids) newTestIds.push({ path, id }); continue; }
     let r;
-    try { r = await run("git", ["show", `${at}:${path}`], { cwd }); }
+    try { r = await run("git", ["show", `${head}:${path}`], { cwd }); }
     catch (e) { r = { code: 1, stderr: e?.message || String(e) }; }
-    if (r?.code !== 0) return fail(`${at === head ? "reviewed head" : "merge-base"} ${at.slice(0, 7)} cannot be read at ${path} — ${String(r?.stderr || "").trim().split("\n")[0] || `exit ${r?.code}`}`);
+    if (r?.code !== 0) return fail(`reviewed head ${head.slice(0, 7)} cannot be read at ${path} — ${String(r?.stderr || "").trim().split("\n")[0] || `exit ${r?.code}`}`);
     const old = String(r.stdout ?? "");
     const oldExports = exportsIn(old.split("\n"));
     const oldIds = idsIn(old);
     for (const name of exp) if (!oldExports.has(name)) newExports.push({ path, name });
     for (const id of ids) if (!oldIds.has(id)) newTestIds.push({ path, id });
   }
-  const brief = ctx?.loaded?.k_restart_brief;
+  // restart-brief "ran" = its input (`restartBriefInput`) carried no error — not merely a brief being loaded: an errored brief leaves
+  // restart-brief with only its "unusable" finding, so the new files are this check's to report (#199 dw6, never zero findings).
+  const restartRan = restartBrief != null && !restartBrief.error;
   return {
-    round, where, newFiles: [...newFiles], newExports, newTestIds, ...(idsSkipped ? { idsSkipped } : {}),
-    restartPaths: brief ? (Array.isArray(brief.paths) ? brief.paths : []) : null,
+    round, where, newFiles: [...newFiles], newExports, newTestIds,
+    restartPaths: restartRan ? (Array.isArray(restartBrief.paths) ? restartBrief.paths : []) : null,
   };
 }
 
@@ -2995,7 +2993,7 @@ export function makeSelfGateDep({ root, harness, run, mergeBase, getCtx, scopeMa
     // #199 — rework round ≥ 2 is subtract-only: measured HERE from the engine's rework counter (the K counter main() hands in as
     // `reviewRounds`); no counter → not wired (null), exactly as before.
     const reworkScope = typeof reviewRounds === "function"
-      ? await reworkScopeInput({ run, cwd: root, base, ctx, reviewRounds, testPaths: diff.tests, maxBytes: scopeMaxBytes })
+      ? await reworkScopeInput({ run, cwd: root, base, ctx, reviewRounds, testPaths: diff.tests, restartBrief, maxBytes: scopeMaxBytes })
       : null;
     return runSelfGate({
       root, harness: h, gates, run,
