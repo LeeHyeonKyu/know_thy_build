@@ -151,6 +151,40 @@ export const rehearsalOk = (steps = []) => !steps.some((s) => s.status === "RED"
 
 const step = (name, status, { cmd = null, ms = 0, detail = "" } = {}) => ({ name, status, cmd, ms, detail });
 
+/** `GIT_CONFIG_COUNT`(env로 git config 주입)가 처음 생긴 git 버전 — 그 아래는 env를 조용히 무시한다. */
+export const MIN_GIT_VERSION = [2, 31];
+const GIT_CONFIG_REASON = "the merge job's post-window GH_TOKEN auth (ADR-038 fix, PR #278) is passed as GIT_CONFIG_COUNT/GIT_CONFIG_KEY_n/GIT_CONFIG_VALUE_n, which git < 2.31 silently ignores (push then fails with `could not read Username`)";
+
+/**
+ * `git --version` 한 줄 → 판정. 숫자로 비교한다: 문자열로는 "2.4" > "2.31", 실수로는 2.100 < 2.31이다.
+ * `(Apple Git-146)`·`.windows.1`·`.rc1` 같은 꼬리는 major.minor 뒤라 읽기에 영향이 없다. 못 읽으면 RED다 —
+ * 이 스텝이 막으려는 것이 바로 "조용히 지나감"이다.
+ */
+export async function gitVersionStep({ run, cwd, now = () => Date.now() }) {
+  const t0 = now();
+  const cmd = "git --version";
+  let status = "RED", detail;
+  try {
+    const r = await run("git", ["--version"], { cwd });
+    const out = String(r?.stdout || "").trim();
+    const m = /^git version (\d+)\.(\d+)(?:\.(\d+))?/m.exec(out);
+    if (r?.code !== 0) {
+      detail = `\`git --version\` exited ${r?.code}: ${firstLines(`${r?.stderr || ""}\n${out}`.trim() || "no output", 1)} — ${GIT_CONFIG_REASON}`;
+    } else if (!m) {
+      detail = `could not read a version from \`git --version\` (${JSON.stringify(firstLines(out, 1))}) — need git >= ${MIN_GIT_VERSION.join(".")}: ${GIT_CONFIG_REASON}`;
+    } else {
+      const [major, minor] = [Number(m[1]), Number(m[2])];
+      const version = m[3] === undefined ? `${m[1]}.${m[2]}` : `${m[1]}.${m[2]}.${m[3]}`;
+      const ok = major > MIN_GIT_VERSION[0] || (major === MIN_GIT_VERSION[0] && minor >= MIN_GIT_VERSION[1]);
+      if (ok) { status = "GREEN"; detail = ""; }
+      else detail = `git ${version} is older than ${MIN_GIT_VERSION.join(".")} — ${GIT_CONFIG_REASON}; upgrade git on this runner`;
+    }
+  } catch (e) {
+    detail = `\`git --version\` threw: ${firstLines(String(e?.message || e), 1)} — ${GIT_CONFIG_REASON}`;
+  }
+  return step("git-version", status, { cmd, ms: Math.max(0, now() - t0), detail });
+}
+
 /**
  * 러너 위의 리허설 한 번. **모든 외부 효과는 주입받는다**(`run`·`qaProbe`·`cleanCheck`·`readFile`) —
  * 이 함수의 판정 로직은 가짜 실행 결과 위에서 그대로 시험된다.
@@ -266,6 +300,12 @@ export async function runRehearsal({
     // --dry-run은 아무것도 만들지 않는다 — 그래도 지운다(예전 런이 진짜로 만든 스크래치가 남아 있을 수 있다).
     `git push origin --delete ${branch} >/dev/null 2>&1 || true`,
   ].join("\n")));
+
+  // ── #279 — 러너의 git 버전(ADR-038 보정, PR #278) ────────────────────────────────
+  // merge 스테이지의 엔진 git은 `GIT_CONFIG_COUNT/KEY_n/VALUE_n`으로 GH_TOKEN 인증 헤더를 얹는다. git < 2.31은 그 env를
+  // **조용히 무시**하므로 창 뒤 push가 `could not read Username`으로 죽는다(#249·#212). 엔진이 띄우는 것과 같은 git을
+  // 묻도록 셸(`bash -lc`의 로그인 프로필이 PATH를 바꿀 수 있다)을 거치지 않고 직접 부른다.
+  steps.push(await gitVersionStep({ run, cwd, now }));
 
   return { steps, ok: rehearsalOk(steps) };
 }
