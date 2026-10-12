@@ -2616,3 +2616,42 @@ test("test_244_rounds_r1_reflects_upheld_disputes", async () => {
   }
   expect(validate("review.v1", result).ok).toBe(true);
 });
+
+// cf1 (rework #244): the consumer already on main (#239, run-stage.js) reads the R1 record as `r1_verdicts`, not
+// `rounds` (DECISIONS.md cross-PR contract). Feed the workflow's REAL handoff to the real `reviewR1Line` — a shape-only
+// test passed while every run record still said "(not carried by this workflow)".
+import { reviewR1Line as reviewR1Line244, REVIEW_R1_NOT_CARRIED as REVIEW_R1_NOT_CARRIED244 } from "../bin/run-stage.js";
+test("test_244_review_handoff_feeds_run_stage_r1_line", async () => {
+  // R1: correctness rejects; full R2: correctness revises to approve (one flip), the others hold.
+  const stub = async (prompt, opts) => {
+    const label = opts.label;
+    if (label.startsWith("R1:")) {
+      const role = label.slice(3);
+      return role === "correctness" ? rejectV(role, "cf1") : approveV(role);
+    }
+    if (label === "R2:correctness") return { verdict: "revise", must_fix: [], should_fix: [], verified: ["cf1 was a misread"], on_others: [] };
+    if (label.startsWith("R2:")) return { verdict: "maintain", must_fix: [], should_fix: [], verified: [], on_others: [] };
+    return null;
+  };
+  const { result } = await runWorkflow(FACTORY_REVIEW_WORKFLOW, {
+    agent: stub,
+    args: { issue: 42, context: ".factory/out/context.json", loaded: reviewLoaderFix() },
+  });
+  const line = reviewR1Line244(result.r1_verdicts, result.verdicts);
+  expect(line).not.toBe(REVIEW_R1_NOT_CARRIED244);
+  expect(line).toMatch(/correctness=reject/);
+  expect(line).toMatch(/ r2_flipped=1$/);
+  expect(validate("review.v1", result).ok).toBe(true);
+
+  // unanimous approve (light R2): R1 is still carried, nothing flipped
+  const approveStub = async (prompt, opts) => {
+    if (opts.label.startsWith("R1:")) return approveV(opts.label.slice(3));
+    if (opts.label.startsWith("R2-light:")) return { missed: [] };
+    return null;
+  };
+  const { result: unanimous } = await runWorkflow(FACTORY_REVIEW_WORKFLOW, {
+    agent: approveStub,
+    args: { issue: 42, context: ".factory/out/context.json", loaded: reviewLoaderFix() },
+  });
+  expect(reviewR1Line244(unanimous.r1_verdicts, unanimous.verdicts)).toMatch(/ r2_flipped=0$/);
+});

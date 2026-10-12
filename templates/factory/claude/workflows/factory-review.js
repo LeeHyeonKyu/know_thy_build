@@ -524,6 +524,10 @@ return {
   // 돌았을 때만 있다: R1이 만장일치 approve(경량 R2 — missed로 승격된 리뷰어가 있어도)이거나 `review_r2:
   // "skip"`이면 `rounds`는 한 항목이다. round 1은 dispute 항목을 되붙인 뒤의 판정이다.
   rounds: fullR2 ? [round1, roundOf(2, verdicts)] : [round1],
+  // cf1 (rework): the R1 verdicts again under the cross-PR contract name `r1_verdicts` — the name run-stage.js
+  // (#239, `reviewR1Line(v.data.r1_verdicts, v.data.verdicts)`) reads to record `review-r1: … r2_flipped=<n>`.
+  // It does not read `rounds`, so without this the flip count this issue exists to feed is never taken.
+  r1_verdicts: round1.verdicts,
   disputes,
   orchestration: 'workflow',
   guarantee: 'structural',
