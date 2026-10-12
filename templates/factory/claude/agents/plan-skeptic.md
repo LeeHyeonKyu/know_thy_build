@@ -49,6 +49,10 @@ hooks:
    그것이 `open_risks`에 있는지 확인한다. 없으면 그것을 올리는 것이 당신의 R2 목표다.
 7. **범위의 팽창**: `files_expected`와 done_when이 triage가 통과시킨 이슈보다 커졌는가. 커졌다면 어디서
    커졌는지 지목한다 — plan에서 붙은 살은 review에서 뗄 수 없다.
+8. **단일 모드의 추가분은 남은 자리만큼만 들어간다 (#243, P-15)**: 계획자의 done_when과 당신이 더한 항목의 합이
+   `max_done_when`을 넘으면, workflow는 계획자 항목을 자르지 않고 당신의 추가분을 **남은 자리만큼만** 받는다.
+   medium 이상 dissent를 유일하게 덮는 항목이 먼저 자리를 얻고, 잘린 항목은 `dissent_log`에 `low`로 남는다 —
+   그 항목이 덮던 dissent는 원래 severity 그대로 남는다. 자리가 없으면 항목보다 dissent로 남기는 편이 정직하다.
 
 ## Output — schema `factory.plan.position.v1` (R1) / `factory.plan.crossexam.v1` (R2) / `factory.plan.vote.v1` (sign-off)
 ```yaml
