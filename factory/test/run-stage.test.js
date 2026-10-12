@@ -6623,6 +6623,37 @@ test("test_239_plan_notes_land_in_the_run_record_and_handoff", async () => {
   expect(handed.done_when.map((d) => d.id)).toEqual(["dw1", "dw2", "dw3", "dw4", "dw5", "dw6"]);
   expect(handed.signoff_objections).toEqual([{ id: "signoff-skeptic", role: "skeptic", text: objection }]);
   expect(transition.mock.calls.at(-1)[0].to).toBe("factory:planned");
+
+  // dw3 — what an operator reads is the record FILE, not the validator's return value: the same stage again, with an issue
+  // body that has no done_when items (Case 2), written through the real appendRunRecord. Both note sources — #239's two
+  // `plan:` lines and #232's validator line — stand as lines of their own; none is a failure or repair reason.
+  const { ISSUE_DONE_WHEN_NONE } = await import("../lib/verify-stage.js");
+  expect(ISSUE_DONE_WHEN_NONE).toBe("done_when: issue has no items — the plan's contract stands alone");
+  const root = mkdtempSync(join(tmpdir(), "plan-notes-239-"));
+  let recordPath = null;
+  const writeHandoff2 = vi.fn(async () => {});
+  const deps2 = planRepairDeps({
+    claudeP: vi.fn(async () => out), writeHandoff: writeHandoff2, transition: vi.fn(async ({ to }) => ({ ok: true, to })),
+    verifyStage: ({ out: o }) => verifyStage({
+      stage: "plan", out: o, agentsLog: { starts: [], stops: [], completed: ["plan-synthesizer", "plan-skeptic"], orphans: [] },
+      roster: ["synthesizer", "skeptic"], rolePrefix: "plan-", expectedRounds: 2, orchestration: "workflow", planLimits: { max_done_when: 6 },
+      issueBody: "## Problem\nThe plan stage loses its notes.\n\n## Context\nNo acceptance list here.\n",
+    }),
+    runRecord: (l) => { recordPath = appendRunRecord({ root, issue: 239, stage: "plan", runnerId: "r1", lines: l, now: "2026-10-11T00:00:00Z" }); },
+  });
+  expect(await runStage({ stage: "plan", issue: 239, deps: deps2, runnerId: "r1" })).toBe(0);
+  expect(deps2.claudeP).toHaveBeenCalledTimes(1);                                 // still no repair turn
+  const recordLines = readFileSync(recordPath, "utf8").split("\n");
+  expect(recordLines).toContain(`plan: unresolved sign-off objection from skeptic: ${objection}`);
+  expect(recordLines).toContain("plan: skeptic items beyond max_done_when dropped: dw7");
+  expect(recordLines).toContain(ISSUE_DONE_WHEN_NONE);
+  // no note is a failure/repair line, and the stage did not fail or repair at all
+  expect(recordLines.filter((l) => /^- (plan:|done_when:)/.test(l))).toEqual([]);
+  expect(recordLines.some((l) => l.startsWith("verify: FAIL") || l.startsWith("plan repair"))).toBe(false);
+  // the persisted handoff of this run is the truncated one too
+  const handed2 = writeHandoff2.mock.calls.at(-1)[0].data;
+  expect(handed2.done_when.map((d) => d.id)).toEqual(["dw1", "dw2", "dw3", "dw4", "dw5", "dw6"]);
+  expect(handed2.signoff_objections).toEqual([{ id: "signoff-skeptic", role: "skeptic", text: objection }]);
 });
 
 /**
@@ -6656,6 +6687,36 @@ test("test_239_review_record_carries_r1_verdicts_and_flip_count", async () => {
   expect(await review239({ r1: null, lines: without })).toBe(0);
   expect(without.filter((l) => l.startsWith("review-r1:"))).toEqual(["review-r1: (not carried by this workflow)"]);
   expect(without).toContain("review flips: skeptic reject→approve");                 // the cross-round line is unchanged
+
+  // dw4 — the merge-provenance line is the literal pre-#239 string in every one of these runs, and the real merge-side parser
+  // still reads the same head_sha / decision / verdicts from it (no approved PR goes to a human over a changed line).
+  const { parseReviewEvidence } = await import("../lib/run-record.js");
+  const expectedEvidence = `review-evidence: run_id=9001 runner=gha-9001 head_sha=${"b".repeat(40)} round=1 decision=approved verdicts=architect=approve,skeptic=approve qa_manifest=none qa_claims=none`;
+  for (const lines of [withR1, agreed, without]) {
+    expect(lines.filter((l) => l.startsWith("review-evidence:"))).toEqual([expectedEvidence]);
+    expect(lines.filter((l) => l.startsWith("review flips:"))).toEqual(["review flips: skeptic reject→approve"]);
+    expect(parseReviewEvidence(lines.join("\n"), { runId: "9001" })).toEqual(expect.objectContaining({
+      headSha: "b".repeat(40), decision: "approved", verdicts: "architect=approve,skeptic=approve",
+    }));
+  }
+
+  // dw4 — the incomplete exit (a roster role with no verdict → needs-human) carries the same line: populated, and the
+  // explicit placeholder when the workflow sends no r1_verdicts.
+  const incompleteR1 = async (r1) => {
+    const lines = [];
+    const verdicts = [reviewVerdictK("architect", "approve")];
+    const deps = kDeps({
+      round: 1, verdicts,
+      buildContext: async () => ({ roster: ["architect", "skeptic"], orchestration: "workflow", limits: { K: 3 } }),
+      verifyStage: () => ({ ok: true, reasons: [], data: { head_sha: "b".repeat(40), verdicts, ...(r1 ? { r1_verdicts: r1 } : {}) } }),
+      runRecord: (l) => lines.push(...l),
+    });
+    expect(await runStage({ stage: "review", issue: 239, deps, runnerId: "gha-9001", runId: "9001" })).toBe(2);
+    expect(lines.some((l) => l.startsWith("review: incomplete"))).toBe(true);
+    return lines.filter((l) => l.startsWith("review-r1:"));
+  };
+  expect(await incompleteR1([{ role: "architect", verdict: "reject" }])).toEqual(["review-r1: architect=reject r2_flipped=1"]);
+  expect(await incompleteR1(null)).toEqual(["review-r1: (not carried by this workflow)"]);
 });
 
 /**
