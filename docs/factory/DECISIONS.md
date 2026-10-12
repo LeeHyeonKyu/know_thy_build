@@ -4896,3 +4896,33 @@ PullRequest`)에 기대고 있다. gh가 문구를 바꾸면 gone이 unknown으�
 분류된다(sec-s1, 후속 이슈 — 체크아웃이 origin의 브랜치만 fetch하므로 리뷰에 닿지는 않는다). 빌더 프롬프트에는 "handoff PR이 비면
 `gh pr create`" 규칙이 없다(arch4, `.claude/**`는 보호 경로 — 후속 이슈); 2번이 그 빈자리를 needs-human으로 닫는다. main()이 2번의 `prView`
 dep을 싣는지는 소스 문자열 핀으로 고정하지 않는다(계획 non_goal) — 동작 테스트는 runStage에 dep을 주입해 돈다.
+
+## ADR-044 디스패처가 페이로드를 넘기지 않으면 워크플로가 loaded.json을 스스로 읽는다 — M5 개정 — 2026-10-12 (#288)
+
+**사건**: #239의 3라운드 implement 디스패치가 두 번 연속(run 38194052457, sweeper 재시도 38194076065) 1턴·1.4초에 끝났다. 디스패처(LLM)가
+`.factory/out/loaded.json`을 읽지 않고 Workflow를 바로 불렀고, 워크플로는 `context payload missing`으로 닫혔다. 파일은 1,592바이트의 온전한
+JSON이었다(#207의 절단과 다르다). 같은 입력에 같은 모델은 같은 실수를 하므로 재시도는 소용이 없었다. 디스패처가 페이로드를 어긋나게 넘긴
+것은 세 번째다: #170(문자열), #207(절단), #239(안 넘김).
+
+**결정 — M5를 다음과 같이 고친다** (M5: "로더는 없다, payload가 없으면 fail-closed"):
+1. **args 경로의 LLM 호출은 여전히 0이다.** 디스패처가 `args.loaded`를 넘기면(객체든 #170의 JSON 문자열이든) 리더는 뜨지 않고 반환은
+   `loaded_source: "args"`를 싣는다. M5가 아낀 스테이지당 호출은 그대로 아낀 채다. — `test_workflow_self_loads_payload_when_args_loaded_is_missing`
+2. **리더는 `args.loaded`가 없을 때만 돈다.** 네 템플릿의 공유 Load 블록이 리더 에이전트 하나(`label: 'load:reader'`, `once()`로 한 번 더)에게
+   `.factory/out/loaded.json`을 읽혀, 불투명한 문자열 필드 하나(`loaded_json`)로 받고 기존 `parseIfString`으로 파싱한다. 스키마에 페이로드의
+   키가 없으므로 구조화 출력이 must_fix·disputed·setup_dirty를 떨굴 수 없다(#111). 리더가 죽거나 파싱되지 않는 글을 주면, 또는 디스패처가
+   `raw`/`issue`를 주지 않았으면(기대 이슈를 검사 대상 파일에서 가져오지 않는다) 오늘과 똑같은 `context payload missing` 객체로 닫는다. 파일의
+   issue가 다르거나 stage가 이 워크플로의 것이 아니면 `context issue mismatch`로 닫는다 — run-stage의 분류기(`dispatcherPayloadErrorOf`)는
+   바뀌지 않았고 둘 다 blocked/undecidable이다. 자기 적재한 반환은 `loaded_source: "file"`과 `loaded_json_length`(파싱한 페이로드의
+   `JSON.stringify(...).length`)를 싣고, run-stage는 `loaded: self-loaded by the workflow (dispatcher passed no payload)` 한 줄을 남긴 뒤 같은
+   파일을 다시 재어 길이가 다르거나·없거나·숫자가 아니면 게이트·verify 전에 `dispatcher payload: self-loaded payload …` 사유로 blocked/undecidable에
+   세운다. — `test_workflow_self_loaded_payload_must_match_the_issue`, `test_288_self_loaded_payload_is_equivalent_to_dispatcher_payload`,
+   `test_run_stage_records_the_payload_source`, `test_288_self_loaded_payload_length_mismatch_blocks_loudly`
+3. **디스패처를 임계 경로에서 뺀다.** 페이로드의 원본은 러너가 쓴 파일이다. 디스패처에게 "읽어서 그대로 넘겨라"를 맡긴 것이 #170·#207·#239의
+   공통 원인이었다 — 이제 디스패처가 그 단계를 건너뛰어도 스테이지는 같은 파일로 진행한다.
+4. **리더의 "읽기 전용"은 프롬프트의 지시일 뿐 강제된 도구 제한이 아니다.** 리더는 `general-purpose` 에이전트이고, 전용 읽기 전용 로더
+   에이전트는 만들지 않았다(`templates/factory/factory/**`는 이 이슈의 must_not). 리더의 출력은 파싱·stage·issue 검사와 run-stage의 길이 대조를
+   지난 뒤에만 쓰인다.
+
+**남는 것**: 같은 길이로 바꿔 쓴 값은 길이 대조가 잡지 못한다. 리더마저 실패하면 기록은 디스패처 실패와 구분되지 않는다(분류기를 바꾸지 않기로
+했다). 디스패처가 늘 페이로드를 빼먹어도 스테이지는 성공하므로, `loaded: self-loaded …` 줄의 빈도가 유일한 신호다. KTB 자신의 런은
+`.claude/workflows/*`(빌더가 쓸 수 없고 러너가 미러하지 않는다)를 돌리므로 운영 세션이 머지 뒤 그 사본을 맞출 때까지 #239와 같은 실패가 남는다.
