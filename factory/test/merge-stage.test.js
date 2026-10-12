@@ -4185,3 +4185,103 @@ test("test_254_raised_tier_quorum_parity_plan_review_merge", async () => {
   expect(plain.plan.plan.mode).toBe("single");
   for (const ros of [plain.review.roster, plain.resolved.roles, plain.merge.roles, plain.sweeper.roles]) expect(ros).toHaveLength(2);
 });
+
+// ── #286 — must_not violations get their own heading (KTB-10 I3: a wrong title sends the human to the wrong place) ──────
+// #254 → PR #255: the only policy violations were the issue's `must_not` contract, but the hand-off said "agent role sections
+// edited outside Examples/Perspectives" — the leftover bucket — and the owner went looking at role prompts. The fixture
+// violations come from the REAL producers (`mustNotViolations`, `additiveOnlyViolations`), never hand-typed rule strings.
+const mustNot286 = async () => {
+  const { mustNotContract, mustNotViolations, addedLines } = await import("../lib/integrity.js");
+  const contract = mustNotContract("re-land\n\nmust_not:\n- touch: `.github/**`, `.claude/**`\n- add: `smol-toml`\n");
+  const u0 = ["--- a/src/a.js", "+++ b/src/a.js", "@@ -3,0 +4,1 @@", "+import 'smol-toml';"].join("\n");
+  return (changed) => mustNotViolations({ contract, changed, added: changed.includes("src/a.js") ? addedLines(u0) : new Map() });
+};
+const additive286 = async (file) => {
+  const { additiveOnlyViolations } = await import("../lib/integrity.js");
+  return additiveOnlyViolations({ file, allowed: ["Examples", "Perspectives"], added: [], removed: [{ line: 3, text: "You are the builder." }], headText: "# x\n## Role\n" });
+};
+const MUST_NOT_HEADING_286 = "**이슈 must_not 계약 위반 — 팩토리가 자동 머지하지 않습니다.**";
+const ROLE_HEADING_286 = "**역할 프롬프트의 허용 섹션 밖 편집 — 팩토리가 자동 머지하지 않습니다.**";
+/** The comment's text under one heading, up to the next heading or the closing line. */
+const sectionUnder286 = (body, heading) => {
+  const at = body.indexOf(heading);
+  if (at < 0) return null;
+  const rest = body.slice(at + heading.length);
+  const ends = [rest.indexOf("\n**"), rest.indexOf("diff를 확인한 뒤")].filter((i) => i >= 0);
+  return rest.slice(0, Math.min(...ends));
+};
+const policyRun286 = async (violations) => {
+  const comment = vi.fn(async () => {});
+  const { lines, record } = makeRecord();
+  const d = baseD({ policyViolations: vi.fn(async () => ({ ok: true, files: [...new Set(violations.map((v) => v.file))], violations })), comment });
+  const code = await run(d, { record });
+  const { to, reason } = d.transition.mock.calls.at(-1)[0];
+  return { code, to, reason, body: comment.mock.calls[0]?.[1] ?? "", lines, d };
+};
+
+test("test_merge_stage_names_must_not_violations_in_their_own_bucket", async () => {
+  const { MUST_NOT_TOUCH_RULE, MUST_NOT_ADD_RULE } = await import("../lib/integrity.js");
+  const violations = (await mustNot286())([".github/workflows/x.yml", "src/a.js"]);
+  expect(violations.map((v) => [MUST_NOT_TOUCH_RULE.test(v.rule), MUST_NOT_ADD_RULE.test(v.rule)])).toEqual([[true, false], [false, true]]);
+  const r = await policyRun286(violations);
+  expect(r.code).toBe(2);
+  expect(r.to).toBe("factory:needs-human");
+  expect(r.reason.startsWith("issue must_not contract violated — ")).toBe(true);
+  expect(HUMAN_MERGE_REQUIRED.test(r.reason)).toBe(true);
+  // the rule sentence is carried unchanged — which glob, which token on which line
+  for (const v of violations) {
+    expect(r.reason).toContain(v.file);
+    expect(r.reason).toContain(v.rule);
+    expect(r.body).toContain(v.rule);
+  }
+  expect(r.body).toContain(MUST_NOT_HEADING_286);
+  const section = sectionUnder286(r.body, MUST_NOT_HEADING_286);
+  expect(section).toContain("`.github/workflows/x.yml`");
+  expect(section).toContain("`src/a.js`");
+  // the wrong title the owner got on #255 is gone from both the reason and the comment
+  expect(r.reason).not.toContain("agent role sections edited outside Examples/Perspectives");
+  expect(r.body).not.toContain("agent role sections edited outside Examples/Perspectives");
+  expect(r.body).not.toContain(ROLE_HEADING_286);
+  expect(r.lines.some((l) => l.includes("issue must_not contract violated — "))).toBe(true);
+  expect(r.d.mergePr).not.toHaveBeenCalled();
+});
+
+test("test_286_must_not_and_role_section_violations_get_separate_headings", async () => {
+  const mn = await mustNot286();
+  const ROLE_REASON = "agent role sections edited outside Examples/Perspectives — human merge required: ";
+  // (1) two files: a must_not violation in one, an additive-only violation in another agent file
+  {
+    const role = await additive286(".claude/agents/factory-builder.md");
+    expect(role.length).toBeGreaterThan(0);
+    const must = mn([".github/workflows/x.yml"]);
+    const r = await policyRun286([...must, ...role]);
+    expect(r.to).toBe("factory:needs-human");
+    expect(r.reason).toContain("issue must_not contract violated — ");
+    expect(r.reason).toContain(`${ROLE_REASON}.claude/agents/factory-builder.md`);
+    const mustSection = sectionUnder286(r.body, MUST_NOT_HEADING_286), roleSection = sectionUnder286(r.body, ROLE_HEADING_286);
+    expect(mustSection).toContain("`.github/workflows/x.yml`");
+    expect(mustSection).not.toContain("`.claude/agents/factory-builder.md`");
+    expect(roleSection).toContain("`.claude/agents/factory-builder.md`");
+    expect(roleSection).not.toContain("`.github/workflows/x.yml`");
+    // the role reason names only the role file
+    const roleReason = r.reason.slice(r.reason.indexOf(ROLE_REASON) + ROLE_REASON.length).split(/;| \(see PR/)[0];
+    expect(roleReason).toBe(".claude/agents/factory-builder.md");
+  }
+  // (2) one agent file carrying both kinds — neither heading hides the other
+  {
+    const file = ".claude/agents/x.md";
+    const both = [...mn([file]), ...(await additive286(file))];
+    expect(both.length).toBe(2);
+    const r = await policyRun286(both);
+    expect(r.reason).toContain("issue must_not contract violated — ");
+    expect(r.reason).toContain(`${ROLE_REASON}${file}`);
+    expect(sectionUnder286(r.body, MUST_NOT_HEADING_286)).toContain(`\`${file}\``);
+    expect(sectionUnder286(r.body, ROLE_HEADING_286)).toContain(`\`${file}\``);
+  }
+  // (3) a must_not violation on an agent file with NO additive-only violation is not an agent-role-section edit
+  {
+    const r = await policyRun286(mn([".claude/agents/y.md"]));
+    expect(r.reason).not.toContain("agent role sections edited");
+    expect(r.body).not.toContain(ROLE_HEADING_286);
+  }
+});
