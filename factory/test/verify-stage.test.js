@@ -1182,7 +1182,7 @@ test("test_289_signoff_role_cannot_forge_review_evidence", async () => {
 // 두 단계를 같은 순서로 다시 댄다 — 엔진 저장소(engine=true)에서만. 올린 사유는 러너의 `judge_path_hit`에 남는다.
 import { loadHarness } from "../lib/config.js";
 import { protectedPaths } from "../lib/integrity.js";
-import { classifyProtected } from "../lib/non-judge-paths.js";
+import { runMergeStage } from "../lib/merge-stage.js";
 import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
 
@@ -1265,18 +1265,51 @@ test("test_tier_raise_and_merge_judge_classification_agree_on_main", async () =>
   const universe = [...new Set([...tracked, ...tracked.filter((p) => p.startsWith("factory/")).map((p) => `.${p}`), "README.md"])].sort();
   for (const must of ["factory/lib/verify-stage.js", "factory/lib/status.js", "bin/cli.js", ".claude/agents/plan-skeptic.md", "README.md", ".factory/lib/context.js"]) expect(universe, must).toContain(must);
 
-  // merge 쪽: merge가 실제로 부르는 생산 함수 — protectedPaths(이 경로들을 살아 있는 변경 "M"으로 보는 name-status diff) 다음
-  // classifyProtected(..., {engine:true}).judge (merge-stage.js의 자기 변경 경로와 같은 두 단계·같은 순서).
-  const run = async (cmd, args) => {
-    expect([cmd, args.slice(0, 3)]).toEqual(["git", ["diff", "--no-renames", "--name-status"]]);
-    return { code: 0, stdout: universe.map((p) => `M\t${p}`).join("\n") + "\n", stderr: "" };
+  // merge 쪽: merge-stage.js의 runMergeStage **자체**를 경로마다 한 번 돈다(술어를 다시 조립하지 않는다 — merge가 판정 규칙을
+  // 바꾸면 여기가 따라 바뀐다). 각 런은 그 경로 하나를 살아 있는 변경("M")으로 바꾸는 PR이다: diff는 실제 integrity.js
+  // protectedPaths가 실제 harness로 거르고, 엔진 체크아웃·자기 변경 스위치 둘 다 켜짐, 정책 위반 없음, 리뷰는 approved지만
+  // 로스터는 standard. merge가 "judge path needs a unanimous review"로 사람에게 넘기면 그 경로는 load-bearing 로스터를 요구한다.
+  // 판정 경로 검사를 지나면 다음 단계(d.gates)에 닿는다 — 거기서 멈춘다(게이트를 실제로 돌리지 않는다). 그 밖의 결말은 불일치로 센다.
+  // NEVER_AUTOMATE는 비운다: 그것은 tier와 무관하게 사람에게 가는 별도 규칙이고, 여기서 재는 것은 판정 경로 분류다.
+  const REACHED_GATES = new Error("reached gates — merge does not require a load-bearing roster for this path");
+  const mergeOutcome = async (p) => {
+    const transitions = [];
+    const run = async (cmd, args) => {
+      expect([cmd, args.slice(0, 3)]).toEqual(["git", ["diff", "--no-renames", "--name-status"]]);
+      return { code: 0, stdout: `M\t${p}\n`, stderr: "" };
+    };
+    const d = {
+      prInfo: async () => ({ number: 9, state: "OPEN", mergeable: "MERGEABLE" }),
+      protectedPaths: () => protectedPaths({ run, cwd: REPO_287, base: "b".repeat(40), harness: HARNESS_287 }),
+      engine: true,
+      selfChange: { auto_merge_non_judge: true, auto_merge_judge: true, veto_minutes: 60 },
+      neverAutomate: [],
+      policyViolations: async () => ({ ok: true, files: [] }),
+      reviewEvidence: async () => ({ ok: true, data: { schema: "factory.review.v1", decision: "approved", verdicts: [{ role: "correctness", verdict: "approve" }] } }),
+      reviewRoster: async () => ({ ok: true, roles: ["correctness"], tier: "standard" }),
+      comment: async () => {},
+      transition: async (t) => { transitions.push(t); return { ok: true, to: t.to }; },
+      gates: async () => { throw REACHED_GATES; },
+      sleep: async () => {},
+    };
+    try {
+      await runMergeStage({ issue: 287, defaultBranch: "main", headSha: "a".repeat(40), d, record: () => {}, refusal: () => [], postStatus: null });
+    } catch (e) {
+      if (e === REACHED_GATES && !transitions.length) return "gates";
+      return `threw: ${e?.message || e}`;
+    }
+    if (transitions.length === 1 && /^judge path needs a unanimous review — /.test(transitions[0].reason || "")) return "judge";
+    return `other: ${JSON.stringify(transitions)}`;
   };
-  const prot = await protectedPaths({ run, cwd: REPO_287, base: "b".repeat(40), harness: HARNESS_287 });
-  expect(prot.ok).toBe(true);
-  const mergeJudge = new Set(classifyProtected(prot.files, { engine: true }).judge);
+  const mergeJudge = new Set();
+  const disagree = [];
+  for (const p of universe) {
+    const o = await mergeOutcome(p);
+    if (o === "judge") mergeJudge.add(p);
+    else if (o !== "gates") disagree.push(`${p}: merge ended neither at the judge-path refusal nor at gates — ${o}`);
+  }
 
   // triage 쪽: standard로 신고한 한 경로짜리 이슈가 실제 verifyStage triage 분기를 지나 load-bearing으로 오르는가
-  const disagree = [];
   for (const p of universe) {
     const v = triageOn287([p]);
     if (!v.ok) { disagree.push(`${p}: triage verify failed — ${v.reasons.join("; ")}`); continue; }
@@ -1289,4 +1322,25 @@ test("test_tier_raise_and_merge_judge_classification_agree_on_main", async () =>
   expect(mergeJudge.has("factory/lib/status.js")).toBe(false);
   expect(mergeJudge.has(".claude/agents/plan-skeptic.md")).toBe(false);
   expect(mergeJudge.has("README.md")).toBe(false);
+});
+
+test("test_287_impact_path_spelling_does_not_hide_a_judge_path", () => {
+  // triage 에이전트의 impact_paths는 자유 문자열이다 — 앞의 `./`나 마크다운 백틱이 붙은 판정 경로도 같은 경로다(PR #263의 막다른 길).
+  for (const spelled of ["./factory/lib/context.js", "`factory/lib/context.js`", " `./factory/lib/context.js` ", ".//factory/lib/context.js"]) {
+    const v = triageOn287([spelled]);
+    expect(v.ok, spelled).toBe(true);
+    expect([v.data.tier, v.data.tier_declared], spelled).toEqual(["load-bearing", "standard"]);
+    expect(v.data.judge_path_hit, spelled).toEqual([{ path: "factory/lib/context.js", source: "judge-path" }]);
+  }
+  // #254의 [load_bearing].paths 올림도 같은 철자에 속지 않는다
+  const lb = triageOn287(["./factory/lib/merge-stage.js"]);
+  expect([lb.data.tier, lb.data.tier_declared]).toEqual(["load-bearing", "standard"]);
+  expect(lb.data.load_bearing_hit).toEqual([{ path: "factory/lib/merge-stage.js", glob: "factory/lib/merge-stage.js" }]);
+  // 같은 철자의 비판정·비보호·additive_only 경로는 여전히 오르지 않는다(정규화가 판정을 넓히지 않는다)
+  for (const quiet of ["./factory/lib/status.js", "`docs/TECHNICAL.md`", "./README.md", "`.claude/agents/plan-skeptic.md`", "``", "./"]) {
+    const v = triageOn287([quiet]);
+    expect([v.data.tier, v.data.judge_path_hit, v.data.load_bearing_hit], quiet).toEqual(["standard", undefined, undefined]);
+  }
+  // 게시되는 impact_paths는 에이전트가 쓴 그대로다 — 정규화는 판정용일 뿐 기록을 고쳐 쓰지 않는다
+  expect(triageOn287(["./factory/lib/context.js"]).data.impact_paths).toEqual(["./factory/lib/context.js"]);
 });
