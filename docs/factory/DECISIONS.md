@@ -4511,29 +4511,6 @@ doctor-ci의 토큰 검사는 `continue-on-error`라 잡을 죽이지 않지만 
 `gh pr edit`류의 GraphQL `viewer` 조회가 App 토큰에서 어떻게 되는지는 #217(REST PATCH)이 비켜 간다. own-calendar는 다음 릴리스로
 업그레이드하고 같은 두 시크릿을 넣는다. `bot-hk`가 복구되면 숨겨진 PR·코멘트가 다시 보이고, 그 계정은 PAT 폴백으로만 남는다.
 
-## #239 서명 반박은 done_when 덮임을 요구하지 않는다 — 1.4.43 후반의 반전 · skeptic 상한 초과분 절단 · review-r1 줄 — 2026-10-11 (허점 원장 M-2·M-7·M-9)
-
-**반전(1.4.43 후반을 대체한다)**: 1.4.43은 사인오프에서 살아남은 반대를 `signoff-<role>`·`medium`으로 주입해 "수리 턴이 `covers`로 덮고, 못 덮으면
-사람에게 간다"로 정했다. 원장 §4(M-7)가 그 결과를 재현했다: 덮을 수 없는 항목을 거부 조건으로 두면 "미해소인 채 진행"은 문장으로만 남고 실제로는
-`dissent without done_when` → 수리 턴 → 사람이다. #239부터 계획 검증기(`factory/lib/verify-stage.js` `validatePlanHandoff`)는 id가 정확히
-`signoff-<그 항목의 role>`(대소문자 무시, role 필수)인 dissent에 덮임을 요구하지 않는다(severity 무관). 그 사람 에스컬레이션을 **대신하는 것**은 셋이다:
-(1) run 기록 줄 `plan: unresolved sign-off objection from <role>: <objection 앞 120자>`, (2) 계획 핸드오프의 `signoff_objections[]`(`{id, role, text}`),
-(3) `dissent_log`에 그대로 남은 항목 — 계획 코멘트 본문의 **dissent** 블록에 렌더된다. 보통의 medium dissent와 role이 맞지 않는 `signoff-*`는 오늘처럼
-거부된다. 핀: `test_239_signoff_objections_do_not_require_a_covering_done_when`, `test_239_plan_notes_land_in_the_run_record_and_handoff`.
-
-**skeptic 상한(M-9)**: `done_when`이 `max_done_when`을 넘고 계획자 자신의 항목(`source: "skeptic"` 표시가 없는 것)이 상한 안이면, 넘친 skeptic 표시 항목(뒤쪽부터)을
-덮임 검사 **전에** 잘라 통과시키고 `plan: skeptic items beyond max_done_when dropped: <ids>`를 기록한다. 잘린 핸드오프가 그대로 게시된다. 표시 없는 초과는
-오늘처럼 거부한다(이슈의 "없으면 뒤쪽 항목"은 같은 이슈의 "계획자 7은 거부"와 모순이라 만들지 않았다). 잘린 항목만이 덮던 dissent는 이름으로 거부된다.
-핀: `test_239_skeptic_items_beyond_max_done_when_are_dropped_not_rejected`.
-
-**R1 판정(M-2)**: review 스테이지는 핸드오프의 `r1_verdicts: [{role, verdict}]`를 읽어 `review-r1: <role>=<verdict>,… r2_flipped=<n>`을 기록한다(없으면
-`review-r1: (not carried by this workflow)`). 이슈 문구와 달리 `review-evidence:` 줄은 **바꾸지 않는다** — 머지 게이트가 끝 고정 정규식(`run-record.js`)으로
-읽는 출처 줄이라 토큰 하나가 모든 승인 PR을 사람에게 보낸다. 핀: `test_239_review_record_carries_r1_verdicts_and_flip_count`,
-`test_239_review_evidence_line_still_parses_after_flip_count`.
-
-**남는 것**: 템플릿이 `source: "skeptic"`과 `r1_verdicts`를 내기 전까지 M-9와 M-2의 채워진 경로는 운영에서 발화하지 않는다(템플릿 짝은 운영 세션 PR —
-`templates/**`는 이 이슈의 must_not). 그때까지 `templates/factory/claude/workflows/factory-plan.js:496-500`의 주석(과 `.claude` 사본)은 "못 덮으면 사람에게
-간다"고 말하는 **낡은 문장**이다. `{id:'signoff-x', role:'x'}`를 지어내는 합성자는 덮임 규칙을 피할 수 있고 그 흔적은 기록 줄 하나다(plan open_risks).
 ### ADR-038 보정 — 머지 잡의 git 자격은 머지 배우의 것이다; 창은 토큰보다 짧아야 열린다 — 2026-10-11
 
 **실측(#249·#212, 머지 런 38160716604·38160719884).** ADR-039 뒤 처음으로 판정 경로 자동 머지가 창까지 갔다. 창은 17:42에 열려 18:42에
@@ -4574,6 +4551,39 @@ pending 상태가 있는 PR을 머지하지 않으므로(`operator-merge-check`)
 `actions/create-github-app-token`을 한 번 더 부르고(`id: factory-token-late`, `if: always() && FACTORY_APP_CONFIGURED`), 두 후행 스텝은
 `late || first || PAT` 순으로 쓴다. 업로드 뒤라 그 토큰은 어떤 아티팩트에도 실리지 않는다. `sweep.js`의 빈 `gh` 출력에 대한 명확한
 실패 메시지는 #279와 함께 후속이다.
+
+## #239 서명 반박은 done_when 덮임을 요구하지 않는다 — 1.4.43 후반의 반전 · skeptic 상한 초과분 절단 · review-r1 줄 — 2026-10-11 (허점 원장 M-2·M-7·M-9)
+
+**반전(1.4.43 후반을 대체한다)**: 1.4.43은 사인오프에서 살아남은 반대를 `signoff-<role>`·`medium`으로 주입해 "수리 턴이 `covers`로 덮고, 못 덮으면
+사람에게 간다"로 정했다. 원장 §4(M-7)가 그 결과를 재현했다: 덮을 수 없는 항목을 거부 조건으로 두면 "미해소인 채 진행"은 문장으로만 남고 실제로는
+`dissent without done_when` → 수리 턴 → 사람이다. #239부터 계획 검증기(`factory/lib/verify-stage.js` `validatePlanHandoff`)는 id가 정확히
+`signoff-<그 항목의 role>`(대소문자 무시, role 필수)인 dissent에 덮임을 요구하지 않는다(severity 무관). 그 사람 에스컬레이션을 **대신하는 것**은 셋이다:
+(1) run 기록 줄 `plan: unresolved sign-off objection from <role>: <objection 앞 120자>`, (2) 계획 핸드오프의 `signoff_objections[]`(`{id, role, text}`),
+(3) `dissent_log`에 그대로 남은 항목 — 계획 코멘트 본문의 **dissent** 블록에 렌더된다. 보통의 medium dissent와 role이 맞지 않는 `signoff-*`는 오늘처럼
+거부된다. 핀: `test_239_signoff_objections_do_not_require_a_covering_done_when`, `test_239_plan_notes_land_in_the_run_record_and_handoff`.
+
+**skeptic 상한(M-9)**: `done_when`이 `max_done_when`을 넘고 계획자 자신의 항목(`source: "skeptic"` 표시가 없는 것)이 상한 안이면, 넘친 skeptic 표시 항목(뒤쪽부터)을
+덮임 검사 **전에** 잘라 통과시키고 `plan: skeptic items beyond max_done_when dropped: <ids>`를 기록한다. 잘린 핸드오프가 그대로 게시된다. 표시 없는 초과는
+오늘처럼 거부한다(이슈의 "없으면 뒤쪽 항목"은 같은 이슈의 "계획자 7은 거부"와 모순이라 만들지 않았다). 잘린 항목만이 덮던 dissent는 이름으로 거부된다.
+핀: `test_239_skeptic_items_beyond_max_done_when_are_dropped_not_rejected`.
+
+**R1 판정(M-2)**: review 스테이지는 핸드오프의 `r1_verdicts: [{role, verdict}]`를 읽어 `review-r1: <role>=<verdict>,… r2_flipped=<n>`을 기록한다(없으면
+`review-r1: (not carried by this workflow)`). 이슈 문구와 달리 `review-evidence:` 줄은 **바꾸지 않는다** — 머지 게이트가 끝 고정 정규식(`run-record.js`)으로
+읽는 출처 줄이라 토큰 하나가 모든 승인 PR을 사람에게 보낸다. 핀: `test_239_review_record_carries_r1_verdicts_and_flip_count`,
+`test_239_review_evidence_line_still_parses_after_flip_count`.
+
+**이슈 문구와 의도적으로 다른 점(세 가지)**: (1) `review-evidence:` 줄에 `flipped=`를 붙이지 않는다 — 위 이유, 뒤집힌 수는 `review-r1:` 줄의
+`r2_flipped=`로만 읽힌다. (2) 이슈가 적은 `rounds[]` 필드는 **읽지 않는다** — 입력 이름은 `r1_verdicts`다(R1 판정만 필요하고, `rounds`는 plan 핸드오프에서
+이미 정수 라운드 수라는 다른 뜻으로 쓰인다). (3) 표시 없는 초과 항목의 위치 기반 절단(이슈의 "없으면 뒤쪽 항목")은 만들지 않는다 — 위 M-9 단락.
+
+**템플릿 PR이 내야 할 필드 이름(교차 PR 계약)**: plan 워크플로는 skeptic이 더한 done_when에 `source: "skeptic"`을, review 워크플로는 R2 전의 판정을
+`r1_verdicts: [{role, verdict}]`로 싣는다. 다른 이름(예: 이슈의 `rounds[]`)으로 내면 이 러너는 그것을 읽지 않는다 — M-9는 표시 없는 초과로 거부되고,
+`review-r1:`은 자리표시 줄로 남는다. 기록에 들어가는 에이전트 문자열(role·id·verdict)은 한 토큰으로, 반박 본문은 한 줄로 바뀌어 `review-evidence:`/
+`stage-settled:` 줄을 위조하지 못한다 — 핀: `test_239_agent_text_cannot_forge_a_record_line`.
+
+**남는 것**: 템플릿이 `source: "skeptic"`과 `r1_verdicts`를 내기 전까지 M-9와 M-2의 채워진 경로는 운영에서 발화하지 않는다(템플릿 짝은 운영 세션 PR —
+`templates/**`는 이 이슈의 must_not). 그때까지 `templates/factory/claude/workflows/factory-plan.js:496-500`의 주석(과 `.claude` 사본)은 "못 덮으면 사람에게
+간다"고 말하는 **낡은 문장**이다. `{id:'signoff-x', role:'x'}`를 지어내는 합성자는 덮임 규칙을 피할 수 있고 그 흔적은 기록 줄 하나다(plan open_risks).
 
 ## ADR-039 소유자는 거부권이다 — 판정 경로 자동 머지 ON, 운영 세션이 자기 PR을 머지한다 — 2026-10-10 (소유자 결정)
 
