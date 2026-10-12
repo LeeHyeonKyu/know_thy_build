@@ -6782,6 +6782,25 @@ test("test_238_plan_repair_records_whether_the_workflow_reused_the_plan", async 
   } });
   await runStage({ stage: "plan", issue: 238, deps: thrower.deps, runnerId: "r1" }).catch(() => {});
   expect(costLines238(thrower.lines)).toEqual([SYNTH_ONLY_238]);
+
+  // (12) a log that parses but shows NOT EVEN the plan writer (an empty agents.jsonl from a silently failing
+  // factory/hooks/record-agents.sh, or only unrelated agents) is no evidence the synthesis ran alone — it is doubt → full rerun.
+  for (const log of [
+    { starts: [], stops: [], completed: [], orphans: [] },
+    { starts: [{ agent_type: "factory-loader" }], stops: [], completed: ["factory-loader"], orphans: [] },
+  ]) {
+    const e = repairDeps238({ perTurn: [FULL_238, ["plan-synthesizer"]], over: { agentsLog: () => log } });
+    await runStage({ stage: "plan", issue: 238, deps: e.deps, runnerId: "r1" });
+    expect(costLines238(e.lines), JSON.stringify(log)).toEqual([FULL_RERUN_238]);
+  }
+  // the same through the hook's real file: present, empty, cleanly parsed — and still a full rerun.
+  const emptyRoot = mkdtempSync(join(tmpdir(), "rs238e-"));
+  mkdirSync(join(emptyRoot, ".factory/out"), { recursive: true });
+  writeFileSync(join(emptyRoot, ".factory/out/agents.jsonl"), "");
+  expect(turnAgentsLog(emptyRoot)).not.toBeNull();                 // readable: the doubt is "no writer seen", not "unreadable"
+  const emptyRun = repairDeps238({ perTurn: [FULL_238, []], over: { agentsLog: () => turnAgentsLog(emptyRoot) } });
+  await runStage({ stage: "plan", issue: 238, deps: emptyRun.deps, runnerId: "r1" });
+  expect(costLines238(emptyRun.lines)).toEqual([FULL_RERUN_238]);
 });
 
 /**
@@ -6874,6 +6893,78 @@ test("test_238_no_cost_line_or_previous_plan_outside_a_completed_repair_turn", a
     "plan repair (KTB-51): still red → escalating unchanged",
   ]);
   expect(costLines238(redLines)).toHaveLength(1);                  // the turn RAN (it just did not fix the plan) → one cost line
+});
+
+/**
+ * #238 dw5 on DISK — the clauses above are about record lines; these are about the files the planners read. The context is
+ * built by main()'s real producers (makeBuildContextDep → buildContext, and the `scrubPlanRepairPrevious` dep main() wires),
+ * so a rejected plan written to .factory/out by a repair turn that then could not run, or left there by an earlier repair
+ * turn, is caught where it actually lives: context.json, every context.<role>.json, loaded.json.
+ */
+import { readdirSync as readdirSync238 } from "node:fs";
+import { scrubPlanRepairPrevious as scrubPlanRepairPrevious238 } from "../lib/context.js";
+test("test_238_no_cost_line_or_previous_plan_outside_a_completed_repair_turn_on_disk", async () => {
+  const MARK = "REJECTED-PLAN-238-MARKER";
+  const rejected = { schema: "factory.plan.v1", issue: 238, summary: MARK, done_when: [{ id: "dw1", text: MARK, verify: "test_238_x", level: "unit" }] };
+  const fixtureRoot = () => {
+    const r = mkdtempSync(join(tmpdir(), "rs238d-"));
+    mkdirSync(join(r, ".factory"), { recursive: true }); mkdirSync(join(r, "docs/factory"), { recursive: true });
+    writeFileSync(join(r, ".factory/harness.toml"), `schema = 1\n[harness]\nmaturity = "M0"\n[factory]\norchestration = "workflow"\n[commands]\nunit = "npm test"\n[gates]\nrequired = ["unit"]\nfast = ["unit"]\nfull = ["unit"]\ndeep = ["unit"]\n`);
+    writeFileSync(join(r, "docs/factory/CHARTER.md"), `---\nschema: factory.charter.v1\nstatus: ready\ntier_default: standard\nroster:\n  standard: [correctness]\nplan_roles:\n  default: [architect, skeptic]\nplan_rounds: { docs: 2, default: 3 }\n---\n`);
+    writeFileSync(join(r, ".factory/roles.toml"), `[review.correctness]\nagent = "c.md"\nmodel = "opus"\n[plan.architect]\nagent = "a.md"\nmodel = "opus"\n[plan.skeptic]\nagent = "s.md"\nmodel = "opus"\n[plan.synthesizer]\nagent = "syn.md"\nmodel = "opus"\n`);
+    return r;
+  };
+  const gh = { issue: async () => ({ number: 238, title: "T", body: "", labels: ["factory:ready"] }), comments: async () => [] };
+  const dep = (r, stage = "plan") => makeBuildContextDep238({ root: r, gh, issue: 238, stage, run: null, mergeBase: async () => null, recordLine: () => {} });
+  /** Every context*.json / loaded.json under .factory/out that still holds the rejected plan (key or text). */
+  const carriers = (r) => readdirSync238(join(r, ".factory/out"))
+    .filter((f) => /^(context(\..+)?|loaded)\.json$/.test(f))
+    .filter((f) => { const t = readFileSync(join(r, ".factory/out", f), "utf8"); return t.includes("plan_repair_previous") || t.includes(MARK); });
+  const verdicts = () => vi.fn()
+    .mockReturnValueOnce({ ok: false, reasons: [...REASONS_238], planRepair: [...REASONS_238], data: rejected })
+    .mockReturnValueOnce({ ok: true, reasons: [], planRepair: null, data: { rounds: 2 } });
+
+  // (a) a repair turn that could not run: its context was already written with the rejected plan, then the dispatch failed.
+  for (const fail of [async () => { throw new Error("api error 529"); }, async () => null]) {
+    const r = fixtureRoot();
+    let n = 0, sawPlan = null;
+    const lines = [];
+    const deps = planRepairDeps({
+      buildContext: dep(r), scrubPlanRepairPrevious: () => scrubPlanRepairPrevious238(r), verifyStage: verdicts(),
+      claudeP: vi.fn(async () => { if (++n === 1) return { is_error: false, result: "{}" }; sawPlan = carriers(r); return fail(); }),
+      agentsLog: () => ({ completed: ["plan-synthesizer"] }), transition: async ({ to }) => ({ ok: true, to }), runRecord: (l) => lines.push(...l),
+    });
+    expect(await runStage({ stage: "plan", issue: 238, deps, runnerId: "r1" })).toBe(2);
+    expect(sawPlan.length, "the repair turn's files did carry the plan while it was being dispatched").toBeGreaterThan(0);
+    expect(carriers(r), String(fail)).toEqual([]);                  // …and none is left once the turn could not run
+    expect(costLines238(lines)).toEqual([]);
+  }
+
+  // (b) a repair turn that RAN leaves its context behind; a later buildContext in the same .factory/out — the next plan pass, and
+  // a later stage whose roster no longer rewrites the plan roles' context.<role>.json — sees no rejected plan anywhere.
+  const r = fixtureRoot();
+  let during = null, n = 0;
+  const deps = planRepairDeps({
+    buildContext: dep(r), scrubPlanRepairPrevious: () => scrubPlanRepairPrevious238(r), verifyStage: verdicts(),
+    claudeP: vi.fn(async () => { if (++n === 2) during = carriers(r); return { is_error: false, result: "{}" }; }),
+    agentsLog: () => ({ completed: ["plan-synthesizer"] }), transition: async ({ to }) => ({ ok: true, to }),
+  });
+  expect(await runStage({ stage: "plan", issue: 238, deps, runnerId: "r1" })).toBe(0);
+  expect(during).toEqual(expect.arrayContaining(["context.json", "context.synthesizer.json", "context.skeptic.json"]));
+  const next = await dep(r)({});
+  expect(Object.keys(next)).not.toContain("plan_repair_previous");
+  expect(carriers(r)).toEqual([]);
+  // the plan run's roles are not the review roster: their files are not rewritten by this build, and still must not carry it.
+  const pr = fixtureRoot();
+  const prDeps = planRepairDeps({
+    buildContext: dep(pr), scrubPlanRepairPrevious: () => scrubPlanRepairPrevious238(pr), verifyStage: verdicts(),
+    agentsLog: () => ({ completed: ["plan-synthesizer"] }), transition: async ({ to }) => ({ ok: true, to }),
+  });
+  expect(await runStage({ stage: "plan", issue: 238, deps: prDeps, runnerId: "r1" })).toBe(0);
+  expect(carriers(pr).length).toBeGreaterThan(0);                  // the repair turn's files, as it left them
+  await dep(pr, "review")({});
+  expect(existsSync(join(pr, ".factory/out/context.synthesizer.json"))).toBe(true);   // a plan role's file the review build did not rewrite
+  expect(carriers(pr)).toEqual([]);
 });
 
 /**

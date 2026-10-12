@@ -25,7 +25,7 @@ import { makeQueueAdmission, entryRecheck, admissionRefusedReason, ADMISSION_COD
 import { mirrorStep, mirrorMatchesHead, inMirrorFamily, regenerateMirror, mirrorApplicable, isUnionMergePath, MIRROR_FAMILIES } from "../lib/mirror.js";
 import { REHEARSAL_UNWIRED, ADMISSION_UNWIRED } from "../lib/transition.js";
 export { HARNESS_LABEL };   // 재수출 — retro.js와 이 값이 같은 소스에서 왔다는 것을 테스트가 import equality로 확인한다
-import { buildContext, resolveTier, contextManifestLines, isPlainObject, loadedJsonLine } from "../lib/context.js";
+import { buildContext, resolveTier, contextManifestLines, isPlainObject, loadedJsonLine, scrubPlanRepairPrevious } from "../lib/context.js";
 import { resolveReviewRoster } from "../lib/review-roster.js";
 import { startHeartbeat } from "../lib/heartbeat.js";
 import { readProgress, progressMarker } from "../lib/progress.js";
@@ -1153,6 +1153,8 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runAt
         record([`plan repair (KTB-51): could not run — ${e?.message || e}`]);
         repairOut = null;
       }
+      // #238 dw5 — a repair turn that could not run must not leave the rejected plan in the context files it already wrote.
+      if (!repairOut && rejectedPlan) { try { await d.scrubPlanRepairPrevious?.(); } catch { /* best-effort: the next buildContext scrubs too */ } }
       if (repairOut) {
         out = repairOut;
         payloadCtx = repairCtx ?? ctx;                                // #207 — 이제 실패를 말하는 것은 리페어 턴의 반환과 그 턴의 loaded.json이다(memo는 리페어 전에 계산되지 않는다 — plan엔 게이트가 없다)
@@ -3592,8 +3594,9 @@ export const PLAN_REPAIR_FULL_RERUN = "plan repair: full rerun (workflow ignored
 
 /**
  * #238 — the one cost line of a plan repair turn that ran. It is decided by what the RUNNER observed: the hook-written agents
- * log of that turn (run-stage resets it just before the turn). No debate roster role (`<prefix><role>`, the synthesizer aside)
- * completed → `synthesis-only`; any did, the log could not be read, or there is no debate role to look for → `full rerun`
+ * log of that turn (run-stage resets it just before the turn). The plan writer was seen and no debate roster role
+ * (`<prefix><role>`, the writer aside) was → `synthesis-only`; any did, the writer is absent too (an empty log), the log could
+ * not be read, or there is no debate role to look for → `full rerun`
  * (unsure is never "cheap"). A debate role counts once it STARTED (completed, orphaned or merely started). The handoff's
  * `repair_of` is the agent's claim: any value it holds (null too) is appended as its JSON text and never consulted for the
  * classification.
@@ -3613,7 +3616,9 @@ export function planRepairCostLine({ agentsLog, roster, mode, rolePrefix = "plan
   const names = (Array.isArray(roster) ? roster : []).filter((r) => typeof r === "string" && r);
   const writer = mode === "single" ? (names.includes("synthesizer") ? "synthesizer" : names[0]) : "synthesizer";
   const debate = names.filter((r) => r !== writer);
-  const reran = seen === null || debate.length === 0 || debate.some((r) => seen.has(rolePrefix + r));
+  // A log that parsed but does not show even the writer (an empty file from a silently failing record-agents.sh hook) is not
+  // evidence that the synthesis ran alone — it is doubt, and doubt is a full rerun (test_238_…_reused_the_plan (12)).
+  const reran = seen === null || debate.length === 0 || !seen.has(rolePrefix + writer) || debate.some((r) => seen.has(rolePrefix + r));
   const head = reran ? PLAN_REPAIR_FULL_RERUN : PLAN_REPAIR_SYNTHESIS_ONLY;
   if (repairOf === undefined) return head;                        // no `repair_of` key in the handoff → no claim to record
   // Verbatim = the claimed value's exact JSON text (null included): lossless — `JSON.parse` gives back the same value — and it
@@ -4311,6 +4316,8 @@ async function main() {
     resetAgentsLog: async () => { rmSync(join(root, ".factory/out/agents.jsonl"), { force: true }); },
     /** #238 — the plan repair turn's cost line reads the same file the roster check reads (`planRepairCostLine`). */
     agentsLog: () => turnAgentsLog(root),
+    /** #238 dw5 — a plan repair turn that could not run takes its rejected plan back out of .factory/out/context*.json. */
+    scrubPlanRepairPrevious: () => scrubPlanRepairPrevious(root),
     // `resetGates`(지난 런의 게이트 판정 파일과 그 재료를 스테이지 첫 전이보다 먼저 지운다)는 아래 makeStageGateDeps 조립에서 온다 — #157 cf1.
     /**
      * **이번 주기에 실제로 끝난 rework 라운드 수**(r1 SF2). 두 가지가 범위를 정한다:

@@ -1,4 +1,4 @@
-import { mkdirSync, writeFileSync, statSync } from "node:fs";
+import { mkdirSync, writeFileSync, statSync, readdirSync, readFileSync } from "node:fs";
 import { basename, join } from "node:path";
 import { loadHarness, loadCharter, loadRoles, rosterFor, planRoundsFor } from "./config.js";
 import { latestHandoff } from "./handoff.js";
@@ -347,6 +347,9 @@ export async function buildContext({ root, gh, issue, stage, run = null, base = 
     try { manifests.push(contextManifest(projected)); } catch { /* 매니페스트의 실패가 컨텍스트의 실패는 아니다 */ }
   }
   ctx.context_manifests = manifests;
+  // #238 dw5 — a build that carries no rejected plan leaves none behind either: a context.<role>.json this build did not rewrite
+  // (a role of an earlier stage's roster) may still hold the one an earlier plan repair turn wrote.
+  if (!ctx.plan_repair_previous) scrubPlanRepairPrevious(root);
   // 디스패처가 Workflow의 `args.loaded`로 그대로 넘기는 작은 파일(M5) — 로더 에이전트의 대체물.
   // #207 — implement에서는 자유 텍스트를 자른 **사본**을 쓴다(ctx.loaded·context*.json은 전문 그대로). 크기는 ctx에 붙여 run-stage가 기록한다.
   ctx.loaded_json = writeLoadedJson({ root, stage, loaded: ctx.loaded, pointerHoldsFullText: roleBlock.builder != null && roleBlock.builder.cold_read !== true });
@@ -362,6 +365,31 @@ export async function buildContext({ root, gh, issue, stage, run = null, base = 
     catch { /* house rules는 편의 자료다 — 못 쓰면 그냥 없이 간다 */ }
   }
   return ctx;
+}
+
+/**
+ * #238 dw5 — removes `plan_repair_previous` (the rejected plan a plan repair turn carries) from every `context*.json` under
+ * `.factory/out` that still holds it, rewriting only those files, and returns their names. run-stage calls it when a repair
+ * turn could not run (its context was already written); buildContext calls it on every build that carries no rejected plan,
+ * so no later reader of the same `.factory/out` sees a stale one. Never throws — an unreadable file is left as it is.
+ */
+export function scrubPlanRepairPrevious(root) {
+  const dir = join(root, ".factory/out");
+  let names;
+  try { names = readdirSync(dir); } catch { return []; }
+  const scrubbed = [];
+  for (const name of names) {
+    if (!/^context(\..+)?\.json$/.test(name)) continue;
+    try {
+      const path = join(dir, name);
+      const obj = JSON.parse(readFileSync(path, "utf8"));
+      if (!isPlainObject(obj) || !Object.hasOwn(obj, "plan_repair_previous")) continue;
+      delete obj.plan_repair_previous;
+      writeFileSync(path, JSON.stringify(obj, null, 2));
+      scrubbed.push(name);
+    } catch { /* not ours to repair — leave it */ }
+  }
+  return scrubbed;
 }
 
 /**
