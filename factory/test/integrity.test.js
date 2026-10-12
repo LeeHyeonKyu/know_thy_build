@@ -636,3 +636,112 @@ test("fixesTests reads the issue body's fixes_tests: marker (inline and bullet f
   expect(fixesTests("tests_changed_allowed: test/a.test.js")).toEqual([]);
   expect(testsChangedAllowed("tests_changed_allowed: test/a.test.js")).toEqual(["test/a.test.js"]);
 });
+
+// #286 — the #254 → PR #255 replay. The runner's own mirror commit regenerated installed-engine paths after the handoff;
+// merge `policyViolations` counted them against the issue's `must_not: touch .factory/**` and sent a 5/0 GREEN PR to a human,
+// while the implement gate (which already exempted the mirror family) had said GREEN. The fixture paths come from the real
+// mirror producer (`regenerateMirror` over this repo, `write: false`), and the record line from the real `mirrorLine` —
+// which truncates after 6 paths, so the exemption cannot be keyed on that line: every family path must be exempt.
+const repoRoot286 = new URL("../..", import.meta.url).pathname;
+const mirrorFamily286 = async () => {
+  const { regenerateMirror, inMirrorFamily } = await import("../lib/mirror.js");
+  const produced = await regenerateMirror({ root: repoRoot286, write: false });
+  expect(produced.applicable).toBe(true);
+  const family = [...produced.entries].sort();
+  expect(family.every((p) => inMirrorFamily(p))).toBe(true);
+  return family;
+};
+const issueBody286 = "re-land\n\nmust_not:\n- touch: `.factory/**`, `.claude/**`\n- add: `smol-toml`\n";
+const diffRun286 = (paths, u0) => makeFakeRun([
+  { match: (c, a) => c === "git" && a[0] === "diff" && a.includes("--name-status"), result: { code: 0, stdout: paths.map((p) => `M\t${p}\n`).join(""), stderr: "" } },
+  { match: (c, a) => c === "git" && a[0] === "diff" && a.includes("-U0"), result: { code: 0, stdout: u0, stderr: "" } },
+  { match: (c, a) => c === "git" && a[0] === "show", result: { code: 0, stdout: "", stderr: "" } },
+]);
+const u0For286 = (familyPath) => [
+  `--- a/${familyPath}`, `+++ b/${familyPath}`, "@@ -1,0 +2,1 @@", "+import 'smol-toml';",
+  "--- a/src/app.js", "+++ b/src/app.js", "@@ -2,0 +3,1 @@", "+import 'smol-toml';",
+].join("\n");
+
+test("test_must_not_touch_ignores_runner_owned_mirror_paths", async () => {
+  const { mirrorLine } = await import("../bin/run-stage.js");
+  const { MUST_NOT_TOUCH_RULE, MUST_NOT_ADD_RULE } = await import("../lib/integrity.js");
+  const family = await mirrorFamily286();
+  expect(family.length).toBeGreaterThan(6);
+  // the runner's record line names only the first 6 — the 7th and later are not in it
+  const line = mirrorLine({ changed: family, sha: "d".repeat(40) });
+  expect(line.startsWith(`mirror: regenerated ${family.length} installed-engine path(s)`)).toBe(true);
+  expect(line.endsWith(", …")).toBe(true);
+  expect(line.includes(family.at(-1))).toBe(false);
+
+  const paths = [...family, ".factory/harness.toml", ".factory/lessons/a.md", "src/app.js"];
+  const harness = { protected: {}, test: { test_glob: ["test/**"] } };
+  const mustNot = (r) => r.violations.filter((v) => MUST_NOT_TOUCH_RULE.test(v.rule) || MUST_NOT_ADD_RULE.test(v.rule));
+  const r = await policyViolations({ run: diffRun286(paths, u0For286(family[0])), cwd: "/repo", base: "b", head: "h", harness, issueBody: issueBody286, mirrorSelf: true });
+  expect(r.ok).toBe(true);
+  const hit = mustNot(r);
+  // not one mirror-family path is a must_not violation — touch or add — including those past the record line's 6
+  for (const p of family) expect(hit.filter((v) => v.file === p), p).toEqual([]);
+  // the builder's own .factory/** edits outside the family are still violations, and the add token still bites elsewhere
+  expect(hit).toEqual([
+    { file: ".factory/harness.toml", rule: "must-not-touch — the issue forbids changes under `.factory/**`" },
+    { file: ".factory/lessons/a.md", rule: "must-not-touch — the issue forbids changes under `.factory/**`" },
+    { file: "src/app.js", line: 3, rule: "must-not-add — the issue forbids adding `smol-toml` (line 3)" },
+  ]);
+  expect(r.mirror_excluded).toBe(family.length);
+
+  // without the self-repo applicability (adopter repo, the default) the same diff counts every family path, as today
+  const off = await policyViolations({ run: diffRun286(paths, u0For286(family[0])), cwd: "/repo", base: "b", head: "h", harness, issueBody: issueBody286 });
+  for (const p of family) expect(mustNot(off).some((v) => v.file === p && MUST_NOT_TOUCH_RULE.test(v.rule)), p).toBe(true);
+  expect(mustNot(off).some((v) => v.file === family[0] && MUST_NOT_ADD_RULE.test(v.rule))).toBe(true);
+  expect(off.mirror_excluded ?? 0).toBe(0);
+});
+
+// #286 dw2 — the implement `must-not` gate and merge `policyViolations` must say the same thing about the same diff:
+// #255 went GREEN at the gate and was refused at merge. Both real producers run on one diff and are compared to each other.
+test("test_286_gate_and_merge_must_not_agree_on_mirror_family", async () => {
+  const { runStageGates } = await import("../lib/gates.js");
+  const { MUST_NOT_TOUCH_RULE, MUST_NOT_ADD_RULE } = await import("../lib/integrity.js");
+  const { mkdtempSync, mkdirSync, writeFileSync, rmSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const family = await mirrorFamily286();
+  const self = mkdtempSync(join(tmpdir(), "ktb-286-"));
+  try {
+    // the gate decides applicability from its cwd: a self-repo tree (factory/cli markers + .factory)
+    mkdirSync(join(self, "factory/cli"), { recursive: true }); mkdirSync(join(self, ".factory"), { recursive: true });
+    for (const f of ["manifest.js", "install.js"]) writeFileSync(join(self, "factory/cli", f), "// stub\n");
+    const harness = {
+      harness: { maturity: "M0" }, commands: { unit: "vitest --json", proof: {} },
+      gates: { required: ["unit"], fast: ["unit"], full: ["unit"], deep: ["unit"], thresholds: {} },
+      test: { unit_report: ".factory/out/unit.json", test_glob: ["test/**"], source_glob: ["src/**"] }, protected: {},
+    };
+    const fileSet = (s) => [...new Set(s)].sort();
+    const verdicts = async (paths) => {
+      // the -U0 text carries src/app.js hunks only when src/app.js is in the diff
+      const u0 = paths.includes("src/app.js") ? u0For286(family[0]) : u0For286(family[0]).split("\n").slice(0, 4).join("\n");
+      const gateRun = makeFakeRun([
+        { match: (c) => c === "bash", result: { code: 0, stdout: "", stderr: "" } },
+        { match: (c, a) => c === "git" && a[0] === "rev-parse", result: { code: 0, stdout: `${"a".repeat(40)}\n`, stderr: "" } },
+        { match: (c, a) => c === "git" && a[0] === "diff" && a.includes("--name-status"), result: { code: 0, stdout: paths.map((p) => `M\t${p}\n`).join(""), stderr: "" } },
+        { match: (c, a) => c === "git" && a[0] === "diff" && a.includes("-U0"), result: { code: 0, stdout: u0, stderr: "" } },
+        { match: (c, a) => c === "git", result: { code: 0, stdout: "", stderr: "" } },
+      ]);
+      const gh = { createIssue: async () => ({}), searchIssues: async () => [], issue: async () => ({ body: issueBody286 }) };
+      const g = await runStageGates({ run: gateRun, cwd: self, harness, stage: "implement", tier: "standard", base: "b".repeat(40), gh, issue: 286, readFile: () => null });
+      const gate = g.gates["must-not"];
+      const gateFiles = fileSet([...String(gate.log).matchAll(/(?:^issue must_not contract violated: |; )(\S+): must-not-/g)].map((m) => m[1]));
+      const m = await policyViolations({ run: diffRun286(paths, u0), cwd: self, base: "b", head: "h", harness, issueBody: issueBody286, mirrorSelf: true });
+      const mergeFiles = fileSet(m.violations.filter((v) => MUST_NOT_TOUCH_RULE.test(v.rule) || MUST_NOT_ADD_RULE.test(v.rule)).map((v) => v.file));
+      return { gate: gate.status, gateFiles, merge: mergeFiles.length ? "RED" : "GREEN", mergeFiles };
+    };
+    // only runner-generated mirror paths (+ a clean source file): both GREEN, nothing violating on either side
+    const only = await verdicts([...family]);
+    expect(only).toEqual({ gate: "GREEN", gateFiles: [], merge: "GREEN", mergeFiles: [] });
+    // plus a builder edit to a non-family .factory/** path and a forbidden token in src: both RED on the same files
+    const mixed = await verdicts([...family, ".factory/harness.toml", "src/app.js"]);
+    expect(mixed.gate).toBe("RED");
+    expect(mixed.merge).toBe(mixed.gate);
+    expect(mixed.mergeFiles).toEqual(mixed.gateFiles);
+    expect(mixed.mergeFiles).toEqual([".factory/harness.toml", "src/app.js"]);
+  } finally { rmSync(self, { recursive: true, force: true }); }
+});
