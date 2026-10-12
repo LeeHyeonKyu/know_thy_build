@@ -10889,3 +10889,279 @@ test("test_199_missing_findings_skips_with_a_record_line (an unreachable reviewe
   const line = selfGateDetailLine199(r, { runId: "1", runnerId: "gha-1", ktbVersion: "1.4.0" });
   expect(JSON.parse(line.slice(SGD_PREFIX_199.length)).skipped.filter((s) => s.check === "rework-scope")).toEqual([{ check: "rework-scope", reason: sk[0].reason, detail: sk[0].detail }]);
 });
+
+// ── #236 (ADR-044) — the local merge: operator marker → operator-present merge stage → the shared door check ─────────────
+import { runCommand as runCommand236 } from "../cli/run.js";
+import { makeOperatorMergeDeps as makeOperatorMergeDeps236, OPERATOR_MERGE_ENV as OPERATOR_MERGE_ENV236 } from "../bin/run-stage.js";
+import { runMergeStage as runMergeStage236, VETO_WINDOW_CONTEXT as VETO_WINDOW_CONTEXT236 } from "../lib/merge-stage.js";
+import { operatorMergeVerdict as operatorMergeVerdict236, DOOR_FILES as DOOR_FILES236, isDoorFile as isDoorFile236 } from "../lib/operator-merge.js";
+
+const HEAD_236 = "b".repeat(40);
+const OLD_HEAD_236 = "e".repeat(40);
+const RUN_236 = "34809992796";
+const approve236 = (role) => ({ role, verdict: "approve", confidence: "high", must_fix: [], should_fix: [], verified: [] });
+const REVIEW_236 = { schema: "factory.review.v1", issue: 42, pr: 9, head_sha: HEAD_236, round: 2, decision: "approved", verdicts: [approve236("correctness"), approve236("qa")], orchestration: "workflow", guarantee: "verified" };
+const RECORD_236 = { stage: "review", at: "2026-10-12T09:02Z", runId: RUN_236, runnerId: `gha-${RUN_236}`, headSha: HEAD_236, round: 2, decision: "approved", verdicts: "correctness=approve,qa=approve", qaManifest: "f".repeat(64) };
+const graph236 = () => { let from = "factory:approved"; return vi.fn(async ({ to }) => { if (!canTransition(from, to)) return { ok: false, from, to, reason: `transition ${from} → ${to} not allowed` }; from = to; return { ok: true, from, to }; }); };
+const FACTORY_STATUSES_236 = [
+  { context: "factory/review", state: "success", description: "approved", creatorLogin: "ktb-bot" },
+  { context: "factory/gates", state: "success", description: "GREEN", creatorLogin: "ktb-bot" },
+];
+const LOCAL_OK_236 = { context: "factory/integrity", state: "success", description: "local:alice", creatorLogin: "alice" };
+const ROLLUP_236 = (integrity = [{ __typename: "StatusContext", context: "factory/integrity", state: "SUCCESS" }]) => [
+  { __typename: "StatusContext", context: "factory/review", state: "SUCCESS" },
+  { __typename: "StatusContext", context: "factory/gates", state: "SUCCESS" },
+  ...integrity,
+];
+const prJson236 = (over = {}) => ({ number: 9, isDraft: false, mergeable: "MERGEABLE", baseRefName: "main", headRefOid: HEAD_236, files: [{ path: "factory/lib/status.js" }, { path: "docs/factory/ops/runbook.md" }], statusCheckRollup: ROLLUP_236(), ...over });
+/** `gh pr view` answered by the given JSON — the only call the door check makes through `run`. */
+const prViewRun236 = (pr) => makeFakeRun([{ match: (c, a) => c === "gh" && a[0] === "pr" && a[1] === "view", result: { code: 0, stdout: JSON.stringify(pr), stderr: "" } }]);
+const operatorGh236 = ({ statuses = { [HEAD_236]: [LOCAL_OK_236, ...FACTORY_STATUSES_236] }, types = { alice: "User", mallory: "User", "ktb-bot": "User", "ci-bot[bot]": "Bot" }, viewer = "alice" } = {}) => ({
+  viewerLogin: vi.fn(async () => viewer),
+  userType: vi.fn(async (l) => types[l] ?? null),
+  commitStatuses: vi.fn(async (sha) => statuses[sha] ?? []),
+});
+/** The operator deps exactly as run-stage `main()` builds them, from an env and fakes. */
+const operatorDeps236 = ({ env = { [OPERATOR_MERGE_ENV236]: "1" }, pr = prJson236(), gh = operatorGh236(), judgeAllowed = false, engine = true, sink = [], log = [] } = {}) => {
+  const run = prViewRun236(pr);
+  const deps = makeOperatorMergeDeps236({
+    stage: "merge", env, run, repo: "o/r", gh,
+    factoryLogins: async () => ({ ok: true, logins: ["ktb-bot"] }),
+    getCharter: () => ({ self_change: { operator_merge_judge: judgeAllowed } }),
+    getEngine: () => engine, getDefaultBranch: () => "main",
+    runRecord: (lines) => sink.push(...lines), log: (l) => log.push(l),
+  });
+  return { deps, run, gh, sink, log };
+};
+/** A merge-stage fixture for an approved self-change PR (the only kind that has a veto window today). */
+const mergeD236 = (over = {}) => {
+  let t = Date.parse("2026-10-12T10:02:00.000Z");
+  return {
+    prInfo: vi.fn(async () => ({ number: 9, state: "OPEN", mergeable: "MERGEABLE" })),
+    gates: vi.fn(async () => ({ schema: "factory.gates.v1", level: "full", status: "GREEN", head_sha: HEAD_236, passed: 3, failed: 0, skipped: [], misconfigured: [], tests: { excluded: [] } })),
+    mergeGates: vi.fn(async () => ({ checksGreen: true, integrityGreen: true })),
+    prChecks: vi.fn(async () => [{ name: "factory/integrity", state: "SUCCESS", bucket: "pass" }]),
+    protectedPaths: vi.fn(async () => ({ ok: true, files: ["factory/lib/status.js", "docs/factory/ops/runbook.md"] })),
+    policyViolations: vi.fn(async () => ({ ok: true, files: [] })),
+    engine: true,
+    selfChange: { auto_merge_non_judge: true, auto_merge_judge: false, veto_minutes: 15 },
+    neverAutomate: [],
+    comment: vi.fn(async () => {}), prReady: vi.fn(async () => {}), mergePr: vi.fn(async () => {}),
+    transition: graph236(), closeIssue: vi.fn(async () => {}),
+    now: vi.fn(() => t), sleep: vi.fn(async (ms) => { t += ms; }),
+    jobStartedAt: Date.parse("2026-10-12T10:00:00.000Z"), jobTimeoutMinutes: 90,
+    vetoWindow: { open: vi.fn(async () => ({ ok: true })), read: vi.fn(async ({ sha }) => ({ ok: true, status: { context: VETO_WINDOW_CONTEXT236, state: "pending", description: mergeD236.lastDescription, creatorLogin: "ktb-bot", sha } })) },
+    vetoLabel: vi.fn(async () => ({ ok: true, vetoes: [] })),
+    breaker: vi.fn(async () => ({ ok: true, open: false, since: null, reason: null, detail: "closed" })),
+    persistSelfMerge: vi.fn(async () => ({ ok: true })),
+    reviewEvidence: vi.fn(async () => ({ ok: true, data: REVIEW_236 })),
+    reviewRunId: vi.fn(async () => ({ ok: true, runId: RUN_236, runnerId: `gha-${RUN_236}` })),
+    reviewRecord: vi.fn(async () => ({ ok: true, record: RECORD_236 })),
+    reviewRoster: vi.fn(async () => ({ ok: true, roles: ["correctness", "qa"] })),
+    maxRounds: 3,
+    prHeadShaLive: vi.fn(async () => HEAD_236),
+    factoryLogins: vi.fn(async () => ({ ok: true, logins: ["ktb-bot"] })),
+    commitStatuses: vi.fn(async () => FACTORY_STATUSES_236),
+    ...over,
+  };
+};
+// The veto window's read-back must see the description this run opened (the real producer posts it; the fake remembers it).
+const wireWindow236 = (d) => { d.vetoWindow.open = vi.fn(async ({ description }) => { mergeD236.lastDescription = description; return { ok: true }; }); return d; };
+const runMerge236 = async (d, record) => runMergeStage236({ issue: 42, defaultBranch: "main", headSha: HEAD_236, d, record, refusal: (t) => (t.ok ? [] : [`transition refused: ${t.reason}`]), postStatus: vi.fn(async () => {}) });
+
+test("test_236_local_merge_runs_merge_stage_with_the_operator_token_and_no_veto_wait", async () => {
+  const root = mkdtempSync(join(tmpdir(), "factory-236-run-"));
+  mkdirSync(join(root, ".factory/bin"), { recursive: true });
+  writeFileSync(join(root, ".factory/bin/run-stage.js"), "// stub\n");
+  mkdirSync(join(root, ".factory/node_modules/smol-toml"), { recursive: true });
+  writeFileSync(join(root, ".factory/node_modules/smol-toml/package.json"), "{}\n");
+  const okRun = () => makeFakeRun([
+    { match: (c, a) => c === "gh" && a[0] === "auth", result: { code: 0, stdout: "Logged in\n", stderr: "" } },
+    { match: (c, a) => c === "gh" && a[0] === "repo", result: { code: 0, stdout: "{\"nameWithOwner\":\"o/r\"}", stderr: "" } },
+    { match: (c, a) => c === "gh" && a[0] === "workflow", result: { code: 0, stdout: "", stderr: "" } },
+  ]);
+  const ioOf = () => { const o = { out: [], err: [] }; return { io: { out: (s) => o.out.push(String(s)), err: (s) => o.err.push(String(s)) }, o }; };
+
+  // (1) Off a runner: `factory run merge 42 --operator` spawns the CI's own run-stage, for merge, with the operator marker.
+  const spawnInherit = vi.fn(() => 0);
+  const off = ioOf();
+  expect(await runCommand236({ root, argv: ["merge", "42", "--operator"], io: off.io, run: okRun(), spawnInherit, env: { PATH: "/usr/bin" } })).toBe(0);
+  expect(spawnInherit).toHaveBeenCalledTimes(1);
+  const [cmd, args, opts] = spawnInherit.mock.calls[0];
+  expect([cmd, ...args]).toEqual(["node", ".factory/bin/run-stage.js", "merge", "42"]);
+  expect(opts.env[OPERATOR_MERGE_ENV236]).toBe("1");
+  const spawnedEnv = opts.env;
+
+  // (2) That env makes run-stage's merge operator-present: approved → merged + merged label, the window never opened, read
+  // or slept on, and the audit line in the record and on stderr.
+  {
+    const sink = [], log = [];
+    const { deps } = operatorDeps236({ env: spawnedEnv, sink, log });
+    expect(deps.operatorPresent).toBe(true);
+    const d = wireWindow236(mergeD236(deps));
+    const code = await runMerge236(d, (lines) => d.runRecord(lines));
+    expect(code).toBe(0);
+    expect(d.mergePr).toHaveBeenCalledTimes(1);
+    expect(d.transition.mock.calls.map((c) => c[0].to)).toEqual(["factory:merged"]);
+    for (const dep of [d.vetoWindow.open, d.vetoWindow.read, d.vetoLabel, d.sleep]) expect(dep).not.toHaveBeenCalled();
+    const audit = `local-merge pr=9 sha=${HEAD_236} actor=alice veto=skipped`;
+    expect(sink).toContain(audit);
+    expect(log).toContain(audit);
+  }
+
+  // (3) Same fixture, but the PR touches a door file → refused: no mergePr, no merged label, the reason on stderr.
+  for (const door of ["factory/cli/integrity.js", "factory/lib/operator-merge.js"]) {
+    const sink = [], log = [];
+    const { deps } = operatorDeps236({ env: spawnedEnv, pr: prJson236({ files: [{ path: "docs/x.md" }, { path: door }] }), judgeAllowed: true, sink, log });
+    const d = wireWindow236(mergeD236(deps));
+    expect(await runMerge236(d, (lines) => d.runRecord(lines)), door).toBe(2);
+    expect(d.mergePr, door).not.toHaveBeenCalled();
+    expect(d.transition.mock.calls.map((c) => c[0].to), door).not.toContain("factory:merged");
+    expect(log.join("\n"), door).toMatch(new RegExp(`the door cannot open itself[^\\n]*${door.replace(/\./g, "\\.")}`));
+    expect(d.vetoWindow.open, door).not.toHaveBeenCalled();
+  }
+
+  // (4) On a runner: `--operator` exits non-zero and nothing is spawned, and the text does not send the operator to CI.
+  for (const env of [{ GITHUB_ACTIONS: "true" }, { GITHUB_ACTIONS: "true", [OPERATOR_MERGE_ENV236]: "1" }]) {
+    const spawn = vi.fn(() => 0);
+    const r = ioOf();
+    const code = await runCommand236({ root, argv: ["merge", "42", "--operator"], io: r.io, run: okRun(), spawnInherit: spawn, env });
+    expect(code).not.toBe(0);
+    expect(spawn).not.toHaveBeenCalled();
+    const text = r.o.err.join("\n");
+    expect(text).toMatch(/GITHUB_ACTIONS/);
+    expect(text).not.toMatch(/runs only in CI|--remote/);
+  }
+
+  // (5) A forged marker under GITHUB_ACTIONS is ignored by run-stage: no operator deps, and the same PR opens the window.
+  {
+    const { deps } = operatorDeps236({ env: { ...spawnedEnv, GITHUB_ACTIONS: "true" } });
+    expect(deps).toEqual({});
+    const d = wireWindow236(mergeD236(deps));
+    const lines = [];
+    expect(await runMerge236(d, (l) => lines.push(...l))).toBe(0);
+    expect(d.vetoWindow.open).toHaveBeenCalledTimes(1);
+    expect(d.sleep).toHaveBeenCalled();
+    expect(lines.some((l) => l.startsWith("local-merge "))).toBe(false);
+  }
+  // …and a marker for another stage, or a marker that is not exactly "1", is not operator mode either.
+  expect(makeOperatorMergeDeps236({ stage: "review", env: { [OPERATOR_MERGE_ENV236]: "1" } })).toEqual({});
+  expect(makeOperatorMergeDeps236({ stage: "merge", env: { [OPERATOR_MERGE_ENV236]: "true" } })).toEqual({});
+
+  // (6) `--remote` dispatch is unchanged: the CI workflow, nothing local, no operator marker.
+  {
+    const run = okRun();
+    const spawn = vi.fn(() => 0);
+    const r = ioOf();
+    expect(await runCommand236({ root, argv: ["merge", "42", "--remote"], io: r.io, run, spawnInherit: spawn, env: {} })).toBe(0);
+    expect(spawn).not.toHaveBeenCalled();
+    expect(run.calls.find((c) => c.args[0] === "workflow").args).toEqual(["workflow", "run", "factory-merge.yml", "-R", "o/r", "-f", "issue=42"]);
+  }
+});
+
+test("test_236_local_merge_refuses_door_files_and_non_green_checks", async () => {
+  // The local integrity poster is itself a door file now.
+  expect(DOOR_FILES236).toContain("factory/cli/integrity.js");
+  expect(isDoorFile236("factory/cli/integrity.js")).toBe(true);
+
+  const check = async (o) => { const { deps, run } = operatorDeps236(o); return { v: await deps.operatorMergeCheck({ pr: 9, sha: HEAD_236 }), run }; };
+
+  // The door's own fields, from `gh pr view`, and the door's own verdict function: its reasons are carried verbatim.
+  {
+    const pr = prJson236({ files: [{ path: "factory/cli/integrity.js" }] });
+    const { v, run } = await check({ pr, judgeAllowed: true });
+    expect(v.ok).toBe(false);
+    const fields = run.calls[0].args[run.calls[0].args.indexOf("--json") + 1].split(",");
+    expect(fields).toEqual(expect.arrayContaining(["number", "isDraft", "mergeable", "baseRefName", "files", "statusCheckRollup"]));
+    const door = operatorMergeVerdict236(pr, { defaultBranch: "main", engine: true, judgeAllowed: true });
+    expect(door.ok).toBe(false);
+    expect(v.reasons).toEqual(expect.arrayContaining(door.reasons));
+    expect(v.reasons.join("; ")).toMatch(/the door cannot open itself — a person merges a change to the operator door: factory\/cli\/integrity\.js/);
+  }
+  // The CHARTER switch is the door's: off → a judge path is refused as the door refuses it.
+  {
+    const { v } = await check({ pr: prJson236({ files: [{ path: "factory/lib/gates.js" }] }), judgeAllowed: false });
+    expect(v.ok).toBe(false);
+    expect(v.reasons.join("; ")).toMatch(/judge path\(s\) in the PR — a person merges these: factory\/lib\/gates\.js/);
+  }
+  // Any non-green entry is red — a failed local status, and a CI run plus a local status when either is not green.
+  const nonGreen = [
+    ["local integrity failure", [{ __typename: "StatusContext", context: "factory/integrity", state: "FAILURE" }]],
+    ["CI green, local failure", [{ __typename: "CheckRun", name: "factory/integrity", conclusion: "SUCCESS" }, { __typename: "StatusContext", context: "factory/integrity", state: "FAILURE" }]],
+    ["CI failure, local green", [{ __typename: "CheckRun", name: "factory/integrity", conclusion: "FAILURE" }, { __typename: "StatusContext", context: "factory/integrity", state: "SUCCESS" }]],
+    ["CI pending, local green", [{ __typename: "CheckRun", name: "factory/integrity", conclusion: "", state: "PENDING" }, { __typename: "StatusContext", context: "factory/integrity", state: "SUCCESS" }]],
+  ];
+  for (const [label, integrity] of nonGreen) {
+    const { v } = await check({ pr: prJson236({ statusCheckRollup: ROLLUP_236(integrity) }) });
+    expect(v.ok, label).toBe(false);
+    expect(v.reasons.join("; "), label).toMatch(/check\(s\) not green: factory\/integrity=/);
+  }
+  // A failed local status in the status list (not only the rollup) is red too.
+  {
+    const gh = operatorGh236({ statuses: { [HEAD_236]: [{ ...LOCAL_OK_236, state: "failure" }, ...FACTORY_STATUSES_236] } });
+    const { v } = await check({ gh });
+    expect(v.ok).toBe(false);
+    expect(v.reasons.join("; ")).toMatch(/factory\/integrity on bbbbbbb is failure/);
+  }
+  // Green everywhere → the door opens, and it says who the actor is.
+  {
+    const { v } = await check({});
+    expect(v).toEqual(expect.objectContaining({ ok: true, reasons: [], actor: "alice" }));
+  }
+  // In the merge stage: a refusal is no mergePr and no merged label, with the door's reasons on stderr.
+  {
+    const log = [];
+    const { deps } = operatorDeps236({ pr: prJson236({ statusCheckRollup: ROLLUP_236([{ __typename: "StatusContext", context: "factory/integrity", state: "FAILURE" }]) }), log });
+    const d = mergeD236(deps);
+    expect(await runMerge236(d, (lines) => d.runRecord(lines))).toBe(2);
+    expect(d.mergePr).not.toHaveBeenCalled();
+    expect(d.transition.mock.calls.map((c) => c[0].to)).toEqual(["factory:needs-human"]);
+    expect(log.join("\n")).toMatch(/local merge refused — .*check\(s\) not green: factory\/integrity=FAILURE/);
+  }
+});
+
+test("test_236_local_merge_refuses_stale_head_status_and_nonhuman_actor", async () => {
+  const check = async (o) => (await operatorDeps236(o).deps.operatorMergeCheck({ pr: 9, sha: HEAD_236 }));
+  const noIntegrityRollup = ROLLUP_236([]);
+  const cases = [
+    ["no factory/integrity on the current head at all", { pr: prJson236({ statusCheckRollup: noIntegrityRollup }), gh: operatorGh236({ statuses: { [HEAD_236]: FACTORY_STATUSES_236 } }) }, /no factory\/integrity on the current head bbbbbbb/],
+    ["a local status only on an older head", { pr: prJson236({ statusCheckRollup: noIntegrityRollup }), gh: operatorGh236({ statuses: { [OLD_HEAD_236]: [LOCAL_OK_236], [HEAD_236]: FACTORY_STATUSES_236 } }) }, /no factory\/integrity on the current head bbbbbbb/],
+    ["posted by a bot", { gh: operatorGh236({ statuses: { [HEAD_236]: [{ ...LOCAL_OK_236, description: "local:ci-bot[bot]", creatorLogin: "ci-bot[bot]" }] } }) }, /posted by @ci-bot\[bot\], which is not a human account \(Bot\)/],
+    ["posted by the factory token", { gh: operatorGh236({ statuses: { [HEAD_236]: [{ ...LOCAL_OK_236, description: "local:ktb-bot", creatorLogin: "ktb-bot" }] } }) }, /posted by @ktb-bot, a factory account/],
+    ["description login does not match its creator", { gh: operatorGh236({ statuses: { [HEAD_236]: [{ ...LOCAL_OK_236, creatorLogin: "mallory" }] } }) }, /names local:alice but was posted by @mallory/],
+    ["not a local: status at all", { gh: operatorGh236({ statuses: { [HEAD_236]: [{ ...LOCAL_OK_236, description: "looks fine" }] } }) }, /is not a local:<login> status/],
+    ["creator's account type unknown", { gh: operatorGh236({ types: {} }) }, /which is not a human account \(unknown\)/],
+    ["the PR head moved past the checked head", { pr: prJson236({ headRefOid: "c".repeat(40) }) }, /PR head moved/],
+  ];
+  for (const [label, o, why] of cases) {
+    const v = await check(o);
+    expect(v.ok, label).toBe(false);
+    expect(v.reasons.join("; "), label).toMatch(why);
+  }
+  // The factory's logins cannot be resolved → it cannot tell a factory-posted status from the operator's → refused.
+  {
+    const { deps } = operatorDeps236({});
+    const d = makeOperatorMergeDeps236({ stage: "merge", env: { [OPERATOR_MERGE_ENV236]: "1" }, run: prViewRun236(prJson236()), repo: "o/r", gh: operatorGh236(), factoryLogins: async () => ({ ok: false, reason: "gh api user: 401" }), getCharter: () => ({}), getEngine: () => true, getDefaultBranch: () => "main", runRecord: () => {}, log: () => {} });
+    const v = await d.operatorMergeCheck({ pr: 9, sha: HEAD_236 });
+    expect(v.ok).toBe(false);
+    expect(v.reasons.join("; ")).toMatch(/factory account\(s\) could not be resolved/);
+    expect((await deps.operatorMergeCheck({ pr: 9, sha: HEAD_236 })).ok).toBe(true);     // the same fixture, resolved, opens
+  }
+  // The actor (the operator's own login) cannot be resolved → refused; nobody merges anonymously.
+  {
+    const gh = { ...operatorGh236(), viewerLogin: vi.fn(async () => { throw new Error("HTTP 401"); }) };
+    const v = await check({ gh });
+    expect(v.ok).toBe(false);
+    expect(v.reasons.join("; ")).toMatch(/operator's login could not be resolved/);
+  }
+  // In the merge stage: a stale-head status never reaches mergePr.
+  {
+    const log = [];
+    const { deps } = operatorDeps236({ pr: prJson236({ statusCheckRollup: noIntegrityRollup }), gh: operatorGh236({ statuses: { [OLD_HEAD_236]: [LOCAL_OK_236], [HEAD_236]: FACTORY_STATUSES_236 } }), log });
+    const d = mergeD236(deps);
+    expect(await runMerge236(d, (lines) => d.runRecord(lines))).toBe(2);
+    expect(d.mergePr).not.toHaveBeenCalled();
+    expect(d.transition.mock.calls.map((c) => c[0].to)).not.toContain("factory:merged");
+    expect(log.join("\n")).toMatch(/no factory\/integrity on the current head/);
+  }
+});

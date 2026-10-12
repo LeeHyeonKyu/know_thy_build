@@ -8,7 +8,8 @@ const STAGES = ["triage", "plan", "implement", "review"];
 /** `--remote`는 merge도 받는다 — 브랜치 보호가 막는 것은 **로컬 실행**이고, dispatch는 CI에서 도는 일이다. */
 const REMOTE_STAGES = [...STAGES, "merge"];
 const USAGE = `usage: factory run <${STAGES.join("|")}|retro> <issue>   # retro takes no issue, optional --force
-       factory run <${REMOTE_STAGES.join("|")}> <issue> --remote   # dispatch the CI workflow, run nothing locally`;
+       factory run <${REMOTE_STAGES.join("|")}> <issue> --remote   # dispatch the CI workflow, run nothing locally
+       factory run merge <issue> --operator   # operator session only: merge locally with your token, no veto wait (ADR-044)`;
 
 /** 기본 spawnInherit — stdio를 그대로 물려준다(사람이 로컬에서 실시간으로 본다). */
 const defaultSpawnInherit = (cmd, args, opts) => spawnSync(cmd, args, { ...opts, stdio: "inherit" }).status ?? 1;
@@ -17,7 +18,8 @@ const defaultSpawnInherit = (cmd, args, opts) => spawnSync(cmd, args, { ...opts,
  * `factory run <stage> <issue>` — CI가 쓰는 바로 그 스크립트(`.factory/bin/run-stage.js`)를 로컬에서 돌린다(R7).
  * `factory run retro [--force]`는 같은 preflight를 지나 `.factory/bin/retro.js`를 돌린다 — retro는 이슈
  * 인자가 없고(라벨 상태 머신 밖의 잡이다) `--force`로 N을 무시한 전체 실행을 강제한다(§8.4, P4-R5).
- * 5단계 preflight: (1) 스테이지 검증 — merge는 CI 전용(브랜치 보호), 그 외 미지원 스테이지는 usage.
+ * 5단계 preflight: (1) 스테이지 검증 — merge는 CI 전용(브랜치 보호)이고, 운영 세션의 `--operator`만 로컬에서 연다(#236,
+ * 러너에서는 거부), 그 외 미지원 스테이지는 usage.
  * (2) factory init 여부. (3) `.factory/` 런타임 의존성(smol-toml) 설치 여부 — 없으면 그 자리에서 npm install.
  * (4) gh 인증 — 두 스크립트 모두 곧바로 gh를 호출하므로 여기서 먼저 실패를 사람이 읽을 수 있게 잡는다.
  * (5) 실제 실행은 별도 프로세스로 stdio를 그대로 물려 스폰한다 — heartbeat/claude -p 등 오래 걸리는
@@ -57,8 +59,15 @@ export async function runCommand({ root, argv = [], io, run = realRun, spawnInhe
   }
 
   // (1) 스테이지 검증
-  if (stage === "merge") { io.err("merge runs only in CI (branch protection) — use `factory run merge <issue> --remote` to dispatch it"); return 1; }
-  if (!isRetro && !STAGES.includes(stage)) { io.err(USAGE); return 1; }
+  // #236 (ADR-044) — 로컬 merge는 **운영 세션의 명시적 선택**(`--operator`)일 때만 돈다. 플래그 없는 `factory run merge <n>`은
+  // 예전 거부 그대로다: 그 문구는 기존 테스트("stage merge → error, runs only in CI")가 고정하고(tests_are_load_bearing), 호출마다
+  // 고르는 opt-in이 운영자 역할의 요구였다(plan dw4의 `factory run merge <issue>` 철자는 이 플래그로 연다; `--merge`는 P-7a).
+  // 러너(`GITHUB_ACTIONS`)에서는 `--operator`도 거부한다 — 스테이지는 운영자가 아니다. run-stage도 같은 조건을 다시 본다.
+  const operator = argv.includes("--operator");
+  if (stage === "merge" && !operator) { io.err("merge runs only in CI (branch protection) — use `factory run merge <issue> --remote` to dispatch it, or, from an operator session (not a CI runner), `factory run merge <issue> --operator` to merge locally with your own token (ADR-044)"); return 1; }
+  if (stage === "merge" && env?.GITHUB_ACTIONS) { io.err("factory run merge --operator refused — GITHUB_ACTIONS is set, so this is a CI runner: a stage is never the operator, and the local merge (no veto wait) belongs to an operator session only. Nothing was merged."); return 1; }
+  if (operator && stage !== "merge") { io.err(USAGE); return 1; }
+  if (!isRetro && !STAGES.includes(stage) && stage !== "merge") { io.err(USAGE); return 1; }   // merge reaches here only with --operator, off a runner
   let issue = 0;
   if (!isRetro) {
     issue = Number(issueArg);
@@ -94,6 +103,7 @@ export async function runCommand({ root, argv = [], io, run = realRun, spawnInhe
     : [script, stage, String(issue)];
   return spawnInherit("node", args, {
     cwd: root,
-    env: { ...env, FACTORY_LOCAL_ENTRY: "1" },
+    // #236 — merge는 운영 표식을 싣는다(run-stage `isOperatorMerge`가 러너가 아님을 다시 확인한다).
+    env: { ...env, FACTORY_LOCAL_ENTRY: "1", ...(stage === "merge" ? { FACTORY_OPERATOR_MERGE: "1" } : {}) },
   });
 }

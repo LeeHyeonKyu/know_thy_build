@@ -102,6 +102,59 @@ export function verifyFactoryStatuses({ sha, statuses, logins }) {
 }
 
 /**
+ * #236 (ADR-044) — **로컬 integrity 상태의 모양과 판정.** Actions가 없는 저장소에서는 운영 세션이 `factory integrity <pr>`
+ * (cli/integrity.js)로 CI 잡과 같은 `integrityCheck` 판정을 `factory/integrity` commit status로 올린다. 설명은 `local:<login>`
+ * 하나다 — CI의 check run(이름이 `factory/integrity`)과 구별되고, 누가 올렸다고 **주장하는지**를 싣는다. 생산자(cli)와 소비자
+ * (run-stage의 로컬 머지 door)가 이 한 쌍을 함께 쓴다 — 모양이 두 벌이면 둘이 갈라지는 날 한쪽이 아무 상태나 받는다.
+ * 이 파일에 있는 이유: 설치본(`.factory/lib/`)에도 미러되는 판정 모듈이고, `.factory/cli/`는 존재하지 않는다.
+ */
+export const LOCAL_INTEGRITY_CONTEXT = "factory/integrity";
+export const localIntegrityDescription = (login) => `local:${login}`;
+/** 설명이 정확히 `local:<login>`이면 그 로그인, 아니면 null(공백·빈 값은 로그인이 아니다). */
+export const localIntegrityLoginOf = (description) => /^local:([^\s:]+)$/.exec(String(description ?? ""))?.[1] ?? null;
+/**
+ * 로컬 머지 경로에서 `factory/integrity`가 이 head에서 GREEN인가. 근거는 둘 중 하나다:
+ *   - CI의 check run(`statusCheckRollup`의 이름 `factory/integrity` 항목) — 전부 GREEN이어야 한다(하나라도 아니면 RED).
+ *   - 이 head sha의 commit status — **모든** 항목이 `local:<login>`이고, success이고, 생성자 로그인이 설명의 로그인과 같고,
+ *     생성자가 팩토리 계정이 아니며, 사람 계정(`User`)이어야 한다. 하나라도 어기면 RED다(가장 최신 것만 보지 않는다).
+ * 둘 다 없으면 RED다 — `operatorMergeVerdict`는 없는 체크를 묻지 않으므로(빈 목록은 통과) 여기서 따로 요구한다(#236 d9).
+ * 조회 대상 sha가 곧 상태가 붙은 커밋이다: 옛 head의 상태는 이 목록에 들어오지 않는다. `userType(login)` → `User`|`Bot`|…|null.
+ */
+export async function localIntegrityVerdict({ sha, statuses, rollup = [], factoryLogins = [], userType }) {
+  const short = String(sha || "").slice(0, 7);
+  const reasons = [];
+  const factory = new Set((factoryLogins || []).filter(Boolean).map((l) => String(l).toLowerCase()));
+  const runs = (Array.isArray(rollup) ? rollup : []).filter((c) => c && !c.context && c.name === LOCAL_INTEGRITY_CONTEXT);
+  const runState = (c) => String(c.conclusion || c.state || "").toUpperCase();
+  const ciGreen = runs.length > 0 && runs.every((c) => runState(c) === "SUCCESS");
+  for (const c of runs) if (runState(c) !== "SUCCESS") reasons.push(`the CI ${LOCAL_INTEGRITY_CONTEXT} check on ${short} is ${runState(c) || "pending"}`);
+  if (!Array.isArray(statuses)) return { ok: false, reasons: [...reasons, `commit statuses for ${short} unreadable — no list returned`] };
+  const posted = statuses.filter((s) => s?.context === LOCAL_INTEGRITY_CONTEXT);
+  for (const s of posted) {
+    const by = String(s.creatorLogin || "").trim();
+    const claimed = localIntegrityLoginOf(s.description);
+    const state = String(s.state || "").toLowerCase();
+    if (!claimed) { reasons.push(`a ${LOCAL_INTEGRITY_CONTEXT} status on ${short} is not a local:<login> status (posted by @${by || "unknown"}: ${JSON.stringify(s.description ?? null)})`); continue; }
+    if (state !== "success") reasons.push(`${LOCAL_INTEGRITY_CONTEXT} on ${short} is ${state || "unknown"} (${s.description})`);
+    if (!by || by.toLowerCase() !== claimed.toLowerCase()) { reasons.push(`${LOCAL_INTEGRITY_CONTEXT} on ${short} names local:${claimed} but was posted by @${by || "unknown"}`); continue; }
+    if (!factory.size) { reasons.push(`the factory account(s) could not be resolved — a factory-posted ${LOCAL_INTEGRITY_CONTEXT} cannot be told from the operator's`); continue; }
+    if (factory.has(by.toLowerCase())) { reasons.push(`${LOCAL_INTEGRITY_CONTEXT} on ${short} was posted by @${by}, a factory account — a local verdict is the operator's, not the factory token's`); continue; }
+    let type = null;
+    try { type = typeof userType === "function" ? await userType(by) : null; } catch { type = null; }
+    if (type !== "User") reasons.push(`${LOCAL_INTEGRITY_CONTEXT} on ${short} was posted by @${by}, which is not a human account (${type || "unknown"})`);
+  }
+  if (!posted.length && !ciGreen) reasons.push(`no ${LOCAL_INTEGRITY_CONTEXT} on the current head ${short} — run \`factory integrity <pr>\` on this head (a status on an older head does not count)`);
+  return { ok: reasons.length === 0, reasons };
+}
+
+/**
+ * #236 (ADR-044) — 로컬 머지(운영 세션, `operatorPresent`)에서 H1b가 거부할 때 덧붙이는 한 줄. 로컬 머지는 H1b를 풀지 않는다.
+ */
+export const LOCAL_MERGE_H1B_NOTE = "a local merge does not relax H1b: factory/review and factory/gates must come from a factory account (the review run's own token), never from the operator's";
+/** #236 — 로컬 머지의 감사 줄(grep 대상). 머지가 돌아온 뒤에만 쓴다. */
+export const localMergeLine = ({ pr, sha, actor }) => `local-merge pr=${pr} sha=${sha || "unknown"} actor=${actor || "unknown"} veto=skipped`;
+
+/**
  * 외부 감사 2026-09-14 H6 — 머지 전이 코멘트가 **사람의 서명이 어디 있었는지**를 한 줄로 말한다.
  * `merge.human_gate`(CHARTER)는 설정이 아니라 선언이다: true면 `factory-merge` 환경의 required
  * reviewer가 이 잡을 PR마다 한 번 멈춰 세웠고, false면 사람은 토큰을 한 번 등록했을 뿐이다.
@@ -1182,7 +1235,8 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
     // 함수를 부른다. 여기서 하던 일과 문구는 한 글자도 바뀌지 않았다(r3 nit 5: "목록이 아니다"
     // 검사는 그 함수 안에 한 벌만 남긴다 — 문장이 같으므로 여기서 먼저 접던 줄을 지웠다).
     const posted = verifyFactoryStatuses({ sha: live, statuses, logins: logins.logins });
-    if (!posted.ok) return await reviewRefused(posted.reason);
+    // #236 — 로컬 머지에서는 거부 사유에 "H1b는 풀리지 않는다"를 덧붙인다(dep이 없으면 오늘의 문구 그대로).
+    if (!posted.ok) return await reviewRefused(d.operatorPresent === true ? `${posted.reason} — ${LOCAL_MERGE_H1B_NOTE}` : posted.reason);
     record([`merge: ${REVIEW_EVIDENCE_STATUSES.join(" + ")} on ${live.slice(0, 7)} posted by the factory`]);
     return null;
   };
@@ -1343,15 +1397,48 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
     record([`merge: auto-merge breaker closed ${when} — ${b.detail || "no detail"}`]);
     return null;
   };
+  /**
+   * #236 (ADR-044, ADR-033 개정) — `d.operatorPresent === true`는 **창의 기다림 하나만** 지운다: 운영 세션이 로컬에서 머지를
+   * 부를 때(run-stage가 러너가 아닐 때만 세운다) 거부권자는 키보드 앞의 그 세션이다. 창 앞뒤의 차단기 두 번, 창 자리의 리뷰
+   * 재검증은 그대로 돈다. 값이 정확히 `true`가 아니면 이 블록은 오늘의 코드 그대로다.
+   */
+  const operator = d.operatorPresent === true;
   if (selfPath) {
     const shut = await breakerGate("before the veto window");
     if (shut !== null) return shut;
-    const stopped = await vetoWindow({ selfPath, files: prot.files });
-    if (stopped !== null) return stopped;
+    if (operator) record([`merge: veto window skipped — operator present (local merge from an operator session, ADR-044); breaker, review re-verification and the operator door still run`]);
+    else {
+      const stopped = await vetoWindow({ selfPath, files: prot.files });
+      if (stopped !== null) return stopped;
+    }
     const refused = await verifyReview();
     if (refused !== null) return refused;
     const shutAfter = await breakerGate("after the veto window");
     if (shutAfter !== null) return shutAfter;
+  }
+
+  /**
+   * #236 (ADR-044) — 로컬 머지의 문. 운영 door와 **같은 판정**(`operatorMergeVerdict` — door 파일·판정 경로 스위치·draft·기본
+   * 브랜치·GREEN 아닌 체크)과 이 head의 `factory/integrity`(`localIntegrityVerdict`)를 run-stage가 `operatorMergeCheck`로 묻는다.
+   * 훅은 node가 부르는 `gh pr merge`를 보지 못하므로 이 자리가 그 자물쇠다. 배선이 없거나 던지면 거부다(fail closed).
+   */
+  let operatorActor = null;
+  if (operator) {
+    let v;
+    if (typeof d.operatorMergeCheck !== "function") v = { ok: false, reasons: ["the operator door check is not wired"] };
+    else {
+      try { v = await d.operatorMergeCheck({ pr, sha }); }
+      catch (e) { v = { ok: false, reasons: [`the operator door check failed: ${e?.message || e}`] }; }
+    }
+    if (!v?.ok) {
+      const reasons = Array.isArray(v?.reasons) && v.reasons.length ? v.reasons : ["the operator door check gave no answer"];
+      const reason = `local merge refused — ${reasons.join("; ")}`;
+      const t = await d.transition({ to: "factory:needs-human", reason });
+      record([`merge: ${reason}`, ...refusal(t)]);
+      return 2;
+    }
+    operatorActor = v.actor ?? null;
+    record([`merge: operator door open — ${v.detail || `actor @${operatorActor || "unknown"}`}`]);
   }
 
   // (6c) ADR-021 — **두 배우 모드에서는 승인이 머지보다 먼저다.** 두 배우 모드의 base 브랜치는
@@ -1450,6 +1537,7 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
   // passed on retry, and the PR merged". Written after mergePr returned, so the mark never sits on a merge that did not happen.
   const rerunMark = mergedOnRerunIds ? ` — ${MERGED_ON_RERUN_TEXT} (first run RED on ${idList(mergedOnRerunIds)}, rerun GREEN)` : "";
   record([`merge: merged ${sha ? sha.slice(0, 7) : "unknown"} via PR #${pr}${rerunMark}`]);
+  if (operator) record([localMergeLine({ pr, sha, actor: operatorActor })]);
 
   // #195 — after a merge, the same evidence once on the tracking issue (the dep updates the runner's existing marked comment
   // instead of posting a second one). Best-effort and bounded like the PR-body step (a hung gh here must not hold the

@@ -53,6 +53,8 @@ export const DOOR_FILES = Object.freeze([
   // door가 판정에 **신뢰하는** 한 홉 — 글롭 매처(넓히면 모든 경로가 비판정이 된다)와 CHARTER 리더(스위치를 읽는다).
   "factory/lib/glob.js", ".factory/lib/glob.js",
   "factory/lib/config.js", ".factory/lib/config.js",
+  // #236 (ADR-044) — 로컬 `factory/integrity`의 생산자. 로컬 머지 door가 그 상태를 GREEN의 근거로 믿는다(설치본 `.factory/cli/`는 없다).
+  "factory/cli/integrity.js",
 ]);
 export const isDoorFile = (p) => DOOR_FILES.includes(String(p ?? "").replace(/^\.\//, ""));
 
