@@ -18,27 +18,21 @@
 
 | metric | this window | cumulative |
 | --- | --- | --- |
-| merged | 1 | 22 |
-| review rounds avg | 1 | 1.68 |
-| rounds/issue (plan/impl/review) | 2 / 2 / 1 | 1.09 / 2.1 / 1.68 |
+| merged | 0 | 22 |
+| review rounds avg | 0 | 1.68 |
+| rounds/issue (plan/impl/review) | 0 / 0 / 0 | 1.09 / 2.1 / 1.68 |
 | escaped defects | 0 | 26 |
-| revert rate | 0.00 (0/1) | 0.00 (0/22) |
-| needs-human | 4 | 90 |
+| revert rate | 없음 | 0.00 (0/22) |
+| needs-human | 1 | 90 |
 | rejects by role | 없음 | spec-conformance 10, qa 4, correctness 13, architecture 7, security 5 |
 | reviewer overlap | 없음 | 0.49 (21/43, runs 52) |
 | unique findings by role | 없음 | spec-conformance 4, qa 4, correctness 6, architecture 4, security 4 |
-| qa na ratio | 0.33 (4/12 claims, na-heavy 0/2 approvals) | 0.23 (65/280 claims, na-heavy 9/40 approvals) |
-| cost (usd) | 17.39 | 1363.53 |
-| tokens | input 656715 / output 54134 | input 33362194 / output 2748287 |
-| retro cost (usd) | 1.24 | 14.14 |
-| retro tokens | input 4 / output 2098 | input 42 / output 35679 |
+| qa na ratio | 0.80 (8/10 claims, na-heavy 1/1 approvals) | 0.23 (65/280 claims, na-heavy 9/40 approvals) |
+| cost (usd) | 9.79 | 1363.53 |
+| tokens | input 294005 / output 25472 | input 33362194 / output 2748287 |
+| retro cost (usd) | 0.00 | 14.14 |
+| retro tokens | input 0 / output 0 | input 42 / output 35679 |
 | full retros | — | 12 |
-
-### Rounds per issue (this window)
-
-| issue | plan | implement | review | escaped |
-| --- | --- | --- | --- | --- |
-| #254 | 2 | 2 | 1 | 0 |
 
 ### Phase-2 gate baseline (this session)
 
@@ -2239,8 +2233,8 @@
       },
       {
         "issue": 257,
-        "reason": "protected paths changed — human merge required: .factory/bin/run-stage.js, .factory/lib/prove-test.js, factory/bin/run-stage.js, factory/lib/prove-test.js, factory/test/prove-test.test.js, factory/test/run-stage.test.js (see PR #264)",
-        "at": "2026-10-11T09:07:54Z"
+        "reason": "agent role sections edited outside Examples/Perspectives — human merge required: .factory/bin/run-stage.js, .factory/lib/prove-test.js (see PR #264)",
+        "at": "2026-10-12T01:13:18Z"
       },
       {
         "issue": 254,
@@ -2330,47 +2324,33 @@
     ]
   },
   "stats": {
-    "merged": 1,
-    "review_rounds_avg": 1,
-    "plan_rounds_avg": 2,
-    "implement_rounds_avg": 2,
-    "rounds_per_issue": [
-      {
-        "issue": 254,
-        "plan": 2,
-        "implement": 2,
-        "review": 1
-      }
-    ],
+    "merged": 0,
+    "review_rounds_avg": 0,
+    "plan_rounds_avg": 0,
+    "implement_rounds_avg": 0,
+    "rounds_per_issue": [],
     "escaped_defects": 0,
     "escaped_defects_detail": [],
     "reverts": 0,
     "reverted_issues": [],
-    "revert_rate": 0,
+    "revert_rate": null,
     "rejects_by_role": {},
-    "review_runs": 2,
+    "review_runs": 0,
     "findings_total": 0,
     "overlapping_findings": 0,
     "unique_findings_by_role": {},
     "overlap_ratio": 0,
-    "needs_human": 4,
-    "qa_approvals": 2,
-    "qa_claims_total": 8,
-    "qa_na_total": 4,
-    "qa_na_ratio": 0.33,
-    "qa_na_heavy_approvals": 0,
+    "needs_human": 1,
+    "qa_approvals": 1,
+    "qa_claims_total": 2,
+    "qa_na_total": 8,
+    "qa_na_ratio": 0.8,
+    "qa_na_heavy_approvals": 1,
     "usage": {
-      "cost_usd": 17.386858,
+      "cost_usd": 9.786899,
       "tokens": {
-        "input": 656715,
-        "output": 54134
-      }
-    },
-    "retro_usage": {
-      "cost_usd": 1.242614,
-      "tokens": {
-        "input": 4,
-        "output": 2098
+        "input": 294005,
+        "output": 25472
       }
     }
   },
