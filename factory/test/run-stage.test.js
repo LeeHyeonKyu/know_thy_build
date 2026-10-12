@@ -11406,3 +11406,95 @@ test("test_236_local_merge_runs_merge_stage_with_the_operator_token_and_no_veto_
     expect(gh.mergePr).toHaveBeenCalledTimes(1);
   }
 });
+
+// ── #236 skeptic self-critique (round 3) — the factory account on a laptop, with NO injected factoryLogins anywhere: H1b gets main's
+// own resolver (`resolveFactoryLogins({ gh, env })`, no comments) and the door gets main's wiring (`issue`, no fake). The run's
+// heartbeat is posted by startHeartbeat through the operator's own token into the very comments the door reads — and so is an
+// earlier local stage's heartbeat. Only a runner-written heartbeat (runner gha-<id>) names the factory account. ──
+import { resolveFactoryLogins as resolveFactoryLogins236 } from "../lib/gh.js";
+import { startHeartbeat as startHeartbeat236 } from "../lib/heartbeat.js";
+
+test("test_236_local_merge_runs_merge_stage_with_the_operator_token_and_no_veto_wait — the operator's own heartbeats never make the operator a factory account", async () => {
+  const charter = { self_change: { auto_merge_non_judge: true, auto_merge_judge: false, operator_merge_judge: false, veto_minutes: 15 }, never_automate: [] };
+  const runnerBeat = { body: heartbeatBody195({ issue: 7, stage: "review", runnerId: "gha-501", started: "x", last: "x" }), createdAt: "2026-10-12T09:00:00Z", author: "ktb-bot", authorType: "User" };
+  const earlierLocalBeat = (who) => ({ body: heartbeatBody195({ issue: 7, stage: "implement", runnerId: "local/laptop", started: "x", last: "x" }), createdAt: "2026-10-12T08:00:00Z", author: who, authorType: "User" });
+  const ghOf = ({ viewer, comments }) => {
+    const store = [LOCAL_OK_236, ...FACTORY_STATUSES_236];
+    return {
+      comments: vi.fn(async () => comments.map((c) => ({ ...c }))),
+      // The process token is the viewer's: whatever this run comments (its heartbeat) is authored by the viewer.
+      comment: vi.fn(async (_issue, body) => { comments.push({ body, createdAt: "2026-10-12T10:00:00Z", author: viewer, authorType: "User" }); return `https://github.com/o/r/issues/7#issuecomment-${comments.length}`; }),
+      patchComment: vi.fn(async () => {}),
+      viewerLogin: vi.fn(async () => viewer),
+      userType: vi.fn(async (l) => ({ alice: "User", "ktb-bot": "User" })[l] ?? null),
+      commitStatuses: vi.fn(async () => store.map((s) => ({ ...s }))),
+      setStatus: vi.fn(async ({ context, state, description }) => { store.unshift({ context, state, description, creatorLogin: viewer }); }),
+      mergePr: vi.fn(async () => {}),
+      labelEvents: vi.fn(async () => []),
+      issueLabels: vi.fn(async () => []),
+    };
+  };
+  // main()'s composition, field for field where it decides who the factory is: no factoryLogins fake on either side.
+  const compose = ({ gh, env, sink, log }) => {
+    const d = mergeHappyDeps({
+      checkoutHead: vi.fn(async () => ({ ok: true, sha: HEAD_236, pr: 9 })),
+      protectedPaths: async () => ({ ok: true, files: ["factory/lib/status.js", "docs/factory/ops/runbook.md"] }),
+      heartbeat: () => startHeartbeat236({ gh, issue: 7, stage: "merge", runnerId: "local/laptop" }),
+      runRecord: (l) => sink.push(...l),
+      transition: vi.fn(async ({ to }) => ({ ok: true, to })),
+      factoryLogins: () => resolveFactoryLogins236({ gh, env }),
+      commitStatuses: (sha) => gh.commitStatuses(sha),
+      reportStatus: (s) => gh.setStatus(s),
+      breaker: vi.fn(async () => ({ ok: true, open: false, since: null, reason: null, detail: "closed" })),
+      persistSelfMerge: vi.fn(async () => ({ ok: true })),
+      sleep: vi.fn(async () => {}),
+    });
+    wireOperatorMerge236(d, {
+      stage: "merge", env, run: prViewRun236(prJson236()), repo: "o/r", gh, issue: 7,
+      getCharter: () => charter, getEngine: () => true, getDefaultBranch: () => "main", log: (l) => log.push(l),
+    });
+    Object.defineProperties(d, Object.getOwnPropertyDescriptors(makeMergeSelfChangeDeps({ gh, issue: 7, getCharter: () => charter, getEngine: () => true, env })));
+    return d;
+  };
+  const env = { [OPERATOR_MERGE_ENV236]: "1" };   // a laptop: no GITHUB_ACTIONS, no FACTORY_BOT_LOGIN
+
+  // (1) alice merges: her earlier local stage's heartbeat and this run's heartbeat (both authored by alice) sit on the issue next to
+  // the runner's. One run goes approved → merged + merged label, and both H1b and the door saw ktb-bot as the factory, not alice.
+  {
+    const comments = [runnerBeat, earlierLocalBeat("alice")];
+    const gh = ghOf({ viewer: "alice", comments });
+    const sink = [], log = [];
+    const d = compose({ gh, env, sink, log });
+    const code = await runStage({ stage: "merge", issue: 7, deps: d, runnerId: "local/laptop" });
+    expect(comments.filter((c) => c.author === "alice" && /factory-heartbeat issue=7/.test(c.body) && /stage: merge/.test(c.body))).toHaveLength(1);
+    expect(gh.comments).toHaveBeenCalledWith(7);
+    expect([...sink, ...log].filter((l) => /factory account|could not be resolved/.test(l))).toEqual([]);
+    expect(code).toBe(0);
+    expect(gh.mergePr).toHaveBeenCalledTimes(1);
+    expect(d.transition.mock.calls.map((c) => c[0].to)).toContain("factory:merged");
+    expect(sink).toContain(`local-merge pr=9 sha=${HEAD_236} actor=alice veto=skipped`);
+  }
+  // (2) The factory token run off a runner (env flipped) is still the factory: its runner-written heartbeat names it, its own local
+  // heartbeat does not hide that, and nothing merges.
+  {
+    const comments = [runnerBeat];
+    const gh = ghOf({ viewer: "ktb-bot", comments });
+    const sink = [], log = [];
+    const d = compose({ gh, env, sink, log });
+    expect(await runStage({ stage: "merge", issue: 7, deps: d, runnerId: "local/laptop" })).not.toBe(0);
+    expect(gh.mergePr).not.toHaveBeenCalled();
+    expect(d.transition.mock.calls.map((c) => c[0].to)).not.toContain("factory:merged");
+    expect(log.join("\n")).toMatch(/the merging actor @ktb-bot is a factory account/);
+  }
+  // (3) Only local heartbeats on the issue (no runner ever ran it, no FACTORY_BOT_LOGIN): the factory account is unknown → refused,
+  // fail closed, and still nothing merges.
+  {
+    const comments = [earlierLocalBeat("alice")];
+    const gh = ghOf({ viewer: "alice", comments });
+    const sink = [], log = [];
+    const d = compose({ gh, env, sink, log });
+    expect(await runStage({ stage: "merge", issue: 7, deps: d, runnerId: "local/laptop" })).not.toBe(0);
+    expect(gh.mergePr).not.toHaveBeenCalled();
+    expect(sink.join("\n")).toMatch(/the factory's own account could not be resolved/);
+  }
+});
