@@ -4799,3 +4799,40 @@ blocked·exit 2·상한이 적힌 기록, 구성원 그대로), `test_249_blocke
 **미룬 것(이 ADR이 짓지 않는 것)**: 빌더 브리프를 "충돌만 푼다"로 바꾸고 self-critique·skeptic을 건너뛰는 것, 리뷰를 승인 head → 현재 head의
 diff로 좁히는 것은 `templates/factory/**`에 있고 #212의 must_not이다 — 그래서 이슈의 Why("사람은 머지 한 번")는 이 변경으로 충족되지 않는다.
 워크플로가 `loaded.conflict_only`를 읽기 전까지 대부분의 충돌 라운드는 self-critique가 코드를 더해 RED로, 곧 오늘의 경로로 간다.
+
+## ADR-042 서명 반박은 done_when 덮임을 요구하지 않는다 — 1.4.43 후반의 반전 · skeptic 상한 초과분 절단 · review-r1 줄 — 2026-10-12 (#239, 재착륙 #289; 허점 원장 M-2·M-7·M-9)
+
+**반전(1.4.43 후반을 대체한다)**: 1.4.43은 사인오프에서 살아남은 반대를 `signoff-<role>`·`medium`으로 주입해 "수리 턴이 `covers`로 덮고, 못 덮으면
+사람에게 간다"로 정했다. 원장 §4(M-7)가 그 결과를 재현했다: 덮을 수 없는 항목을 거부 조건으로 두면 "미해소인 채 진행"은 문장으로만 남고 실제로는
+`dissent without done_when` → 수리 턴 → 사람이다. #239부터 계획 검증기(`factory/lib/verify-stage.js` `validatePlanHandoff`)는 id가 정확히
+`signoff-<그 항목의 role>`(대소문자 무시, role 필수)인 dissent에 덮임을 요구하지 않는다(severity 무관). 그 사람 에스컬레이션을 **대신하는 것**은 셋이다:
+(1) run 기록 줄 `plan: unresolved sign-off objection from <role>: <objection 앞 120자>`, (2) 계획 핸드오프의 `signoff_objections[]`(`{id, role, text}`),
+(3) `dissent_log`에 그대로 남은 항목 — 계획 코멘트 본문의 **dissent** 블록에 렌더된다. 보통의 medium dissent와 role이 맞지 않는 `signoff-*`는 오늘처럼
+거부된다. 핀: `test_239_signoff_objections_do_not_require_a_covering_done_when`, `test_239_plan_notes_land_in_the_run_record_and_handoff`.
+
+**skeptic 상한(M-9)**: `done_when`이 `max_done_when`을 넘고 계획자 자신의 항목(`source: "skeptic"` 표시가 없는 것)이 상한 안이면, 넘친 skeptic 표시 항목(뒤쪽부터)을
+덮임 검사 **전에** 잘라 통과시키고 `plan: skeptic items beyond max_done_when dropped: <ids>`를 기록한다. 잘린 핸드오프가 그대로 게시된다. 표시 없는 초과는
+오늘처럼 거부한다(이슈의 "없으면 뒤쪽 항목"은 같은 이슈의 "계획자 7은 거부"와 모순이라 만들지 않았다). 잘린 항목만이 덮던 dissent는 이름으로 거부된다.
+핀: `test_239_skeptic_items_beyond_max_done_when_are_dropped_not_rejected`.
+
+**R1 판정(M-2)**: review 스테이지는 핸드오프의 `r1_verdicts: [{role, verdict}]`를 읽어 `review-r1: <role>=<verdict>,… r2_flipped=<n>`을 기록한다(없으면
+`review-r1: (not carried by this workflow)`). 이슈 문구와 달리 `review-evidence:` 줄은 **바꾸지 않는다** — 머지 게이트가 끝 고정 정규식(`run-record.js`)으로
+읽는 출처 줄이라 토큰 하나가 모든 승인 PR을 사람에게 보낸다. 핀: `test_239_review_record_carries_r1_verdicts_and_flip_count`,
+`test_239_review_evidence_line_still_parses_after_flip_count`.
+
+**이슈 문구와 의도적으로 다른 점(세 가지)**: (1) `review-evidence:` 줄에 `flipped=`를 붙이지 않는다 — 위 이유, 뒤집힌 수는 `review-r1:` 줄의
+`r2_flipped=`로만 읽힌다. (2) 이슈가 적은 `rounds[]` 필드는 **읽지 않는다** — 입력 이름은 `r1_verdicts`다(R1 판정만 필요하고, `rounds`는 plan 핸드오프에서
+이미 정수 라운드 수라는 다른 뜻으로 쓰인다). (3) 표시 없는 초과 항목의 위치 기반 절단(이슈의 "없으면 뒤쪽 항목")은 만들지 않는다 — 위 M-9 단락.
+
+**템플릿 PR이 내야 할 필드 이름(교차 PR 계약)**: plan 워크플로는 skeptic이 더한 done_when에 `source: "skeptic"`을, review 워크플로는 R2 전의 판정을
+`r1_verdicts: [{role, verdict}]`로 싣는다. 다른 이름(예: 이슈의 `rounds[]`)으로 내면 이 러너는 그것을 읽지 않는다 — M-9는 표시 없는 초과로 거부되고,
+`review-r1:`은 자리표시 줄로 남는다. 기록에 들어가는 에이전트 문자열(role·id·verdict)은 한 토큰으로, 반박 본문은 한 줄로 바뀌어 `review-evidence:`/
+`stage-settled:` 줄을 위조하지 못한다 — 핀: `test_239_agent_text_cannot_forge_a_record_line`.
+
+**접기는 한 곳에 있다(#289, arch1)**: 그 한 토큰 접기는 `factory/lib/verify-stage.js`의 export `recordToken` 하나다. `run-stage.js`의 `reviewR1Line`은
+기존 `../lib/verify-stage.js` import로 그것을 가져다 쓰고 자기 복사본을 두지 않는다 — 두 생산자의 토큰은 바이트 단위로 같다. 핀:
+`test_239_record_line_fold_is_single_sourced`(동작: 적대적 입력에서 세 기록 줄의 토큰이 `recordToken(input)`과 같다, 구조: import와 복사본 부재).
+
+**남는 것**: 템플릿이 `source: "skeptic"`과 `r1_verdicts`를 내기 전까지 M-9와 M-2의 채워진 경로는 운영에서 발화하지 않는다(템플릿 짝은 운영 세션 PR —
+`templates/**`는 이 이슈의 must_not). 그때까지 `templates/factory/claude/workflows/factory-plan.js:496-500`의 주석(과 `.claude` 사본)은 "못 덮으면 사람에게
+간다"고 말하는 **낡은 문장**이다. `{id:'signoff-x', role:'x'}`를 지어내는 합성자는 덮임 규칙을 피할 수 있고 그 흔적은 기록 줄 하나다(plan open_risks).
