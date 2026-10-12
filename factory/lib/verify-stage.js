@@ -496,6 +496,25 @@ export function neverAutomateHits(paths, globs) {
 }
 
 /**
+ * #287 — triage의 impact_paths는 에이전트의 자유 문자열이다. tier 올림의 대조(판정 경로·`[load_bearing].paths`)에 쓰기 전에
+ * 저장소 상대 경로 모양으로 맞춘다: 앞뒤 공백, 감싼 마크다운 백틱, 앞의 `./`(반복 포함)를 벗긴다. `./factory/lib/context.js`나
+ * `` `factory/lib/context.js` ``가 같은 경로인데 대조에서 빠지면 PR #263의 막다른 길이 그대로 돌아온다. 빈 문자열은 버린다.
+ * 판정용일 뿐이다 — 게시되는 `impact_paths`는 에이전트가 쓴 그대로 둔다.
+ */
+export function impactPathKeys(paths) {
+  const keys = [];
+  for (const p of Array.isArray(paths) ? paths : []) {
+    if (typeof p !== "string") continue;
+    let k = p.trim();
+    const quoted = /^`+([^`]*)`+$/.exec(k);
+    if (quoted) k = quoted[1].trim();
+    while (k.startsWith("./")) k = k.slice(2).replace(/^\/+/, "");
+    if (k) keys.push(k);
+  }
+  return keys;
+}
+
+/**
  * #287 — merge가 "판정 경로"라고 부르는 impact path들. merge(merge-stage.js의 자기 변경 경로)는 diff를 `protectedPaths`
  * (integrity.js `isProtectedEntry` — 살아 있는 additive_only 파일은 면제)로 거른 뒤 `classifyProtected(..., {engine:true}).judge`로
  * 판정 경로를 고르고, 그런 PR은 load-bearing 로스터의 만장일치 리뷰 없이는 팩토리가 머지하지 않는다. triage가 그 경로를 standard로
@@ -505,7 +524,7 @@ export function neverAutomateHits(paths, globs) {
  */
 export function judgePathHits(paths, { engine = false, protectedCfg = null } = {}) {
   if (engine !== true || !protectedCfg || typeof protectedCfg !== "object") return [];
-  const live = [...new Set((Array.isArray(paths) ? paths : []).filter((p) => typeof p === "string" && isProtectedLivePath(p, protectedCfg)))];
+  const live = [...new Set(impactPathKeys(paths).filter((p) => isProtectedLivePath(p, protectedCfg)))];
   return classifyProtected(live, { engine: true }).judge.map((path) => ({ path, source: "judge-path" }));
 }
 
@@ -609,7 +628,7 @@ export function verifyStage({ stage, out, transcriptText, agentsLog, roster = []
     delete data.load_bearing_hit;
     delete data.tier_declared;
     delete data.judge_path_hit;
-    const lbHits = neverAutomateHits(data.impact_paths, loadBearing);
+    const lbHits = neverAutomateHits(impactPathKeys(data.impact_paths), loadBearing);
     const jpHits = judgePathHits(data.impact_paths, { engine, protectedCfg });
     if ((lbHits.length || jpHits.length) && data.tier !== "load-bearing") {
       data.tier_declared = data.tier;
