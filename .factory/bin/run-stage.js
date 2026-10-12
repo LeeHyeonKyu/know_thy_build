@@ -50,7 +50,7 @@ import { readBreaker, makeRecordsUploadGuard, makeMergeAbortVouch, persistSelfMe
 import { isEngineCheckout } from "../lib/non-judge-paths.js";
 import { HARNESS_OPENS } from "../lib/protected-paths.js";
 import { claimCountsLabel, evidenceFor, probeEvidenceDir, qaDirRel, touchesDataPaths } from "../lib/qa-evidence.js";
-import { runSelfGate, summarizeFindings, advisoryFindings, harnessFinding, selfGateDetailLine, scopeSkipReason, conflictScopeGreen } from "../lib/self-gate.js";
+import { runSelfGate, summarizeFindings, advisoryFindings, harnessFinding, selfGateDetailLine, scopeSkipReason, conflictScopeGreen, REWORK_SCOPE_MIN_ROUND } from "../lib/self-gate.js";
 import { loadInstallManifest } from "../lib/feedback/install-manifest.js";
 
 /** 스테이지 → 성공 시 목적 상태, 요구 handoff를 만드는 직전 스테이지 */
@@ -2565,12 +2565,21 @@ export async function restartBriefInput({ run, cwd, brief, added = [], error = n
   if (error) return { paths, newFiles: [], error };
   const head = typeof brief?.head === "string" && /^[0-9a-f]{7,40}$/i.test(brief.head) ? brief.head : null;
   if (!head) return { paths, newFiles: [], error: `the restart brief names no readable head (${brief?.head ?? "none"})` };
+  const n = await newSinceHead({ run, cwd, head, added, label: "restart head" });
+  return n.error ? { paths, newFiles: [], error: n.error } : { paths, newFiles: n.newFiles };
+}
+
+/**
+ * The paths in `added` (added vs. merge-base) that are absent from `head`'s tree — new since that head. One reader for #174 (the
+ * restart head) and #199 (the reviewed head). A failed `ls-tree` is `{ error }` naming `label` and the short head.
+ */
+async function newSinceHead({ run, cwd, head, added = [], label }) {
   let r;
   try { r = await run("git", ["ls-tree", "-r", "-z", "--name-only", head], { cwd }); }
   catch (e) { r = { code: 1, stderr: e?.message || String(e) }; }
-  if (r?.code !== 0) return { paths, newFiles: [], error: `restart head ${head.slice(0, 7)} cannot be read — ${String(r?.stderr || "").trim().split("\n")[0] || `exit ${r?.code}`}` };
+  if (r?.code !== 0) return { error: `${label} ${head.slice(0, 7)} cannot be read — ${String(r?.stderr || "").trim().split("\n")[0] || `exit ${r?.code}`}` };
   const tree = new Set(String(r.stdout || "").split("\0").filter(Boolean));
-  return { paths, newFiles: (Array.isArray(added) ? added : []).filter((f) => !tree.has(f)) };
+  return { newFiles: (Array.isArray(added) ? added : []).filter((f) => !tree.has(f)) };
 }
 
 /**
@@ -2651,23 +2660,28 @@ export function addedLinesByPath(text) {
   return out;
 }
 
+/** One bounded `git diff <SCOPE_GIT> <args> <base>...HEAD` read — `{ out }` or `{ error }` (failed, thrown, or over `maxBytes`). Shared by
+ * #200 `scopeInput` and #199 `reworkScopeInput`, so both judge the same added lines under the same byte bound. */
+const SCOPE_ADDED_LINES = ["-U0", "--no-textconv", "--src-prefix=a/", "--dst-prefix=b/"];
+async function scopeDiffRead({ run, cwd, base, args, maxBytes }) {
+  let r;
+  try { r = await run("git", [...SCOPE_GIT, ...args, `${base}...HEAD`], { cwd }); }
+  catch (e) { return { error: `git diff failed — ${e?.message || e}` }; }
+  if (r?.code !== 0) return { error: `git diff failed — ${String(r?.stderr || "").trim().split("\n")[0] || `exit ${r?.code}`}` };
+  const out = String(r.stdout || "");
+  const size = Buffer.byteLength(out, "utf8");
+  if (size > maxBytes) return { error: `the diff output (${size} bytes) exceeds ${maxBytes} bytes — not judged rather than truncated` };
+  return { out };
+}
+
 export async function scopeInput({ run, cwd, base, issue, plan, maxBytes = SCOPE_DIFF_MAX_BYTES }) {
   const filesExpected = plan?.files_expected;
   const input = { issue, plan: Boolean(plan), filesExpected };
   if (scopeSkipReason(input)) return input;                         // nothing to judge → no git read at all
-  const read = async (args) => {
-    let r;
-    try { r = await run("git", [...SCOPE_GIT, ...args, `${base}...HEAD`], { cwd }); }
-    catch (e) { return { error: `git diff failed — ${e?.message || e}` }; }
-    if (r?.code !== 0) return { error: `git diff failed — ${String(r?.stderr || "").trim().split("\n")[0] || `exit ${r?.code}`}` };
-    const out = String(r.stdout || "");
-    const size = Buffer.byteLength(out, "utf8");
-    if (size > maxBytes) return { error: `the diff output (${size} bytes) exceeds ${maxBytes} bytes — not judged rather than truncated` };
-    return { out };
-  };
+  const read = (args) => scopeDiffRead({ run, cwd, base, args, maxBytes });
   const names = await read(["--name-status", "-z"]);
   if (names.error) return { ...input, error: names.error };
-  const lines = await read(["-U0", "--no-textconv", "--src-prefix=a/", "--dst-prefix=b/"]);
+  const lines = await read(SCOPE_ADDED_LINES);
   if (lines.error) return { ...input, error: lines.error };
   const parts = names.out.split("\0");
   const added = addedLinesByPath(lines.out);
@@ -2677,6 +2691,73 @@ export async function scopeInput({ run, cwd, base, issue, plan, maxBytes = SCOPE
     if (status && path) changes.push({ path, status, added: added.get(path) ?? [] });
   }
   return { ...input, changes };
+}
+
+/**
+ * ── #199 (ADR-037 §5) — the self-gate `rework-scope` input, measured HERE (`runSelfGate` → `judgeReworkScope` only judges) ──────────
+ *
+ * Runs only when the engine's rework counter (`reviewRounds`, the K counter — never handoff or agent text) reads ≥ REWORK_SCOPE_MIN_ROUND;
+ * below that, or with no counter wired, it returns null and the self-gate result is exactly what it was before this check. "New" is
+ * new since the head the last review judged (`handoffs.review.head_sha`): round-1 work is not new in round 2, and a file that came in
+ * through the base merge is not in `<merge-base>...HEAD` at all. Reuses `addedPathsNoRenames`, the restart check's tree read
+ * (`newSinceHead`), the scope check's bounded `-U0` read and `addedLinesByPath`, and `wherePaths` — no second parser.
+ * Anything it cannot read is `{ round?, error }`: the gate skips with that reason in the record (fail open, never RED).
+ */
+const REWORK_EXPORT_RE = /^export (?:const|function|class|async function) (\w+)/;
+export async function reworkScopeInput({ run, cwd, base, ctx, reviewRounds, testPaths = [], maxBytes = SCOPE_DIFF_MAX_BYTES }) {
+  let round;
+  try { round = await reviewRounds(); }
+  catch (e) { return { error: `the rework round count cannot be read — ${e?.message || e}` }; }
+  if (!(Number.isInteger(round) && round >= 0)) return { error: `the rework round count cannot be read (${String(round)})` };
+  if (round < REWORK_SCOPE_MIN_ROUND) return null;
+  const fail = (error) => ({ round, error });
+  const review = ctx?.handoffs?.review;
+  if (!review || typeof review !== "object") return fail("no review handoff in this run's context, so the previous review's must_fix where is unknown");
+  const head = typeof review.head_sha === "string" && SHA40.test(review.head_sha) ? review.head_sha : null;
+  if (!head) return fail(`the review handoff names no readable head_sha (${review.head_sha ?? "none"})`);
+  const mustFix = Array.isArray(review.must_fix) ? review.must_fix
+    : (Array.isArray(review.verdicts) ? review.verdicts : []).flatMap((v) => (Array.isArray(v?.must_fix) ? v.must_fix : []));
+  const where = [...new Set(mustFix.flatMap((m) => wherePaths(m?.where)))];
+  if (!where.length) return fail("no must_fix where in the review handoff names a file path");
+  const plan = ctx?.handoffs?.plan;
+  if (!(plan && Array.isArray(plan.done_when))) return fail("no plan handoff with done_when in this run's context, so the plan's test ids are unknown");
+  const issue = Number(ctx?.issue?.number);
+  if (!(Number.isInteger(issue) && issue > 0)) return fail("this run carries no issue number to read test ids by");
+  const planIds = new Set(plan.done_when.flatMap((d) => [d?.verify, d?.check?.ref]).filter((x) => typeof x === "string" && x));
+  const added = await addedPathsNoRenames({ run, cwd, base });
+  if (added.error) return fail(added.error);
+  const fresh = await newSinceHead({ run, cwd, head, added: added.added, label: "reviewed head" });
+  if (fresh.error) return fail(fresh.error);
+  const diff = await scopeDiffRead({ run, cwd, base, args: SCOPE_ADDED_LINES, maxBytes });
+  if (diff.error) return fail(diff.error);
+  const newFiles = new Set(fresh.newFiles);
+  const tests = new Set((Array.isArray(testPaths) ? testPaths : []).filter((p) => typeof p === "string"));
+  const idRe = new RegExp(`(?<![A-Za-z0-9_])test_${issue}_[A-Za-z0-9_]+`, "g");
+  const idsIn = (text) => new Set(String(text).match(idRe) ?? []);
+  const exportsIn = (lines) => new Set(lines.map((l) => REWORK_EXPORT_RE.exec(l)?.[1]).filter(Boolean));
+  const newExports = [], newTestIds = [];
+  for (const [path, lines] of addedLinesByPath(diff.out)) {
+    // The `where` exemption lives in ONE place, the judge (`judgeReworkScope`) — not here too. A new file is judged as a file:
+    // its exports are never compared (the `newFiles` branch below carries only its ids).
+    const exp = exportsIn(lines);
+    const ids = tests.has(path) ? [...idsIn(lines.join("\n"))].filter((id) => !planIds.has(id)) : [];
+    if (!exp.size && !ids.length) continue;
+    if (newFiles.has(path)) { for (const id of ids) newTestIds.push({ path, id }); continue; }
+    let r;
+    try { r = await run("git", ["show", `${head}:${path}`], { cwd }); }
+    catch (e) { r = { code: 1, stderr: e?.message || String(e) }; }
+    if (r?.code !== 0) return fail(`reviewed head ${head.slice(0, 7)} cannot be read at ${path} — ${String(r?.stderr || "").trim().split("\n")[0] || `exit ${r?.code}`}`);
+    const old = String(r.stdout ?? "");
+    const oldExports = exportsIn(old.split("\n"));
+    const oldIds = idsIn(old);
+    for (const name of exp) if (!oldExports.has(name)) newExports.push({ path, name });
+    for (const id of ids) if (!oldIds.has(id)) newTestIds.push({ path, id });
+  }
+  const brief = ctx?.loaded?.k_restart_brief;
+  return {
+    round, where, newFiles: [...newFiles], newExports, newTestIds,
+    restartPaths: brief ? (Array.isArray(brief.paths) ? brief.paths : []) : null,
+  };
 }
 
 /**
@@ -2879,7 +2960,7 @@ export function resolvedInsideConflicts(auto, resolved) {
  * The implement self-gate dep (production = what the test drives). Inputs are what main() already holds; `getCtx` returns
  * the context built for this run (`ctxCache`). `run-stage` computes every list here (git), `runSelfGate` only judges them.
  */
-export function makeSelfGateDep({ root, harness, run, mergeBase, getCtx, scopeMaxBytes = SCOPE_DIFF_MAX_BYTES }) {
+export function makeSelfGateDep({ root, harness, run, mergeBase, getCtx, scopeMaxBytes = SCOPE_DIFF_MAX_BYTES, reviewRounds = null }) {
   return async ({ gates, mirrorSha = null, mergedBase = null, runnerResolved = [], runnerMirror = [] }) => {
     // 2026-10-03 실측(#157·#170·#178 implement 세 런이 게이트 GREEN 직후 "Cannot read properties of undefined (reading 'test')"로 죽음):
     // #174가 이 dep을 팩토리 함수로 빼면서 `harness`를 **값으로** 받았는데, main()의 `harness`는 deps 객체가 만들어진 뒤 `charterReady`에서야
@@ -2907,6 +2988,11 @@ export function makeSelfGateDep({ root, harness, run, mergeBase, getCtx, scopeMa
     const conflictScope = loaded?.conflict_only === true
       ? await conflictScopeInput({ run, cwd: root, approvedHead: loaded.approved_head, mergedBase, paths: loaded.merge_conflicts, runnerResolved, runnerMirror, mirrorSha })
       : null;
+    // #199 — rework round ≥ 2 is subtract-only: measured HERE from the engine's rework counter (the K counter main() hands in as
+    // `reviewRounds`); no counter → not wired (null), exactly as before.
+    const reworkScope = typeof reviewRounds === "function"
+      ? await reworkScopeInput({ run, cwd: root, base, ctx, reviewRounds, testPaths: diff.tests, maxBytes: scopeMaxBytes })
+      : null;
     return runSelfGate({
       root, harness: h, gates, run,
       // NEW tests only (should_fix 2) — the mutation check's dual is "a new test fails when its
@@ -2915,6 +3001,7 @@ export function makeSelfGateDep({ root, harness, run, mergeBase, getCtx, scopeMa
       ...(restartBrief ? { restartBrief } : {}),
       scope,
       ...(conflictScope ? { conflictScope } : {}),
+      ...(reworkScope ? { reworkScope } : {}),
     });
   };
 }
@@ -4588,7 +4675,8 @@ async function main() {
      * `qaEvidenceGate`. 여기서 채점하면 로스터에 qa가 있는 모든 standard-tier 이슈가 막혔다.
      */
     // #174 — the production wiring lives in `makeSelfGateDep` so the test drives this exact call site.
-    selfGate: makeSelfGateDep({ root, harness: () => harness, run, mergeBase, getCtx: () => ctxCache }),   // 게터 — harness는 charterReady 뒤에 생긴다
+    // #199 — `reviewRounds` is the K counter above (`makeKRestartDeps`), read at call time: rework round ≥ 2 runs `rework-scope`.
+    selfGate: makeSelfGateDep({ root, harness: () => harness, run, mergeBase, getCtx: () => ctxCache, reviewRounds: () => deps.reviewRounds() }),   // 게터 — harness는 charterReady 뒤에 생긴다
     /**
      * self-gate RED(빌더가 고칠 수 있는 finding)의 재시도 카운터/에스컬레이션. 이 head sha에 대해
      * 이번 재큐 이후 남은 재시도 마커를 세고, **이번 시도**의 마커(+findings)를 남긴 뒤 attempt(head별)와

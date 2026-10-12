@@ -190,6 +190,7 @@ export async function runSelfGate({
   restartBrief = null,     // #174 — { paths, newFiles, error? } computed by run-stage (`restartBriefInput`); null = no restart
   scope = null,            // #200 — { issue, plan, filesExpected, changes, error? } computed by run-stage (`scopeInput`); null = not wired
   conflictScope = null,    // #212 — { paths, outside, error? } computed by run-stage (`conflictScopeInput`); null = not a conflict-only round
+  reworkScope = null,      // #199 — { round, where, newFiles, newExports, newTestIds, restartPaths, error? } computed by run-stage (`reworkScopeInput`); null = rework round < 2 / not wired
 } = {}) {
   const findings = [];
   const ranChecks = [];
@@ -310,7 +311,61 @@ export async function runSelfGate({
     else for (const p of Array.isArray(conflictScope.outside) ? conflictScope.outside : []) findings.push({ check: "conflict-scope", blocking: false, detail: `conflict round changed ${p} outside the merge` });
   }
 
+  // (8) #199 (ADR-037 §5) — `rework-scope`: from rework round REWORK_SCOPE_MIN_ROUND on, the builder only takes things away. Runs ONLY
+  // with input (round 0/1, or the counter not wired → nothing here changes, not even a skip entry). An input run-stage could not
+  // measure is skipped visibly with its reason (fail open — a quality aid, not a safety device); never a finding, never RED.
+  if (reworkScope != null) {
+    if (reworkScope.error) skip("rework-scope", `skipped — ${reworkScope.error}`);
+    else if (Number.isInteger(reworkScope.round) && reworkScope.round >= REWORK_SCOPE_MIN_ROUND) {
+      ranChecks.push("rework-scope");
+      findings.push(...judgeReworkScope(reworkScope));
+    }
+  }
+
   return { ok: !findings.some((f) => f.blocking), findings, ranChecks, skippedChecks };
+}
+
+/**
+ * ── #199 (ADR-037 §5) — `rework-scope`: rework round ≥ 2 is subtract-only ─────────────────────────────────────────────────────
+ *
+ * K was exhausted five times (#149·#157·#170 …) by builders who ADDED during rework — a second list, a second parser, gate evidence
+ * outside the findings — and every time a person wrote a "take it out" brief by hand. run-stage (`reworkScopeInput`) measures, against
+ * the head the last review judged (never the merge-base: round-1 work is not new in round 2) and only from the engine's rework counter:
+ *   · `newFiles` — added vs. merge-base (`--no-renames`) and absent from the reviewed head's tree;
+ *   · `newExports` — `{ path, name }` for an added `export (const|function|class|async function) <name>` line in a file that existed
+ *     at the reviewed head and did not export `<name>` there;
+ *   · `newTestIds` — `{ path, id }` for a `test_<issue>_<slug>` id in this round's added test lines that the plan's done_when
+ *     (`verify` / `check.ref`) does not own and the reviewed head's copy of that file did not carry (the "new done_when" proxy);
+ *   · `where` — the file paths in the previous review's `must_fix[].where` (`wherePaths`, locators stripped);
+ *   · `restartPaths` — the K-restart brief's paths when one is loaded (null otherwise).
+ * This function only judges. One cause, one finding: in a restart round `restart-brief` owns new files; an id inside a new file that
+ * already has a file finding is not reported again. Edits and deletions never reach here.
+ */
+export const REWORK_SCOPE_MIN_ROUND = 2;
+
+export function judgeReworkScope({ round, where = [], newFiles = [], newExports = [], newTestIds = [], restartPaths = null } = {}) {
+  const strings = (xs) => (Array.isArray(xs) ? xs : []).filter((x) => typeof x === "string" && x);
+  const allowed = strings(where);
+  const restart = Array.isArray(restartPaths) ? strings(restartPaths) : null;
+  const rule = `rework round ${round} is subtract-only (ADR-037 §5)`;
+  const how = `put it in a file the review's must_fix where names (${allowed.join(", ")}) or ask the reviewer to name it in a finding`;
+  const findings = [];
+  const fileFinding = new Set();
+  for (const f of strings(newFiles)) {
+    if (allowed.includes(f)) continue;
+    if (restart) { if (!restart.includes(f)) fileFinding.add(f); continue; }    // restart-brief reports it — one finding
+    fileFinding.add(f);
+    findings.push({ check: "rework-scope", blocking: true, detail: `new file outside the review findings: ${f} — ${rule}: ${how}` });
+  }
+  for (const e of Array.isArray(newExports) ? newExports : []) {
+    if (!(e && typeof e.path === "string" && typeof e.name === "string") || allowed.includes(e.path)) continue;
+    findings.push({ check: "rework-scope", blocking: true, detail: `new export outside the review findings: ${e.name} in ${e.path} — ${rule}: ${how}` });
+  }
+  for (const t of Array.isArray(newTestIds) ? newTestIds : []) {
+    if (!(t && typeof t.path === "string" && typeof t.id === "string") || fileFinding.has(t.path)) continue;
+    findings.push({ check: "rework-scope", blocking: true, detail: `new done_when id outside the plan: ${t.id} in ${t.path} — ${rule}: a test id the plan's done_when does not own is a new done_when; reuse a plan id or ask the reviewer` });
+  }
+  return findings;
 }
 
 /** #212 — the conflict-scope check ran and found nothing: the only state in which run-stage tags the round (cost, K). */
@@ -471,6 +526,7 @@ export function judgeScope({ issue, filesExpected, changes } = {}) {
  *     덧붙일 수 있는 경로다). 묶이지 않은 줄은 증거가 아니다.
  */
 export const SELF_GATE_DETAIL_PREFIX = "self-gate-detail: ";
+const DETAIL_SKIPS = ["scope", "rework-scope"];
 export function selfGateDetailLine(result, { runId = null, runnerId = null, ktbVersion = null, harnessBlock = false } = {}) {
   try {
     return SELF_GATE_DETAIL_PREFIX + JSON.stringify({
@@ -482,8 +538,9 @@ export function selfGateDetailLine(result, { runId = null, runnerId = null, ktbV
       ran: Array.isArray(result?.ranChecks) ? [...result.ranChecks] : [],
       // #200 — a `scope` skip also carries its `detail` (which of no plan / empty / non-array files_expected it was): `reason`
       // alone ("no-input") cannot tell those apart in the record. Other checks keep their two-field entries (readers and the
-      // exact-equality tests on them are unchanged); readers ignore unknown fields.
-      skipped: (Array.isArray(result?.skippedChecks) ? result.skippedChecks : []).map((s) => ({ check: s.check, reason: s.reason, ...(s.check === "scope" && typeof s.detail === "string" ? { detail: s.detail } : {}) })),
+      // exact-equality tests on them are unchanged); readers ignore unknown fields. #199 — a `rework-scope` skip carries its reason the
+      // same way (which input could not be read), so a fail-open round is never a bare `no-input` in the record.
+      skipped: (Array.isArray(result?.skippedChecks) ? result.skippedChecks : []).map((s) => ({ check: s.check, reason: s.reason, ...(DETAIL_SKIPS.includes(s.check) && typeof s.detail === "string" ? { detail: s.detail } : {}) })),
     });
   } catch (e) {
     return `${SELF_GATE_DETAIL_PREFIX}unavailable — ${e?.message || e}`;
