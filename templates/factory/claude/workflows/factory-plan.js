@@ -346,7 +346,9 @@ const withRepairOf = (o) => (repairOf ? { ...o, repair_of: repairOf } : o);
 // says it accepts one: `loaded.plan_repair_synthesis_only === true`. Today run-stage resets agents.jsonl before the repair
 // turn and verify-stage still requires every roster role completed (run-stage.js:1193-1220, verify-stage.js:624-626), so a
 // writer-only turn is always `roster role not completed` → needs-human. Until the roster-continuity change sets this key,
-// a repair turn dispatches the full roster as before (and can still reach factory:planned).
+// a repair turn dispatches the full roster as before (and can still reach factory:planned). Plan dw3 read literally
+// (`Boolean(repairOf)`) also breaks the unchanged existing pin test_238_current_workflow_still_renders_repair_reasons_from_new_shape
+// ("debate ran R1" === true) that dw3's own rubric requires to pass — so the literal gate is a contract conflict, not an option.
 const synthesisOnly = Boolean(repairOf) && loaded.plan_repair_synthesis_only === true;
 
 // #243 (P-15, M-9) — the single-mode merge never pushes done_when past `max_done_when`. The planner's items are never cut
