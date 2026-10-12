@@ -65,7 +65,7 @@ export const unhandledReason = (code) => `command exited ${code} with 0 failing 
 export function unhandledGateLog(stderr, stdout, { env = process.env } = {}) {
   const text = String(stderr || "").trim() || String(stdout || "");
   const tail = text.split("\n").slice(-UNHANDLED_TAIL_LINES).join("\n");
-  return scrubText(tail, { secrets: secretValues(env) }).text.slice(-2000);
+  return scrubText(tail, { secrets: secretValues(env ?? process.env) }).text.slice(-2000);
 }
 
 /**

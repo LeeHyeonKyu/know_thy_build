@@ -6882,6 +6882,103 @@ test("test_271_gate_red_finding_scrub_list_comes_from_the_shared_collector", () 
 });
 
 /**
+ * #271 dw5 (skeptic self-critique) — the single-owner guard works per EXPRESSION, not per file, and not per identifier.
+ * A file-level "who names SECRET_ENV" check misses a seventh copy inside scrub-artifacts.js itself (runCli was one of the
+ * six), and an identifier check misses a renamed copy that lists the names inline. So a copy of the rule is any of:
+ *   ① a code line naming SECRET_ENV other than its declaration and the `secretValues` body (an alias `const L = SECRET_ENV`
+ *      or a hand-built `SECRET_ENV.map(...)` anywhere, scrub-artifacts.js included);
+ *   ② an array literal holding two or more SECRET_ENV names — inline or bound to a const of any name — whose
+ *      map/flatMap/filter/reduce callback indexes an object by its element (names → env values).
+ * Comments and factory/test are not engine code. exec.js MERGE_CAPABLE_ENV (a drop list, never looked up) is not a copy.
+ */
+const SECRET_NAME_RE271 = new RegExp(`["'\`](${SECRET_ENV.join("|")})["'\`]`, "g");
+const LIST_OPS271 = "(?:map|flatMap|filter|reduce)";
+/** Index of the bracket matching the opener at `i` (any of [ ( ), depth-counted; strings are not special — code only). */
+const closeOf271 = (s, i) => {
+  const open = s[i], close = open === "[" ? "]" : ")";
+  for (let d = 0, j = i; j < s.length; j++) {
+    if (s[j] === open) d++;
+    else if (s[j] === close && --d === 0) return j;
+  }
+  return -1;
+};
+/** Does the call whose `(` is at `i` look a list element up in an object (`obj[n]` / `obj?.[n]`)? */
+const callLooksUp271 = (code, i) => {
+  const end = closeOf271(code, i);
+  const body = code.slice(i, end < 0 ? undefined : end + 1);
+  const m = /^\(\s*(?:\(\s*)?(?:\w+\s*,\s*)?(\w+)\s*\)?\s*=>/.exec(body);
+  return Boolean(m) && new RegExp(`\\[\\s*${m[1]}\\s*\\]`).test(body.slice(m[0].length));
+};
+const secretListCopies271 = (sources) => sources.flatMap(({ path, src }) => {
+  const code = codeOnly271(src);
+  const out = [];
+  code.split("\n").forEach((l, i) => {
+    if (!/\bSECRET_ENV\b/.test(l)) return;
+    const t = l.trim();
+    const allowed = path === "factory/bin/scrub-artifacts.js"
+      && (/^export const SECRET_ENV = \[[^\]]*\];$/.test(t) || /^export const secretValues = \(env\) => SECRET_ENV\.map\(\(n\) => env\?\.\[n\]\)/.test(t));
+    if (!allowed) out.push(`${path}:${i + 1} names SECRET_ENV`);
+  });
+  for (let i = code.indexOf("["); i >= 0; i = code.indexOf("[", i + 1)) {
+    const end = closeOf271(code, i);
+    if (end < 0) continue;
+    if (new Set([...code.slice(i, end + 1).matchAll(SECRET_NAME_RE271)].map((m) => m[1])).size < 2) continue;
+    const line = code.slice(0, i).split("\n").length;
+    const direct = new RegExp(`^\\s*\\.${LIST_OPS271}\\(`).exec(code.slice(end + 1));
+    if (direct && callLooksUp271(code, end + direct[0].length)) out.push(`${path}:${line} inline secret-name list mapped to values`);
+    const bound = /(?:const|let|var)\s+(\w+)\s*=\s*$/.exec(code.slice(0, i));
+    if (!bound || bound[1] === "SECRET_ENV") continue; // every SECRET_ENV use is already judged line by line by ①
+    for (const u of code.matchAll(new RegExp(`\\b${bound[1]}\\s*\\.${LIST_OPS271}\\(`, "g"))) {
+      if (callLooksUp271(code, u.index + u[0].length - 1)) out.push(`${path}:${line} ${bound[1]} (secret-name list) mapped to values`);
+    }
+  }
+  return out;
+});
+
+test("test_271_single_owner_guard_catches_a_seventh_copy_in_the_owner_file_a_renamed_list_and_a_flatmap_copy", () => {
+  const sources = engineSources271();
+  expect(sources.length).toBeGreaterThan(20);
+  // the real engine: exactly one owner, no copy anywhere (scrub-artifacts.js is checked line by line, not exempted)
+  expect(secretListCopies271(sources)).toEqual([]);
+  const scrub = sources.find((s) => s.path === "factory/bin/scrub-artifacts.js");
+  expect(codeOnly271(scrub.src).split("\n").filter((l) => /\bSECRET_ENV\b/.test(l))).toHaveLength(2);
+  expect(sources.find((s) => s.path === "factory/lib/exec.js").src).toContain("MERGE_CAPABLE_ENV");
+
+  // the guard is not vacuous: each of these copies, planted into the REAL source text, is caught
+  const plant = (path, from, to) => {
+    const s = sources.find((x) => x.path === path);
+    expect(s, path).toBeTruthy();
+    const src = s.src.replace(from, to);
+    expect(src, `${path}: plant site not found`).not.toBe(s.src);
+    return secretListCopies271(sources.map((x) => (x.path === path ? { path, src } : x)));
+  };
+  const mutants = {
+    // ① a seventh copy beside secretValues, in the owner file (runCli)
+    runCliCopy: plant("factory/bin/scrub-artifacts.js", "const secrets = secretValues(env);",
+      "const secrets = SECRET_ENV.map((n) => env?.[n]).filter((v) => typeof v === \"string\" && v.length > 0);"),
+    // ① an alias of the list under a new name
+    alias: plant("factory/lib/gates.js", "const secrets = secretValues(process.env);",
+      "const NAMES = SECRET_ENV; const secrets = NAMES.map((n) => process.env[n]).filter(Boolean);"),
+    // ② a renamed copy with the names inline and no SECRET_ENV identifier (drops three of the five names)
+    inlineRenamed: plant("factory/lib/progress.js", "secrets: secretValues(env)",
+      "secrets: [\"FACTORY_BOT_TOKEN\", \"GITHUB_TOKEN\"].map((n) => env?.[n]).filter(Boolean)"),
+    // ② a const-bound, multi-line, flatMap copy under a name the helper check never heard of
+    flatMapBound: plant("factory/bin/run-stage.js", "const secrets = secretValues(env);",
+      "const TOKEN_NAMES = [\n    'FACTORY_BOT_TOKEN',\n    'ANTHROPIC_API_KEY',\n  ];\n  const secrets = TOKEN_NAMES.flatMap((k) => (env[k] ? [env[k]] : []));"),
+    // ② reduce with an accumulator
+    reduceInline: plant("factory/bin/qa-evidence.js", "scrubText(body, { secrets: secretValues(env) })",
+      "scrubText(body, { secrets: [\"CLAUDE_CODE_OAUTH_TOKEN\", \"FACTORY_MERGE_TOKEN\"].reduce((acc, k) => (env[k] ? [...acc, env[k]] : acc), []) })"),
+  };
+  for (const [name, found] of Object.entries(mutants)) expect(found.length, name).toBeGreaterThan(0);
+  expect(mutants.runCliCopy.join("|")).toMatch(/^factory\/bin\/scrub-artifacts\.js:\d+ names SECRET_ENV$/);
+  expect(mutants.inlineRenamed.join("|")).toMatch(/factory\/lib\/progress\.js:\d+ inline secret-name list/);
+  expect(mutants.flatMapBound.join("|")).toMatch(/factory\/bin\/run-stage\.js:\d+ TOKEN_NAMES \(secret-name list\)/);
+  // a comment that names the rule is documentation, not a copy
+  expect(plant("factory/lib/progress.js", "secrets: secretValues(env)",
+    "secrets: secretValues(env) /* not SECRET_ENV.map((n) => env[n]) */")).toEqual([]);
+});
+
+/**
  * ── #238 (P-14, M-8) — the plan repair turn's COST is recorded from what the runner observed ─────────────────────────
  *
  * The repair turn now carries the rejected plan (`plan_repair_previous`, see context.test.js test_238_…) so a workflow that
