@@ -10690,3 +10690,47 @@ test("test_199_restart_round_does_not_double_report", async () => {
     "rework-scope: new export outside the review findings: parseTwo in factory/lib/old-parser.js",
   ]);
 });
+
+// cf1 / qa1 (review round 1): in an engine checkout the runner's mirror commit copies every `factory/lib|bin/**` change into
+// `.factory/lib|bin/**` before the self-gate runs. Those copies are runner-written (`runnerWrittenPath`, the rule #200 `scope` uses):
+// the builder cannot write them, so they are never a builder addition. An addition the builder made inside `where` must still pass
+// once the mirror has copied it; a builder path outside `where` is still judged.
+test("test_199_rework_round2_blocks_new_files_and_exports_outside_findings — runner mirror copies are not builder additions", async () => {
+  const repo = await reworkRepo199();
+  const mirror = (p) => repo.put(`.factory/${p.slice("factory/".length)}`, repo.read(p));
+  mirror("factory/lib/self-gate.js");
+  mirror("factory/lib/other.js");
+  await repo.commit("mirror: regenerate the installed engine (runner-owned)");
+  const reviewed = await repo.git("rev-parse", "HEAD");
+  const review = reviewHandoff199({ head: reviewed, where: ["factory/lib/self-gate.js:3", "factory/lib/allowed-new.js"] });
+  const dep = dep199(repo, ctx199({ review }));
+
+  // Round 2: the builder adds an export and a file, both inside `where`; then the runner mirrors them.
+  repo.append("factory/lib/self-gate.js", "export function judgeTwo() { return 2; }\n");
+  repo.put("factory/lib/allowed-new.js", repo.lines("a") + "export const allowedNew = 1;\n");
+  await repo.commit("round 2: additions inside the findings");
+  mirror("factory/lib/self-gate.js");
+  mirror("factory/lib/allowed-new.js");
+  await repo.commit("mirror: regenerate the installed engine (runner-owned)");
+  expect((await repo.git("diff", "--name-status", "--no-renames", `${reviewed}...HEAD`)).split("\n").sort()).toEqual([
+    "A\t.factory/lib/allowed-new.js", "A\tfactory/lib/allowed-new.js", "M\t.factory/lib/self-gate.js", "M\tfactory/lib/self-gate.js",
+  ]);
+  const ok = await dep({ gates: GREEN_199 });
+  expect(ok.ranChecks).toContain("rework-scope");
+  expect(rs199(ok)).toEqual([]);
+  expect(ok.ok).toBe(true);
+
+  // The exemption is the runner-written rule, not "anything under .factory/": a builder addition outside `where` is still RED,
+  // and so is a builder-writable `.factory/` path outside the mirror families.
+  repo.append("factory/lib/other.js", "export const otherTwo = 2;\n");
+  repo.put(".factory/notes/extra.js", repo.lines("n"));
+  await repo.commit("round 2: additions outside the findings");
+  mirror("factory/lib/other.js");
+  await repo.commit("mirror: regenerate the installed engine (runner-owned)");
+  const red = await dep({ gates: GREEN_199 });
+  expect(red.ok).toBe(false);
+  expect(rs199(red).map(head199).sort()).toEqual([
+    "new export outside the review findings: otherTwo in factory/lib/other.js",
+    "new file outside the review findings: .factory/notes/extra.js",
+  ]);
+});

@@ -338,6 +338,8 @@ export async function runSelfGate({
  *     (`verify` / `check.ref`) does not own and the reviewed head's copy of that file did not carry (the "new done_when" proxy);
  *   · `where` — the file paths in the previous review's `must_fix[].where` (`wherePaths`, locators stripped);
  *   · `restartPaths` — the K-restart brief's paths when one is loaded (null otherwise).
+ * A runner-written path (`runnerWrittenPath`, the rule #200 `scope` uses — the mirror commit's `.factory/lib|bin/**` copies, run
+ * records) is never a builder addition: the builder cannot write it, so a finding on it could not be followed (#199 review cf1/qa1).
  * This function only judges. One cause, one finding: in a restart round `restart-brief` owns new files; an id inside a new file that
  * already has a file finding is not reported again. Edits and deletions never reach here.
  */
@@ -346,19 +348,20 @@ export const REWORK_SCOPE_MIN_ROUND = 2;
 export function judgeReworkScope({ round, where = [], newFiles = [], newExports = [], newTestIds = [], restartPaths = null } = {}) {
   const strings = (xs) => (Array.isArray(xs) ? xs : []).filter((x) => typeof x === "string" && x);
   const allowed = strings(where);
+  const exempt = (p) => runnerWrittenPath(p) || allowed.includes(p);
   const restart = Array.isArray(restartPaths) ? strings(restartPaths) : null;
   const rule = `rework round ${round} is subtract-only (ADR-037 §5)`;
   const how = `put it in a file the review's must_fix where names (${allowed.join(", ")}) or ask the reviewer to name it in a finding`;
   const findings = [];
   const fileFinding = new Set();
   for (const f of strings(newFiles)) {
-    if (allowed.includes(f)) continue;
+    if (exempt(f)) continue;
     if (restart) { if (!restart.includes(f)) fileFinding.add(f); continue; }    // restart-brief reports it — one finding
     fileFinding.add(f);
     findings.push({ check: "rework-scope", blocking: true, detail: `new file outside the review findings: ${f} — ${rule}: ${how}` });
   }
   for (const e of Array.isArray(newExports) ? newExports : []) {
-    if (!(e && typeof e.path === "string" && typeof e.name === "string") || allowed.includes(e.path)) continue;
+    if (!(e && typeof e.path === "string" && typeof e.name === "string") || exempt(e.path)) continue;
     findings.push({ check: "rework-scope", blocking: true, detail: `new export outside the review findings: ${e.name} in ${e.path} — ${rule}: ${how}` });
   }
   for (const t of Array.isArray(newTestIds) ? newTestIds : []) {
