@@ -4318,6 +4318,22 @@ push할 수 있는 누구든 상태 파일에 `closed_at`을 써 넣어 차단�
 7. **측정에 기준선.** 주간 표에 같은 종류 이슈의 상호작용 레인 vs 다크 레인(시간·비용·리뷰가 잡은 결함 수)을 나란히 둔다.
 연기: 판정 로직의 `tree-truth` 통합(12개 결함이 한 뿌리라는 가정은 과장 — 1.4.43·#172·#187은 다른 과).
 
+**§5 부록 (#199, 2026-10-12) — `rework-scope`가 무엇을 재는가.** 이슈 #199 본문은 이 항목을 "ADR-034 §5"로 인용한다(위 제목의 번호 메모 그대로).
+- **라운드**는 엔진의 rework 전이 수(`reviewRounds`, K 카운터)에서만 온다. 2 미만이거나 카운터가 배선되지 않았으면 검사는 없다 — 결과 객체가
+  이 검사 이전과 바이트 하나 다르지 않다(`test_199_rework_round1_is_unchanged`).
+- **"새것"의 기준선은 merge-base가 아니라 직전 리뷰가 판정한 head**(`handoffs.review.head_sha`)다 — merge-base 기준이면 1라운드의 정당한 추가가
+  매 라운드 다시 걸린다. base 병합으로 들어온 파일은 `<merge-base>...HEAD`에 없다(`test_199_rework_round2_baseline_is_the_reviewed_head_not_the_merge_base`).
+  허용 목록은 그 리뷰의 `must_fix[].where`에서 `wherePaths`가 뽑은 파일 경로다(`path:120`·`path (fn)` 포함; 디렉터리·산문은 허용하지 않는다).
+  `where` 밖의 새 파일과, 리뷰된 head에 있던 파일에 새로 생긴 `export (const|function|class|async function) <name>`이 RED다
+  (`test_199_rework_round2_blocks_new_files_and_exports_outside_findings`).
+- **"새 done_when"은 대리 지표다.** implement.v1 핸드오프에는 done_when이 없고(`factory/lib/schemas.js`) rework는 plan 핸드오프를 다시 쓰지 않으므로,
+  "핸드오프의 done_when id 집합이 늘었다"는 관측할 수 없다. 대신 이 라운드에 추가된 테스트 줄의 `test_<issue>_<slug>` id 중 plan done_when의
+  `verify`/`check.ref`에 없고 리뷰된 head의 같은 파일에도 없던 것을 새 done_when으로 본다(`test_199_new_done_when_in_rework_is_red`).
+- **극성은 fail open, 기록과 함께.** 리뷰 핸드오프·`head_sha`·파일 경로가 있는 `where`가 없거나, git 읽기가 실패하거나, 라운드 수를 못 읽거나,
+  diff가 scope 바이트 상한을 넘으면 검사를 건너뛰고 run 기록의 `self-gate-detail` 줄에 `rework-scope` 항목과 `skipped — <이유>`를 남긴다 — 이 검사는
+  품질 보조이지 안전 장치가 아니다(`test_199_missing_findings_skips_with_a_record_line`). K 재시작 라운드에서는 새 파일을 `restart-brief`만
+  보고하고(원인 하나에 finding 하나) export는 여전히 이 검사가 본다(`test_199_restart_round_does_not_double_report`).
+
 ## ADR-036 엔진 크래시는 이슈의 R·예산을 먹지 않는다 — 생산자는 runStage의 catch 하나, 상한은 sweeper에 — 2026-10-04 (#196)
 
 **질문**: 엔진 결함으로 죽은 런이 이슈의 재시도 예산(R)과 평생 예산(ADR-031, 1.4.16)을 먹는 것을 어떻게 멈추되, 게이밍과 무한 루프를 열지 않는가.
