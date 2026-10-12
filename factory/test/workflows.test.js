@@ -2454,3 +2454,165 @@ test("test_238_current_workflow_still_renders_repair_reasons_from_new_shape", as
     for (const reason of R1_REPAIR_REASONS) expect(writer.prompt, `${mode}: ${reason}`).toContain(reason);
   }
 });
+
+// --- #244: the review handoff carries R1 and R2 verdicts per role; `loaded.review_r2` skip switch (P-9, M-2) ---
+
+const rolesVerdicts = (round) => Object.fromEntries(round.verdicts.map((v) => [v.role, v.verdict]));
+
+test("test_244_review_handoff_carries_r1_and_r2_verdicts", async () => {
+  // case 1: an R1 reject → full R2. correctness revises its reject away (reject→approve), architecture
+  // revises an approve into a reject (approve→reject), spec-conformance maintains, qa dies twice in R1.
+  const stub = async (prompt, opts) => {
+    const label = opts.label;
+    if (label.startsWith("R1:")) {
+      const role = label.slice(3);
+      if (role === "qa") return null;
+      return role === "correctness" ? rejectV(role, "cf1") : approveV(role);
+    }
+    if (label === "R2:correctness") return { verdict: "revise", must_fix: [], should_fix: [], verified: ["cf1 was a misread"], on_others: [] };
+    if (label === "R2:architecture") return { verdict: "revise", must_fix: [finding("arch2")], should_fix: [], verified: [], on_others: [] };
+    if (label.startsWith("R2:")) return { verdict: "maintain", must_fix: [], should_fix: [], verified: [], on_others: [] };
+    return null;
+  };
+  const { result } = await runWorkflow(FACTORY_REVIEW_WORKFLOW, {
+    agent: stub,
+    args: { issue: 42, context: ".factory/out/context.json", loaded: reviewLoaderFix() },
+  });
+
+  expect(result.rounds).toEqual([
+    {
+      round: 1,
+      verdicts: [
+        { role: "correctness", verdict: "reject" },
+        { role: "architecture", verdict: "approve" },
+        { role: "spec-conformance", verdict: "approve" },
+      ],
+    },
+    {
+      round: 2,
+      verdicts: [
+        { role: "correctness", verdict: "approve" },
+        { role: "architecture", verdict: "reject" },
+        { role: "spec-conformance", verdict: "approve" },
+      ],
+    },
+  ]);
+  // a role that gave no R1 verdict is absent, never invented
+  for (const round of result.rounds) expect(round.verdicts.map((v) => v.role)).not.toContain("qa");
+  // round 2 is the handoff's own final verdicts, role by role
+  expect(rolesVerdicts(result.rounds[1])).toEqual(Object.fromEntries(result.verdicts.map((v) => [v.role, v.verdict])));
+  expect(validate("review.v1", result).ok).toBe(true);
+
+  // case 2: unanimous R1 approve → exactly one round
+  const approveStub = async (prompt, opts) => {
+    const label = opts.label;
+    if (label.startsWith("R1:")) return approveV(label.slice(3));
+    if (label.startsWith("R2-light:")) return { missed: [] };
+    return null;
+  };
+  const { result: unanimous } = await runWorkflow(FACTORY_REVIEW_WORKFLOW, {
+    agent: approveStub,
+    args: { issue: 42, context: ".factory/out/context.json", loaded: reviewLoaderFix() },
+  });
+  expect(unanimous.rounds).toEqual([
+    {
+      round: 1,
+      verdicts: [
+        { role: "correctness", verdict: "approve" },
+        { role: "architecture", verdict: "approve" },
+        { role: "spec-conformance", verdict: "approve" },
+        { role: "qa", verdict: "approve" },
+      ],
+    },
+  ]);
+  expect(validate("review.v1", unanimous).ok).toBe(true);
+
+  // the F7 comment no longer says the R1 verdicts are dropped from the handoff
+  const src = readFileSync(FACTORY_REVIEW_WORKFLOW, "utf8");
+  expect(src).not.toContain("`r1`은 싣지 않는다");
+});
+
+test("test_244_review_r2_skip_switch_defaults_to_full", async () => {
+  const rejectStub = async (prompt, opts) => {
+    const label = opts.label;
+    if (label.startsWith("R1:")) {
+      const role = label.slice(3);
+      return role === "correctness" ? rejectV(role, "cf1") : approveV(role);
+    }
+    if (label === "R2:architecture") return { verdict: "revise", must_fix: [finding("arch2")], should_fix: [], verified: [], on_others: [] };
+    if (label.startsWith("R2:")) return { verdict: "maintain", must_fix: [], should_fix: [], verified: [], on_others: [] };
+    return null;
+  };
+  const run = (loaded, agent = rejectStub) =>
+    runWorkflow(FACTORY_REVIEW_WORKFLOW, { agent, args: { issue: 42, context: ".factory/out/context.json", loaded } });
+
+  // default (field absent), explicit "full", and anything that is not exactly "skip": the full R2 runs for every reviewer, as today
+  for (const loaded of [reviewLoaderFix(), reviewLoaderFix({ review_r2: "full" }), reviewLoaderFix({ review_r2: "Skip" })]) {
+    const { result, calls } = await run(loaded);
+    expect(withLabel(calls, "R2:")).toHaveLength(4);
+    expect(result.rounds).toHaveLength(2);
+    expect(result.verdicts.find((v) => v.role === "architecture").verdict).toBe("reject"); // the R2 revise landed
+    expect(result.summary).toContain("Full round 2");
+    expect(validate("review.v1", result).ok).toBe(true);
+  }
+
+  // "skip": an R1 reject goes straight to rework on the R1 verdicts — no R2 agent at all
+  const { result, calls } = await run(reviewLoaderFix({ review_r2: "skip" }));
+  expect(calls.filter((c) => labelOf(c).startsWith("R2"))).toHaveLength(0);
+  expect(withLabel(calls, "R1:")).toHaveLength(4);
+  const byRole = Object.fromEntries(result.verdicts.map((v) => [v.role, v]));
+  expect(byRole.correctness.verdict).toBe("reject");
+  expect(byRole.correctness.must_fix).toEqual([finding("cf1")]);
+  expect(byRole.architecture.verdict).toBe("approve"); // R1's, not a revise nobody was asked for
+  expect(result.rounds).toEqual([
+    {
+      round: 1,
+      verdicts: [
+        { role: "correctness", verdict: "reject" },
+        { role: "architecture", verdict: "approve" },
+        { role: "spec-conformance", verdict: "approve" },
+        { role: "qa", verdict: "approve" },
+      ],
+    },
+  ]);
+  expect(result.summary).not.toContain("Full round 2");
+  expect(result.summary).toContain("1 reject");
+  expect(validate("review.v1", result).ok).toBe(true);
+
+  // "skip" leaves the unanimous-approve light R2 alone
+  const approveStub = async (prompt, opts) => {
+    const label = opts.label;
+    if (label.startsWith("R1:")) return approveV(label.slice(3));
+    if (label.startsWith("R2-light:")) return { missed: [] };
+    return null;
+  };
+  const { calls: lightCalls } = await run(reviewLoaderFix({ review_r2: "skip" }), approveStub);
+  expect(withLabel(lightCalls, "R2-light:")).toHaveLength(4);
+});
+
+test("test_244_rounds_r1_reflects_upheld_disputes", async () => {
+  const disputed = [{ id: "cf1", status: "disputed", reason: "out of scope per the plan's non_goals" }];
+  const loaded = reviewLoaderFix({ disputed, must_fix: [finding("cf1")] });
+  const stub = async (prompt, opts) => {
+    const label = opts.label;
+    if (label.startsWith("dispute:")) return { rulings: [{ id: "cf1", ruling: "uphold", reason: "non_goals says nothing about the parser" }] };
+    // every R1 approves with an empty must_fix — correctness's upheld cf1 is put back by the workflow
+    if (label.startsWith("R1:")) return approveV(label.slice(3));
+    if (label.startsWith("R2:")) return { verdict: "maintain", must_fix: [], should_fix: [], verified: [], on_others: [] };
+    return null;
+  };
+  const { result, calls } = await runWorkflow(FACTORY_REVIEW_WORKFLOW, {
+    agent: stub,
+    args: { issue: 42, context: ".factory/out/context.json", loaded },
+  });
+
+  expect(withLabel(calls, "R2:")).toHaveLength(4); // the re-attached item made R1 a reject → full R2
+  expect(result.rounds).toHaveLength(2);
+  expect(rolesVerdicts(result.rounds[0]).correctness).toBe("reject");
+  expect(rolesVerdicts(result.rounds[1]).correctness).toBe("reject"); // maintain → no invented flip
+  for (const role of ["architecture", "spec-conformance", "qa"]) {
+    expect(rolesVerdicts(result.rounds[0])[role]).toBe("approve");
+    expect(rolesVerdicts(result.rounds[1])[role]).toBe("approve");
+  }
+  expect(validate("review.v1", result).ok).toBe(true);
+});
