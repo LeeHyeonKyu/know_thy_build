@@ -1366,8 +1366,9 @@ test("test_237_retro_runs_the_analyst_directly_when_orchestration_is_agent", asy
   // read-only like the role: the available tool set IS the role's whitelist, and spawning a child session is denied
   expect(after237(args, "--tools")).toBe("Read,Grep,Glob");
   expect(after237(args, "--disallowedTools").split(",")).toEqual(expect.arrayContaining(["Agent", "Task", "Workflow"]));
-  // roles.toml `[retro.analyst]` names the role file and the model — the same source the workflow path reads,
-  // so an operator's change there reaches the direct analyst too (not the md frontmatter's `opus`)
+  // roles.toml `[retro.analyst]` names the role file and the model of the DIRECT analyst (not the md frontmatter's `opus`).
+  // The workflow analyst does NOT read roles.toml — factory-retro.js hardcodes its agentType/model (ADR-046 decision 2) —
+  // so the two sources are pinned to each other by test_237_retro_analyst_role_in_roles_toml_matches_the_workflow_hardcoded_analyst.
   writeFileSync(join(root, ".claude/agents/alt-retro.md"), "---\nname: alt-retro\ntools: Read, Glob\nmodel: opus\n---\n\n## Purpose\nAlternate retro analyst.\n");
   const altRun = retroRun237(okEnvelope);
   const alt = makeRetroAnalyst({ root, harness: agentHarness, charter: {}, run: altRun, roles: { retro: { analyst: { agent: ".claude/agents/alt-retro.md", model: "sonnet" } } } });
@@ -1445,6 +1446,56 @@ test("test_237_retro_runs_the_analyst_directly_when_orchestration_is_agent", asy
     // the prose names exactly the fields the workflow schema requires, and says the final message is that JSON alone.
     expect(calls[0].opts.schema?.required, wf).toEqual(fields(directPrompt));
     expect(directPrompt).toContain("emit ONLY that one JSON object");
+  }
+});
+
+// dw6 parity, the whole prompt (skeptic f1/f2): the direct analyst's prompt IS the workflow analyst's prompt, rendered
+// by the REAL workflow script for the same candidates path, followed by one JSON-only tail — so every rule the workflow
+// states (period copy, evidence_runs, headroom, "never invent", prompt → lesson → gate, maturity_gaps 1:1) reaches the
+// direct analyst word for word, and an edit to ANY sentence of either copy fails here. The workflow has no JSON-only
+// prose: it gets that structurally from `agent(…, {schema: RETRO_V1})`, so the tail's field list is pinned to the schema
+// the workflow passes — dropping the schema from the workflow (or a field from either side) fails too.
+test("test_237_direct_retro_prompt_is_the_workflow_analyst_prompt_word_for_word", async () => {
+  const { directRetroPrompt } = await import("../bin/retro.js");
+  const repo = join(dirname(fileURLToPath(import.meta.url)), "../..");
+  for (const wf of [".claude/workflows/factory-retro.js", "templates/factory/claude/workflows/factory-retro.js"]) {
+    for (const candidates of [undefined, "tmp/other-candidates.json"]) {
+      const { calls } = await runWorkflow237(join(repo, wf), { agent: async () => AGENT_OUT(), args: candidates ? { candidates } : {} });
+      expect(calls, wf).toHaveLength(1);
+      const wfPrompt = calls[0].prompt;
+      const direct = directRetroPrompt(candidates ? { candidates } : {});
+      expect(direct.slice(0, wfPrompt.length), `${wf} (${candidates ?? "default"})`).toBe(wfPrompt);
+      const tail = direct.slice(wfPrompt.length);
+      expect(tail).toContain("emit ONLY that one JSON object");
+      expect(tail).toContain("Do not edit any file.");
+      const m = tail.match(/Return exactly the factory\.retro\.v1 fields \(([^)]*)\)/);
+      expect(m, "the tail names the retro.v1 fields").not.toBeNull();
+      expect(calls[0].opts.schema?.required, wf).toBeDefined();
+      expect(m[1].split(",").map((x) => x.trim()), wf).toEqual(calls[0].opts.schema.required);
+    }
+  }
+});
+
+// dw6 adoption parity (skeptic f4): the direct analyst takes its role file and model from roles.toml `[retro.analyst]`;
+// the workflow analyst is hardcoded in the workflow script (`agent(…, {agentType, model})`) and never reads roles.toml
+// (ADR-046 decision 2). Those are two sources, so the shipped roles.toml must name exactly the role and model the shipped
+// workflow hardcodes — an edit to either (a model bump in roles.toml, a new agentType in the workflow) fails here instead
+// of quietly running a different analyst in one mode only.
+test("test_237_retro_analyst_role_in_roles_toml_matches_the_workflow_hardcoded_analyst", async () => {
+  const { directRoleSpec } = await import("../bin/run-stage.js");
+  const { parse: parseToml } = await import("smol-toml");
+  const repo = join(dirname(fileURLToPath(import.meta.url)), "../..");
+  const pairs = [
+    [".factory/roles.toml", ".claude/workflows/factory-retro.js"],
+    ["templates/factory/factory/roles.toml", "templates/factory/claude/workflows/factory-retro.js"],
+  ];
+  for (const [rolesPath, wf] of pairs) {
+    const { calls } = await runWorkflow237(join(repo, wf), { agent: async () => AGENT_OUT(), args: {} });
+    const { agentType, model } = calls[0].opts;
+    expect(typeof agentType, wf).toBe("string");
+    expect(typeof model, wf).toBe("string");
+    const spec = directRoleSpec(parseToml(readFileSync(join(repo, rolesPath), "utf8")), "retro");
+    expect(spec, `${rolesPath} vs ${wf}`).toEqual({ md: `.claude/agents/${agentType}.md`, model });
   }
 });
 

@@ -6852,6 +6852,44 @@ test("test_237_direct_triage_prompt_matches_the_workflow_verdict_table", async (
   }
 });
 
+// dw3 stale parity on disk (skeptic f3): the in-memory payload is this run's, but a file the triage SESSION reads
+// (`.factory/out/context.json` or `loaded.json`) was left by another issue's run. Under both modes the same input must land
+// in the same terminal state — blocked/undecidable with the same `dispatcher payload: context issue mismatch` cause and no
+// session spawned — not a refusal under `agent` and a normal verdict (read off issue 8's file) under `workflow`.
+test("test_237_stale_on_disk_context_lands_the_same_terminal_state_in_both_modes", async () => {
+  const wfReturn = "Workflow finished.\n```json\n" + JSON.stringify({ ...VERDICT_237, issue: 7, orchestration: "workflow", guarantee: "structural" }) + "\n```";
+  const staleOn = (file) => (root) => {
+    mkdirSync(join(root, ".factory/out"), { recursive: true });
+    writeFileSync(join(root, ".factory/out/context.json"), JSON.stringify({ issue: { number: file === "context.json" ? 8 : 7 } }));
+    writeFileSync(join(root, ".factory/out/loaded.json"), JSON.stringify(triageLoaded237({ issue: file === "loaded.json" ? 8 : 7 })));
+    return {};
+  };
+  for (const file of ["context.json", "loaded.json"]) {
+    const byMode = {};
+    for (const mode of ["agent", "workflow"]) {
+      const r = await runTriage237({ mode, result: mode === "agent" ? JSON.stringify(VERDICT_237) : wfReturn, loaded: triageLoaded237({ orchestration: mode }), extra: staleOn(file) });
+      expect(r.run.calls, `${file} ${mode}`).toHaveLength(0);
+      expect(r.code, `${file} ${mode}`).toBe(2);
+      expect(r.handoffs, `${file} ${mode}`).toEqual([]);
+      expect(r.tiers, `${file} ${mode}`).toEqual([]);
+      byMode[mode] = r.transitions.map((t) => [t.to, t.cause, t.reason.replace(/ \(loaded\.json[^)]*\)$/, "")]);
+    }
+    expect(byMode.agent, file).toEqual([["factory:blocked", "undecidable", expect.stringMatching(new RegExp(`^dispatcher payload: context issue mismatch: \\.factory/out/${file.replace(".", "\\.")} is for issue 8, this run is for 7`))]]);
+    expect(byMode.workflow, file).toEqual(byMode.agent);
+  }
+  // the guard compares, it does not just fire: matching files on disk let the workflow mode spawn its dispatcher with
+  // today's argv and reach today's label
+  const ok = await runTriage237({ mode: "workflow", result: wfReturn, extra: (root) => {
+    mkdirSync(join(root, ".factory/out"), { recursive: true });
+    writeFileSync(join(root, ".factory/out/context.json"), JSON.stringify({ issue: { number: 7 } }));
+    writeFileSync(join(root, ".factory/out/loaded.json"), JSON.stringify(triageLoaded237({ orchestration: "workflow" })));
+    return {};
+  } });
+  expect(ok.run.calls).toHaveLength(1);
+  expect(ok.run.calls[0].args.slice(0, 2)).toEqual(["-p", expect.stringMatching(/^\/factory-triage 7/)]);
+  expect(ok.transitions.map((t) => t.to)).toEqual(["factory:ready"]);
+});
+
 test("test_237_direct_agent_failure_lands_on_the_same_invalid_artifact_path", async () => {
   // a valid triage verdict sitting in the session's own tool results (it read an old handoff) is NOT the answer
   const transcript = [

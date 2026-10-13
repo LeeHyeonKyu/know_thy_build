@@ -141,8 +141,11 @@ export const DIRECT_AGENT_MD = Object.freeze({ triage: ".claude/agents/factory-t
 /** 직접 세션이 거부하는 도구: 쓰기 도구 + 다른 세션을 띄우는 도구(읽기 전용 역할이 쓰기 가능한 자식에게 일을 넘기지 못하게). */
 export const DIRECT_DENY_TOOLS = Object.freeze([...DENY_WRITES_TOOLS, "Agent", "Task", "Workflow"]);
 /**
- * 이 직접 스테이지의 역할 정의 — roles.toml(`[triage]`, `[retro.analyst]`)의 `agent`(md 경로)·`model`. 워크플로의 `agent()`가
- * 읽는 곳과 같은 출처라, 운영자가 roles.toml을 바꾸면 두 경로가 같이 바뀐다. 이름이 없으면 기본 md·모델 없음(frontmatter가 정한다).
+ * 이 직접 스테이지의 역할 정의 — roles.toml(`[triage]`, `[retro.analyst]`)의 `agent`(md 경로)·`model`. 이름이 없으면 기본 md·모델
+ * 없음(frontmatter가 정한다). 워크플로 경로와 출처가 **같지 않다**: triage 워크플로는 컨텍스트의 roster(roles.toml에서 온 것)를 쓰지만,
+ * retro 워크플로(`.claude/workflows/factory-retro.js`)는 factory-retro/opus를 하드코딩하고 roles.toml을 읽지 않는다(ADR-046 결정 2).
+ * 그래서 `[retro.analyst]`를 바꾸면 직접 경로만 바뀐다 — 두 출처가 같은 분석가를 가리키는지는
+ * `test_237_retro_analyst_role_in_roles_toml_matches_the_workflow_hardcoded_analyst`가 출하 사본마다 대조한다.
  */
 export function directRoleSpec(roles, stage) {
   const def = stage === "retro" ? roles?.retro?.analyst : roles?.[stage];
@@ -256,7 +259,7 @@ export function makeStageClaudeP({ root, stage, issue, run: runner = run, getHar
    * 그것을 이 런의 출력으로 읽는다.
    */
   const refuse = (reason, { payload = false } = {}) => {
-    try { record(`direct agent: refused before spawning — ${reason}`); } catch { /* 기록 실패가 거부를 막지 않는다 */ }
+    try { record(`${stage} session: refused before spawning — ${reason}`); } catch { /* 기록 실패가 거부를 막지 않는다 */ }
     const out = { is_error: true, subtype: DIRECT_REFUSED, result: reason, num_turns: 0, ...(payload ? { refused_payload: reason } : {}) };
     try { mkdirSync(outDir, { recursive: true }); for (const f of [`${stage}.json`, `${stage}.envelope.json`]) writeFileSync(join(outDir, f), JSON.stringify(out)); } catch { /* 기록 실패가 거부를 막지 않는다 */ }
     return out;
@@ -280,10 +283,18 @@ export function makeStageClaudeP({ root, stage, issue, run: runner = run, getHar
     const harness = getHarness(), charter = getCharter();
     const direct = isDirectAgentRun({ stage, orchestration: ctx?.orchestration });
     let args;
-    if (direct) {
-      if (Number(ctx?.loaded?.issue) !== Number(issue)) return refuse(`context issue mismatch: the context payload says ${ctx?.loaded?.issue}, this run is for ${issue}`, { payload: true });
+    /*
+     * #237 dw3 (skeptic f3) — 세션이 읽는 디스크의 컨텍스트가 지난 런의 것이면 **모드와 상관없이** 띄우지 않는다. 워크플로 스크립트는
+     * 메모리의 `loaded.issue`만 대조하므로(factory-triage.js), 디스크의 `context.json`만 낡은 경우 워크플로 모드는 역할이 다른 이슈의
+     * 파일로 내린 판정을 그대로 라벨로 만들었다 — 같은 낡은 입력이 `agent`에선 blocked, `workflow`에선 ready였다. 단일 에이전트
+     * 스테이지(triage)에만 건다: 토론 스테이지의 워크플로 경로는 이 이슈의 범위 밖이다(plan non_goals). 정상 입력의 argv·env는 그대로다.
+     */
+    if (stage === "triage") {
       const stale = staleOnDisk();
       if (stale) return refuse(stale, { payload: true });
+    }
+    if (direct) {
+      if (Number(ctx?.loaded?.issue) !== Number(issue)) return refuse(`context issue mismatch: the context payload says ${ctx?.loaded?.issue}, this run is for ${issue}`, { payload: true });
       let roles = {};
       try { roles = getRoles() || {}; } catch { roles = {}; }   // roles.toml이 없으면 기본 md와 roster/frontmatter의 모델로 간다
       const spec = directRoleSpec(roles, stage);
@@ -1325,7 +1336,7 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runAt
     const payloadError = async () => {
       if (payloadErrorMemo === undefined) {
         payloadErrorMemo = hitMaxTurns(out) || hitApiError(out) ? null
-          : directRun ? directPayloadErrorOf(out)
+          : directRun || directPayloadErrorOf(out) ? directPayloadErrorOf(out)     // 러너 자신의 거부 봉투는 모드와 상관없이 같은 자리로(dw3)
           : ((d.dispatcherPayloadError ? await d.dispatcherPayloadError(out) : dispatcherPayloadErrorOf({ out })) ?? null);
       }
       return payloadErrorMemo;
