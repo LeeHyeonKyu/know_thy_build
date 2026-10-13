@@ -1,7 +1,7 @@
 # Retro State
 
 - last retro: 2026-10-12T15:05:51.211Z
-- merges since last retro: 0
+- merges since last retro: 1
 - current N: 2
 
 ## History (last 5)
@@ -18,11 +18,11 @@
 
 | metric | this window | cumulative |
 | --- | --- | --- |
-| merged | 0 | 34 |
-| review rounds avg | 0 | 1.56 |
-| rounds/issue (plan/impl/review) | 0 / 0 / 0 | 1.23 / 2 / 1.56 |
+| merged | 1 | 34 |
+| review rounds avg | 1 | 1.56 |
+| rounds/issue (plan/impl/review) | 1 / 1 / 1 | 1.23 / 2 / 1.56 |
 | escaped defects | 0 | 31 |
-| revert rate | 없음 | 0.00 (0/34) |
+| revert rate | 0.00 (0/1) | 0.00 (0/34) |
 | needs-human | 2 | 98 |
 | rejects by role | 없음 | spec-conformance 12, qa 5, correctness 17, architecture 7, security 5 |
 | reviewer overlap | 없음 | 0.50 (25/50, runs 74) |
@@ -33,6 +33,12 @@
 | retro cost (usd) | 0.00 | 23.48 |
 | retro tokens | input 0 / output 0 | input 70 / output 53200 |
 | full retros | — | 19 |
+
+### Rounds per issue (this window)
+
+| issue | plan | implement | review | escaped |
+| --- | --- | --- | --- | --- |
+| #288 | 1 | 1 | 1 | 0 |
 
 ### Phase-2 gate baseline (this session)
 
@@ -49,7 +55,7 @@
     "last_retro_at": "2026-10-12T15:05:51.211Z",
     "last_record_offsets": {}
   },
-  "merges_since": 0,
+  "merges_since": 1,
   "n": 2,
   "history": [
     {
@@ -2948,18 +2954,25 @@
     ]
   },
   "stats": {
-    "merged": 0,
-    "review_rounds_avg": 0,
-    "plan_rounds_avg": 0,
-    "implement_rounds_avg": 0,
-    "rounds_per_issue": [],
+    "merged": 1,
+    "review_rounds_avg": 1,
+    "plan_rounds_avg": 1,
+    "implement_rounds_avg": 1,
+    "rounds_per_issue": [
+      {
+        "issue": 288,
+        "plan": 1,
+        "implement": 1,
+        "review": 1
+      }
+    ],
     "escaped_defects": 0,
     "escaped_defects_detail": [],
     "reverts": 0,
     "reverted_issues": [],
-    "revert_rate": null,
+    "revert_rate": 0,
     "rejects_by_role": {},
-    "review_runs": 0,
+    "review_runs": 1,
     "findings_total": 0,
     "overlapping_findings": 0,
     "unique_findings_by_role": {},
