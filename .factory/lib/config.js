@@ -32,6 +32,26 @@ export function loadHarness(root) {
 }
 
 /**
+ * #237 (허점 원장 P-11, T-4) — **에이전트가 하나뿐인 스테이지**(토론 없음). `[factory] orchestration = "agent"`는 이제
+ * "이 스테이지들은 디스패처 세션(→ Workflow → 에이전트, 세 겹) 없이 역할 세션을 `claude -p`로 직접 띄운다"는 뜻이다
+ * (ADR-045). 토론 스테이지(plan·implement·review)는 그 값에서도 `/factory-<stage>` 워크플로를 그대로 탄다.
+ */
+export const DIRECT_AGENT_STAGES = Object.freeze(["triage", "retro"]);
+
+/**
+ * 이 스테이지의 **실효** orchestration — 설정값이 아니라 이 스테이지가 실제로 도는 경로. `agent`는 위 두 스테이지에만
+ * 적용되고, 나머지는 `workflow`다: 그 워크플로가 핸드오프에 `orchestration: 'workflow'`를 찍으므로, 설정값을 그대로
+ * 대조하면 키를 바꾼 저장소의 모든 토론 스테이지가 `orchestration workflow != configured agent`로 needs-human에 선다.
+ * 그 밖의 값(오타)은 그대로 돌려준다 — 판정은 doctor(`factory.orchestration` FAIL)와 verify-stage의 대조가 이미 한다.
+ * 단일 출처: `lib/context.js`(run-stage·`bin/verify-stage.js`가 읽는 `context.json`)와 `bin/retro.js`가 이것만 부른다.
+ */
+export function orchestrationFor(harness, stage) {
+  const configured = harness?.factory?.orchestration ?? "workflow";
+  if (configured !== "agent") return configured;
+  return DIRECT_AGENT_STAGES.includes(stage) ? "agent" : "workflow";
+}
+
+/**
  * ── Feedback loop Task 3 — `[factory].upstream`의 **유일한 독자** (spec §7) ──────────────────────
  *
  * `ktb` 발견(= KTB가 배포한 파일이 원인인 발견)이 갈 상류 저장소 `owner/repo`. 없으면 `null`이고,
