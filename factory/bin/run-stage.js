@@ -38,7 +38,7 @@ import { renderHandoff, latestHandoff, parseHandoffs } from "../lib/handoff.js";
 import { validate } from "../lib/schemas.js";
 import { blockedOrigin, commentsSinceRequeue, commentsSinceCycleStart, countTransitionsTo, countedTransitionIndices, TRANSITION_TO, countSelfGateRetries, countAllSelfGateRetries, SELF_GATE_RETRY_BACKSTOP, selfGateRetryComment, kRestartState, kRestartComment, kRestartBriefOf, sameKRestartBrief, wherePaths, conflictRoundComment } from "../lib/retro/issue-comments.js";
 import { transition } from "../lib/transition.js";
-import { appendRunRecord, appendRunRecordLine, runRecordPath, reviewEvidenceLine, parseReviewEvidence, runIdOfRunner, normalizeVerdicts } from "../lib/run-record.js";
+import { appendRunRecord, appendRunRecordLine, runRecordPath, reviewEvidenceLine, parseReviewEvidence, parseReviewEvidenceAll, runIdOfRunner, normalizeVerdicts } from "../lib/run-record.js";
 import { engineCrashLine, quoteEngineCrashLines, conflictRoundLine, conflictRoundRevokedLine, quoteConflictRoundLines } from "../lib/usage.js";
 import { parseHeartbeatComment } from "../lib/board.js";
 import { syncRecords, hydrateRecord, readRecordsDetailed } from "../lib/records-branch.js";
@@ -951,9 +951,9 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runAt
      * #293 — **re-land fast path.** Before any debate role is dispatched: if the issue's `## What` names an approved branch head
      * (`relandClaimOf`), the runner judges its own facts (`d.relandFacts` → `relandFastPathOf`: the source issue's heartbeat-bound
      * approve line for that head, the factory-posted GREEN `factory/gates` status, the PR head) and, when every one holds, posts
-     * the plan.v1 whose contract is the issue's own done_when — the fast-path record line FIRST, then the handoff, then the
-     * transition carrying the runner's binding (`reland`, the only thing `factory:planned` honours the marker with). Any refusal or
-     * unreadable input writes one reason line and falls through to today's debate, unchanged. No claude -p, no usage line.
+     * the plan.v1 whose contract is the issue's own done_when — the handoff, then the transition carrying the runner's binding
+     * (`reland`, the only thing `factory:planned` honours the marker with), then the one fast-path record line. Any refusal,
+     * unreadable input, or failure to post/transition writes one reason line and falls through to today's debate. No claude -p.
      * Review and merge are untouched; the tier is not lowered.
      */
     if (stage === "plan" && typeof d.relandFacts === "function") {
@@ -967,14 +967,23 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runAt
           catch (e) { decision = { ok: false, reason: `the re-land facts could not be read — ${e?.message || e}` }; }
           if (!decision) decision = relandFastPathOf({ issue: Number(issue), body, claim, facts, maxDoneWhen: ctx?.plan?.max_done_when ?? 6, tier: ctx?.tier_effective ?? ctx?.tier ?? "standard", orchestration: ctx?.orchestration ?? "workflow" });
         }
-        if (!decision.ok) record([relandRefusedLine(decision.reason)]);
-        else {
-          record([decision.line]);
-          await d.writeHandoff({ stage, data: decision.handoff, gates: null });
-          const t = await d.transition({ to: "factory:planned", data: decision.handoff, reland: decision.binding });
-          record(["verify: ok (re-land fast path — no plan role ran)", ...(t.ok ? [`transition: ${t.to}`] : refusal(t))]);
-          return t.ok ? 0 : 2;
+        if (decision.ok) {
+          // The handoff, then the transition, then — only once the issue IS planned — the one fast-path line. A failure on the
+          // way is not a half-skip: it is one reason line and today's debate (whose own handoff supersedes a posted fast-path one).
+          let t = null;
+          try { await d.writeHandoff({ stage, data: decision.handoff, gates: null }); }
+          catch (e) { decision = { ok: false, reason: `the fast-path plan handoff could not be posted — ${e?.message || e}` }; }
+          if (decision.ok) {
+            try { t = await d.transition({ to: "factory:planned", data: decision.handoff, reland: decision.binding }); }
+            catch (e) { t = { ok: false, reason: `${e?.message || e}` }; }
+            if (!t?.ok) decision = { ok: false, reason: `the factory:planned transition was refused: ${t?.reason || "no reason given"}` };
+          }
+          if (decision.ok) {
+            record([decision.line, "verify: ok (re-land fast path — no plan role ran)", `transition: ${t.to}`]);
+            return 0;
+          }
         }
+        record([relandRefusedLine(decision.reason)]);
       }
     }
     const manifestNote = contextManifestLines(ctx, stamp);
@@ -2871,15 +2880,42 @@ export async function reworkScopeInput({ run, cwd, base, ctx, reviewRounds, test
  * (ADR-022 decision 3: the heartbeat's first two lines are a fixed contract). The merge stage's `reviewRunId` dep and the #293
  * re-land fast path (`makeRelandFactsDep`, for the SOURCE issue) read it through this one function.
  */
-export function reviewRunIdOf(comments, issue) {
-  const beats = (Array.isArray(comments) ? comments : [])
-    .map((c) => parseHeartbeatComment(c?.body))
-    .filter((h) => h && h.issue === Number(issue) && h.stage === "review" && h.runner);
+export function reviewRunIdOf(comments, issue, { logins = null } = {}) {
+  const all = (Array.isArray(comments) ? comments : [])
+    .map((c) => ({ h: parseHeartbeatComment(c?.body), author: c?.author }))
+    .filter(({ h }) => h && h.issue === Number(issue) && h.stage === "review" && h.runner);
+  // #293 — with `logins` (the re-land fast path), only a heartbeat the factory's own account posted names the run: a heartbeat-
+  // shaped comment by anyone else cannot redirect the binding. Without it (the merge stage's call), today's behaviour, unchanged.
+  const own = Array.isArray(logins) ? new Set(logins.map((l) => String(l).toLowerCase())) : null;
+  const beats = (own ? all.filter(({ author }) => author != null && own.has(String(author).toLowerCase())) : all).map(({ h }) => h);
+  if (!beats.length && own) return { ok: false, reason: `no review-stage heartbeat posted by the factory account on issue #${issue}${all.length ? ` (${all.length} by another author ignored)` : ""} — there is no independent record of which factory run produced this review` };
   if (!beats.length) return { ok: false, reason: `no review-stage heartbeat on issue #${issue} — there is no independent record of which factory run produced this review` };
   const runner = beats[beats.length - 1].runner;
   const runId = runIdOfRunner(runner);
   if (!runId) return { ok: false, reason: `the review heartbeat on issue #${issue} names no runner (got "${runner}")` };
   return { ok: true, runId, runnerId: runner };
+}
+
+/**
+ * #293 dw5 — the runner's hold on the diff-only re-land brief. On an implement round whose `loaded` carries `reland: true`, the
+ * #200 scope check judges against the paths the APPROVED diff changed (`git diff --no-renames --name-only <base>...<approved_head>`,
+ * after a best-effort fetch of the approved branch) instead of the fast-path plan's empty `files_expected` — a path beyond that
+ * diff needs its `Scope change (#<issue>)` line like any other. null when this is not a re-land round (nothing changes). An
+ * unreadable diff is `{ issue, plan, filesExpected, error }`: the scope check runs and says it could not judge (never "in scope").
+ */
+export async function relandScopeInput({ run, cwd, base, issue, plan, loaded }) {
+  if (loaded?.reland !== true) return null;
+  const head = String(loaded.approved_head ?? ""), branch = String(loaded.approved_branch ?? "");
+  const unreadable = (why) => ({ issue, plan: true, filesExpected: [branch || "re-land"], error: `re-land: the approved diff of ${branch} at ${head.slice(0, 7)} could not be read — ${why}` });
+  if (!/^[0-9a-f]{40}$/.test(head) || !/^claude\/fq-\d+$/.test(branch)) return unreadable("loaded carries no approved head/branch");
+  try { await run("git", ["fetch", "origin", `+refs/heads/${branch}:refs/remotes/origin/${branch}`], { cwd }); } catch { /* the head may already be local */ }
+  let r;
+  try { r = await run("git", ["diff", "--no-renames", "--name-only", "-z", `${base}...${head}`], { cwd }); }
+  catch (e) { return unreadable(String(e?.message || e)); }
+  if (r?.code !== 0) return unreadable(String(r?.stderr || `git diff exited ${r?.code}`).trim().split("\n")[0]);
+  const files = String(r.stdout ?? "").split("\0").filter(Boolean);
+  if (!files.length) return unreadable("the approved diff is empty");
+  return { plan: { ...(plan && typeof plan === "object" ? plan : {}), files_expected: files } };
 }
 
 /**
@@ -2890,17 +2926,26 @@ export function reviewRunIdOf(comments, issue) {
  */
 export function makeRelandFactsDep({ gh, env, run: runner = run, root = process.cwd(), readRecords = () => readRecordsDetailed({ run: runner, cwd: root }) }) {
   const read = async (fn) => { try { return await fn(); } catch (e) { return { ok: false, reason: String(e?.message || e) }; } };
-  return async ({ source, branch, sha }) => ({
-    records: await read(async () => {
-      const det = await readRecords();
-      if (!det?.fetched) return { ok: false, reason: "the branch could not be fetched" };
-      return { ok: true, text: det.records?.get(String(source)) ?? null };
-    }),
-    heartbeat: await read(async () => reviewRunIdOf(await gh.comments(source), source)),
-    logins: await read(async () => resolveFactoryLogins({ gh, env })),
-    statuses: await read(async () => ({ ok: true, list: await gh.commitStatuses(sha) })),
-    branchHead: await read(async () => ({ ok: true, sha: await gh.branchHeadSha(branch) })),
-  });
+  return async ({ source, branch, sha }) => {
+    const logins = await read(async () => resolveFactoryLogins({ gh, env }));
+    return {
+      records: await read(async () => {
+        const det = await readRecords();
+        if (!det?.fetched) return { ok: false, reason: "the branch could not be fetched" };
+        // `elsewhere`: other issues whose record holds a line for this head — named in the refusal, never counted (dw2)
+        const elsewhere = [...(det.records?.entries?.() ?? [])]
+          .filter(([n, text]) => n !== String(source) && parseReviewEvidenceAll(text).some((e) => e.headSha === sha)).map(([n]) => n);
+        return { ok: true, text: det.records?.get(String(source)) ?? null, elsewhere };
+      }),
+      // the binding counts only heartbeats the factory's own account posted — so it waits on the logins read
+      heartbeat: logins?.ok === true && Array.isArray(logins.logins) && logins.logins.length
+        ? await read(async () => reviewRunIdOf(await gh.comments(source), source, { logins: logins.logins }))
+        : { ok: false, reason: `the factory's own account could not be resolved, so no heartbeat on #${source} can be attributed to it — ${logins?.reason || "no login"}` },
+      logins,
+      statuses: await read(async () => ({ ok: true, list: await gh.commitStatuses(sha) })),
+      branchHead: await read(async () => ({ ok: true, sha: await gh.branchHeadSha(branch) })),
+    };
+  };
 }
 
 export function makeVerifyStageDep({ root, stage, getCtx, getCharter, getHarness, getEngine = () => false, qaEvidenceSummary = () => null }) {
@@ -3120,7 +3165,9 @@ export function makeSelfGateDep({ root, harness, run, mergeBase, getCtx, scopeMa
     const brief = ctx?.loaded?.k_restart_brief ?? null;
     const restartBrief = brief ? await restartBriefInput({ run, cwd: root, brief, ...(await addedPathsNoRenames({ run, cwd: root, base })) }) : null;
     // #200 — the scope check's input: the plan's files_expected, the run's own issue number, and this round's diff (git, here).
-    const scope = await scopeInput({ run, cwd: root, base, issue: Number(ctx?.issue?.number), plan: ctx?.handoffs?.plan ?? null, maxBytes: scopeMaxBytes });
+    // #293 — a re-land round (`loaded.reland`): the scope is the approved diff, not the fast-path plan's empty files_expected.
+    const reland = await relandScopeInput({ run, cwd: root, base, issue: Number(ctx?.issue?.number), plan: ctx?.handoffs?.plan ?? null, loaded: ctx?.loaded ?? null });
+    const scope = reland?.error ? reland : await scopeInput({ run, cwd: root, base, issue: Number(ctx?.issue?.number), plan: reland?.plan ?? ctx?.handoffs?.plan ?? null, maxBytes: scopeMaxBytes });
     // #212 — a conflict-only round (context.js `conflictOnlyOf`): measured HERE on the real merge commit; self-gate only judges it.
     const loaded = ctx?.loaded ?? null;
     const conflictScope = loaded?.conflict_only === true

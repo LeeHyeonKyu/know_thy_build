@@ -2085,7 +2085,7 @@ test("test_227_a_transient_gh_failure_or_merged_pr_never_triggers_a_rebuild — 
 
 // ── #293 — after a re-land fast-path plan, implement gets the #174 diff-only brief pinned to the approved head ──────────────
 import { relandFastPathOf as relandFastPathOf293 } from "../lib/context.js";
-import { reviewEvidenceLine as reviewEvidenceLine293, appendRunRecord as appendRunRecord293, runRecordPath as runRecordPath293, parseReviewEvidence as parseReviewEvidence293, parseReviewEvidenceAll as parseReviewEvidenceAll293 } from "../lib/run-record.js";
+import { reviewEvidenceLine as reviewEvidenceLine293, appendRunRecord as appendRunRecord293, runRecordPath as runRecordPath293 } from "../lib/run-record.js";
 import { K_RESTART_SCOPE as K_RESTART_SCOPE293 } from "../lib/retro/issue-comments.js";
 
 const S293c = "4f0c2a9e1b7d3c5a8e6f0b2d4c6a8e0f1a3b5c7d";
@@ -2103,12 +2103,13 @@ function fastPlan293() {
     statuses: { ok: true, list: [{ context: "factory/review", state: "success", creatorLogin: "factory-bot" }, { context: "factory/gates", state: "success", creatorLogin: "factory-bot" }] },
     branchHead: { ok: true, sha: S293c },
   };
-  const d = relandFastPathOf293({ issue: 293, body: BODY293c, facts, maxDoneWhen: 6, tier: "standard", orchestration: "workflow" });
+  const d = relandFastPathOf293({ issue: 293, body: BODY293c, facts, maxDoneWhen: 6, tier: "load-bearing", orchestration: "workflow" });
   expect(d.ok).toBe(true);
+  expect(d.handoff.tier).toBe("load-bearing");                            // the effective tier it was given, never lowered
   return d;
 }
 function gh293(planData) {
-  const triage = renderHandoff({ stage: "triage", issue: 293, summary: "s", data: { schema: "factory.triage.v1", issue: 293, disposition: "ready", tier: "standard" } });
+  const triage = renderHandoff({ stage: "triage", issue: 293, summary: "s", data: { schema: "factory.triage.v1", issue: 293, disposition: "ready", tier: "load-bearing" } });
   const plan = renderHandoff({ stage: "plan", issue: 293, summary: "s", data: planData });
   return {
     issue: vi.fn(async () => ({ number: 293, title: "T", body: BODY293c, labels: ["factory:in-progress"] })),
@@ -2118,7 +2119,7 @@ function gh293(planData) {
 
 test("test_293_reland_fast_path_builder_brief_is_diff_only (test_reland_fast_path_builder_brief_is_diff_only)", async () => {
   const d = fastPlan293();
-  const withR = root(), withoutR = root();
+  const withR = root233(), withoutR = root233();
   const ctx = await buildContext({ root: withR, gh: gh293(d.handoff), issue: 293, stage: "implement" });
   const { reland: _m, ...plain } = d.handoff;
   await buildContext({ root: withoutR, gh: gh293(plain), issue: 293, stage: "implement" });
@@ -2140,18 +2141,22 @@ test("test_293_reland_fast_path_builder_brief_is_diff_only (test_reland_fast_pat
   const { reland: _r, approved_head: _a, approved_branch: _b, reland_brief: _c, ...rest } = loaded;
   expect(rest).toEqual(baseline);
   expect(loaded.tier).toBe(ctx.tier_effective);
-  expect(loaded.tier).toBe("standard");
+  expect(loaded.tier).toBe("load-bearing");
+  // a plan handoff that SAYS a lower tier does not lower loaded.tier (the tier comes from triage + diff, not from the plan)
+  const lowered = root233();
+  await buildContext({ root: lowered, gh: gh293({ ...d.handoff, tier: "docs" }), issue: 293, stage: "implement" });
+  expect(JSON.parse(readFileSync(join(lowered, ".factory/out/loaded.json"), "utf8")).tier).toBe("load-bearing");
+  // the file the builder is told to read first carries the brief and the plan's diff-only non_goal, both naming S
+  const cj = JSON.parse(readFileSync(join(withR, ".factory/out/context.json"), "utf8"));
+  expect(cj.loaded.reland_brief.head).toBe(S293c);
+  expect(cj.handoffs.plan.non_goals.join("\n")).toContain(`claude/fq-271 at the approved head ${S293c}`);
+  expect(cj.handoffs.plan.non_goals.join("\n")).toMatch(/make no other change/);
   // a hand-written plan handoff whose marker is malformed carries no re-land keys
-  const forged = root();
+  const forged = root233();
   await buildContext({ root: forged, gh: gh293({ ...d.handoff, reland: { ...d.handoff.reland, head_sha: "4f0c2a9" } }), issue: 293, stage: "implement" });
   expect(JSON.parse(readFileSync(join(forged, ".factory/out/loaded.json"), "utf8"))).not.toHaveProperty("reland");
-  // review on B is B's own: the full standard roster, and B's record (with the fast-path line) is no review evidence for A's run
-  const review = await buildContext({ root: root(), gh: gh293(d.handoff), issue: 293, stage: "review" });
-  expect(review.roster).toEqual(["correctness", "qa", "spec-conformance"]);
-  const b = mkdtempSync(join(tmpdir(), "ctx293b-"));
-  appendRunRecord293({ root: b, issue: 293, stage: "plan", runnerId: "gha-900", lines: [d.line] });
-  const bText = readFileSync(runRecordPath293({ root: b, issue: 293 }), "utf8");
-  expect(bText).toContain(d.line);
-  expect(parseReviewEvidenceAll293(bText)).toEqual([]);
-  expect(parseReviewEvidence293(bText, { runId: "777" })).toBeNull();
+  // review on B is B's own: B's full load-bearing roster (a fixture CHARTER whose load-bearing roster differs from standard's) (the record side is pinned in run-stage.test.js, same id)
+  const review = await buildContext({ root: root233(), gh: gh293(d.handoff), issue: 293, stage: "review" });
+  expect(review.tier_effective).toBe("load-bearing");
+  expect(review.roster).toEqual(LB_ROSTER);
 });

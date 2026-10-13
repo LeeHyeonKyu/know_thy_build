@@ -613,6 +613,13 @@ export function relandClaimOf(body, { issue = null } = {}) {
 }
 
 const s7 = (sha) => String(sha ?? "").slice(0, 7);
+/**
+ * The diff-only rule, one string for both places the builder reads it in `context.json`: the fast-path plan's `non_goals`
+ * (`handoffs.plan`) and `loaded.reland_brief.scope`. The runner holds it, too: on an implement round with `loaded.reland`, the
+ * self-gate's #200 scope check is fed the paths of the approved diff (run-stage `relandScopeInput`), so a path outside it is a finding.
+ */
+export const relandScopeRule = (branch, sha) =>
+  `Any change other than bringing the diff of ${branch} at the approved head ${sha} onto this branch: fix only the listed findings, make no other change (#293)`;
 
 /**
  * Judges the facts `run-stage`'s `relandFacts` dep read — `records {text}`, `heartbeat {runId}`, `logins {logins}`, `statuses {list}`,
@@ -636,9 +643,11 @@ export function relandFastPathOf({ issue, body, claim = relandClaimOf(body, { is
   const all = parseReviewEvidenceAll(f.records.text);
   const bound = all.filter((e) => e.runId === hb.runId);
   if (!bound.length) {
-    return no(all.some((e) => e.headSha === S)
-      ? `the review-evidence line for head ${s7(S)} is not bound to source #${A}'s review heartbeat run ${hb.runId}`
-      : `head ${s7(S)} is absent from source #${A}'s run record (no review-evidence line of run ${hb.runId})`);
+    if (all.some((e) => e.headSha === S)) return no(`the review-evidence line for head ${s7(S)} is not bound to source #${A}'s review heartbeat run ${hb.runId}`);
+    // a line for S that exists only in ANOTHER issue's record (the dep lists where) is named as such — it never counts for A
+    const elsewhere = (Array.isArray(f.records.elsewhere) ? f.records.elsewhere : []).filter((n) => String(n) !== String(A));
+    if (elsewhere.length) return no(`a review-evidence line for head ${s7(S)} sits in ${elsewhere.map((n) => `#${n}`).join(", ")}'s run record, not source #${A}'s — another issue's line does not count`);
+    return no(`head ${s7(S)} is absent from source #${A}'s run record (no review-evidence line of run ${hb.runId})`);
   }
   const shape = (e) => JSON.stringify([e.stage, e.runnerId, e.headSha, e.round, e.decision, e.verdicts, e.qaManifest, e.qaClaims]);
   if (new Set(bound.map(shape)).size > 1) return no(`two review-evidence lines claim run ${hb.runId} with different content in source #${A}'s record — undecidable`);
@@ -659,7 +668,7 @@ export function relandFastPathOf({ issue, body, claim = relandClaimOf(body, { is
     schema: "factory.plan.v1", issue: Number(issue), tier, roles: [], rounds: 0, orchestration,
     summary: `Re-land of #${A} at ${s7(S)} (approved by review run ${hb.runId} on ${approvedAt}): the issue's own done_when are the contract; the plan debate was skipped by the runner (#293).`,
     done_when: items.map((it) => ({ id: it.id, text: it.text, level: "unit", check: { kind: "test", ref: it.id }, rubric: it.text })),
-    files_expected: [], dissent_log: [], non_goals: [], open_risks: [],
+    files_expected: [], dissent_log: [], non_goals: [relandScopeRule(branch, S)], open_risks: [],
     reland: { ...binding, approved_at: approvedAt },
   };
   const v = verifyRelandPlan({ data: handoff, binding, issueBody: body, maxDoneWhen });
@@ -672,11 +681,14 @@ export function relandFastPathOf({ issue, body, claim = relandClaimOf(body, { is
  * pinned to the approved head, through the existing `approved_head` key. It never lowers the tier, never touches K (no rework
  * transition, no `k_restart_brief`), and is not review evidence for B — B's review needs B's roster and B's own record line.
  * A forged marker can only narrow the builder's brief; the review that follows is unchanged.
+ * Who reads it: the builder, in `context.json` (`loaded.reland_brief`, next to the plan's `non_goals` rule — the workflow prompt in
+ * `.claude/workflows/**` is not changed by #293), and the runner, whose self-gate bounds the round's paths by the approved diff
+ * (run-stage `relandScopeInput`). The `loaded.json` keys alone change nothing the workflow script does.
  */
 export function relandLoadedOf(plan) {
   const m = plan?.reland;
   if (!isPlainObject(m) || typeof m.head_sha !== "string" || !RELAND_SHA.test(m.head_sha) || typeof m.branch !== "string" || !RELAND_BRANCH.test(m.branch) || !Number.isInteger(m.source_issue)) return null;
-  const scope = `diff-only re-land: bring the diff of ${m.branch} at the approved head ${m.head_sha} onto this branch, fix only the listed findings, make no other change — ${K_RESTART_SCOPE}`;
+  const scope = `diff-only re-land — out of scope: ${relandScopeRule(m.branch, m.head_sha)} — ${K_RESTART_SCOPE}`;
   return {
     reland: true,
     approved_head: m.head_sha,

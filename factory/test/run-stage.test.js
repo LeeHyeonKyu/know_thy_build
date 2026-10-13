@@ -11200,6 +11200,7 @@ const GREEN_STATUSES293 = [
 async function reland293({
   body = body293(), aLines = [ev293()], otherLines = [], heartbeatRunner = "gha-777", aExtraComments = [],
   statuses = GREEN_STATUSES293, branchHead = S293, records = "ok", gatesJson = null,
+  tier = "standard", tierEffective = tier, writeHandoffFails = false, transitionRefuses = false,
 } = {}) {
   const root = mkdtempSync(join(tmpdir(), "rs293-"));
   if (aLines.length) appendRunRecord({ root, issue: A293, stage: "review", runnerId: heartbeatRunner ?? "gha-777", lines: aLines, now: "2026-10-11T02:03:00Z" });
@@ -11228,16 +11229,18 @@ async function reland293({
     for (const n of [A293, OTHER293]) { const p = runRecordPath293({ root, issue: n }); if (existsSync(p)) m.set(String(n), readFileSync(p, "utf8")); }
     return { records: m, fetched: true };
   };
-  const ctx = { issue: { number: B293, body }, stage: "plan", roster: ["architect", "skeptic"], rounds: 2, plan: { mode: "debate", max_done_when: 6 }, tier: "standard", tier_effective: "standard", tier_source: "triage", orchestration: "workflow", limits: { K: 3 } };
+  const ctx = { issue: { number: B293, body }, stage: "plan", roster: ["architect", "skeptic"], rounds: 2, plan: { mode: "debate", max_done_when: 6 }, tier, tier_effective: tierEffective, tier_source: "triage", orchestration: "workflow", limits: { K: 3 } };
+  const realWriteHandoff = makeWriteHandoffDep293({ gh, issue: B293, stage: "plan", getCtx: () => ctx });
   const lines = [];
   const transitionCalls = [];
   const deps = baseDeps({
     buildContext: async () => ctx,
     claudeP: vi.fn(async () => ({ is_error: false, result: "{}" })),
     verifyStage: vi.fn(() => ({ ok: false, reasons: ["debate stub: no plan artifact in this fixture"], data: null })),
-    writeHandoff: makeWriteHandoffDep293({ gh, issue: B293, stage: "plan", getCtx: () => ctx }),
+    writeHandoff: vi.fn(async (args) => { if (writeHandoffFails && args?.data?.reland) throw new Error("HTTP 502 while posting the comment"); return realWriteHandoff(args); }),
     transition: vi.fn(async (args) => {
       transitionCalls.push(args);
+      if (transitionRefuses && args.reland) return { ok: false, from: "factory:ready", to: args.to, reason: "fixture: the planned requirement refused" };
       const ctxExtra = await buildCtxExtra({ gh, issue: B293, to: args.to, data: args.data, ctx, stage: "plan", reland: args.reland ?? null });
       ctxExtra.gatesChecked = true;
       return transition({ gh, issue: B293, to: args.to, reason: args.reason, ctxExtra, stage: "plan", cause: args.cause, env: {} });
@@ -11254,7 +11257,8 @@ const FAST_LINE293 = /^plan: re-land fast path — /;
 const refusedLines293 = (lines) => lines.filter((l) => /^plan: re-land fast path not taken — /.test(l));
 
 test("test_293_reland_fast_path_skips_plan_when_the_head_was_approved (test_reland_fast_path_skips_plan_when_the_head_was_approved)", async () => {
-  const r = await reland293();
+  // the triage tier says standard, the effective tier is load-bearing: the runner's plan carries the EFFECTIVE tier, never lower
+  const r = await reland293({ tier: "standard", tierEffective: "load-bearing" });
   expect(r.code).toBe(0);
   // no debate role ran: claude -p was never dispatched, and the stage did not even consult the debate verifier
   expect(r.deps.claudeP).not.toHaveBeenCalled();
@@ -11265,6 +11269,7 @@ test("test_293_reland_fast_path_skips_plan_when_the_head_was_approved (test_rela
   // one plan.v1 handoff, whose contract is exactly the issue's items: same ids and text, none added or dropped
   expect(r.planHandoffs).toHaveLength(1);
   const plan = r.planHandoffs[0].data;
+  expect(plan.tier).toBe("load-bearing");
   expect(validate293("plan.v1", plan).ok).toBe(true);
   expect(plan.done_when).toEqual([
     { id: "test_reland_alpha_returns_two", text: "the alpha path returns 2 (level: fast)", level: "unit", check: { kind: "test", ref: "test_reland_alpha_returns_two" }, rubric: "the alpha path returns 2 (level: fast)" },
@@ -11297,9 +11302,11 @@ test("test_293_reland_fast_path_skips_plan_when_the_head_was_approved (test_rela
 test("test_293_reland_fast_path_refuses_unverified_heads (test_reland_fast_path_refuses_unverified_heads)", async () => {
   const other = "9".repeat(40);
   const cases = {
-    "S absent from A's record": [{ aLines: [ev293({ headSha: other })] }, /head 4f0c2a9 is absent from source #271's run record|reviewed head 9999999, not 4f0c2a9/],
+    "S absent from A's record": [{ aLines: [ev293({ runId: "555", headSha: other })] }, /^plan: re-land fast path not taken — head 4f0c2a9 is absent from source #271's run record \(no review-evidence line of run 777\) \(full plan debate\)$/],
+    "the bound line reviewed another head": [{ aLines: [ev293({ headSha: other })] }, /source #271's heartbeat-bound review \(run 777\) reviewed head 9999999, not 4f0c2a9/],
     "line not bound to A's heartbeat run": [{ aLines: [ev293({ runId: "555" })] }, /not bound to source #271's review heartbeat run 777/],
-    "line belongs to another issue": [{ aLines: [], otherLines: [ev293()] }, /source #271 has no run record on factory\/records/],
+    "line belongs to another issue": [{ aLines: [ev293({ runId: "555", headSha: other })], otherLines: [ev293()] }, /a review-evidence line for head 4f0c2a9 sits in #254's run record, not source #271's — another issue's line does not count/],
+    "source has no run record": [{ aLines: [] }, /source #271 has no run record on factory\/records/],
     "decision not approved": [{ aLines: [ev293({ decision: "rework" })] }, /decision=rework, not approved/],
     "a single reject whose must_fix is quoted in B's body": [{ aLines: [ev293({ decision: "rework" })], body: body293() + "\n> must_fix cf1: the alpha path returned 1 — fixed by quoting it here\n" }, /decision=rework, not approved/],
     "gates status missing": [{ statuses: [GREEN_STATUSES293[0]] }, /no factory\/gates commit status/],
@@ -11307,7 +11314,7 @@ test("test_293_reland_fast_path_refuses_unverified_heads (test_reland_fast_path_
     "PR head moved": [{ branchHead: "1".repeat(40) }, /PR head \(branch claude\/fq-271\) is 1111111, not 4f0c2a9/],
     "PR unreadable": [{ branchHead: new Error("HTTP 502") }, /PR head \(branch claude\/fq-271\) could not be read — HTTP 502/],
     "records branch unfetched": [{ records: "unfetched" }, /the factory\/records branch could not be read/],
-    "no review heartbeat on A": [{ heartbeatRunner: null }, /no review-stage heartbeat on issue #271/],
+    "no review heartbeat on A": [{ heartbeatRunner: null }, /no review-stage heartbeat posted by the factory account on issue #271 — /],
     "commit statuses unreadable": [{ statuses: new Error("HTTP 503") }, /commit statuses for 4f0c2a9 could not be read — HTTP 503/],
     "records branch throws": [{ records: "throws" }, /the factory\/records branch could not be read — git fetch failed/],
     "two evidence lines conflict": [{ aLines: [ev293(), ev293({ decision: "rework" })] }, /two review-evidence lines claim run 777 with different content/],
@@ -11315,6 +11322,10 @@ test("test_293_reland_fast_path_refuses_unverified_heads (test_reland_fast_path_
     "done_when over max": [{ body: body293({ doneWhen: Array.from({ length: 7 }, (_, i) => `- [ ] \`test_reland_item_${i}\` — item ${i} works`).join("\n") }) }, /done_when has 7 items \(max 6\)/],
     "done_when fails validatePlanHandoff (no runnable id)": [{ body: body293({ doneWhen: "- [ ] the alpha path returns 2" }) }, /acceptance contract incomplete: issue-dw1/],
     "short sha in ## What": [{ body: body293({ sha: S293.slice(0, 7) }) }, /names no full 40-hex head sha/],
+    // the body-format rules ADR-045 (b) states: any second backticked branch or full sha inside ## What disqualifies the body
+    "a second backticked sha in ## What (the base commit)": [{ body: body293().replace("다시 얹는다.", "다시 얹는다. base는 `" + "a".repeat(40) + "`.") }, /## What names branch claude\/fq-271 but names 2 full head shas/],
+    "a second backticked branch in ## What": [{ body: body293().replace("다시 얹는다.", "다시 얹는다. (`claude/fq-254`와 겹친다)") }, /## What names 2 branches \(claude\/fq-271, claude\/fq-254\)/],
+    "## What names the issue's own branch": [{ body: body293({ branch: `claude/fq-${B293}` }) }, /## What names this issue's own branch claude\/fq-293/],
   };
   for (const [name, [opts, reason]] of Object.entries(cases)) {
     const r = await reland293(opts);
@@ -11325,6 +11336,21 @@ test("test_293_reland_fast_path_refuses_unverified_heads (test_reland_fast_path_
     expect(refused[0], name).toMatch(reason);
     expect(r.planHandoffs.filter((h) => h.data?.reland), name).toEqual([]);
   }
+  // a failure AFTER the facts held is still debate, never a half-skip: no fast-path line claims "debate skipped"
+  const postFails = await reland293({ writeHandoffFails: true });
+  expect(postFails.deps.claudeP).toHaveBeenCalledTimes(1);
+  expect(postFails.lines.filter((l) => FAST_LINE293.test(l))).toEqual([]);
+  expect(refusedLines293(postFails.lines)).toEqual(["plan: re-land fast path not taken — the fast-path plan handoff could not be posted — HTTP 502 while posting the comment (full plan debate)"]);
+  expect(postFails.transitionCalls.filter((c) => c.reland)).toEqual([]);
+  const refusedT = await reland293({ transitionRefuses: true });
+  expect(refusedT.deps.claudeP).toHaveBeenCalledTimes(1);
+  expect(refusedT.lines.filter((l) => FAST_LINE293.test(l))).toEqual([]);
+  expect(refusedLines293(refusedT.lines)).toEqual(["plan: re-land fast path not taken — the factory:planned transition was refused: fixture: the planned requirement refused (full plan debate)"]);
+  // the format rules cut both ways: a sha with no backticks in ## What, and a backticked sha outside ## What, do not disqualify
+  const loose = await reland293({ body: body293().replace("다시 얹는다.", "다시 얹는다. base는 " + "a".repeat(40) + ".").replace("승인된 코드의 운반.", "승인된 코드의 운반. 이전 head `" + "b".repeat(40) + "`, `claude/fq-254` 참고.") });
+  expect(loose.code).toBe(0);
+  expect(loose.deps.claudeP).not.toHaveBeenCalled();
+  expect(loose.lines.filter((l) => FAST_LINE293.test(l))).toHaveLength(1);
   // an issue that names no re-land at all is untouched: no line, the debate as today
   const plain = await reland293({ body: "## What\nAdd a flag.\n\n## done_when\n" + DW293 + "\n" });
   expect(plain.deps.claudeP).toHaveBeenCalledTimes(1);
@@ -11351,6 +11377,17 @@ test("test_293_reland_fast_path_ignores_agent_written_claims", async () => {
     expect(r.lines.filter((l) => FAST_LINE293.test(l)), name).toEqual([]);
     expect(refusedLines293(r.lines), name).toHaveLength(1);
   }
+  // A heartbeat-shaped comment posted by a non-factory account cannot redirect the run binding: the factory's own heartbeat
+  // names run 777, whose line reviewed another head; mallory's later "heartbeat" names run 555, whose line approves S.
+  const hb = (runnerId, author, at) => ({ body: heartbeatBody293({ issue: A293, stage: "review", runnerId, started: at, last: at }), createdAt: `${at}:00Z`, author });
+  const redirected = await reland293({ aLines: [ev293({ headSha: "9".repeat(40) }), ev293({ runId: "555" })], aExtraComments: [hb("gha-555", "mallory", "2026-10-11T05:00")] });
+  expect(redirected.deps.claudeP).toHaveBeenCalledTimes(1);
+  expect(redirected.lines.filter((l) => FAST_LINE293.test(l))).toEqual([]);
+  expect(refusedLines293(redirected.lines)).toEqual([expect.stringMatching(/source #271's heartbeat-bound review \(run 777\) reviewed head 9999999, not 4f0c2a9/)]);
+  // ...and when ONLY a stranger posted the heartbeat, there is no binding at all
+  const strangerOnly = await reland293({ heartbeatRunner: null, aExtraComments: [hb("gha-777", "mallory", "2026-10-11T05:00")] });
+  expect(strangerOnly.deps.claudeP).toHaveBeenCalledTimes(1);
+  expect(refusedLines293(strangerOnly.lines)).toEqual([expect.stringMatching(/no review-stage heartbeat posted by the factory account on issue #271 \(1 by another author ignored\)/)]);
   // A plan handoff that claims the fast path without this run's runner line is rejected by verify-stage (debate path).
   const claimed = { schema: "factory.plan.v1", issue: B293, tier: "standard", roles: ["architect", "skeptic"], rounds: 2, orchestration: "workflow",
     done_when: [{ id: "test_reland_alpha_returns_two", text: "t", level: "unit", check: { kind: "test", ref: "test_reland_alpha_returns_two" }, rubric: "r" }, { id: "test_reland_beta_returns_three", text: "t", level: "unit", check: { kind: "test", ref: "test_reland_beta_returns_three" }, rubric: "r" }],
@@ -11359,4 +11396,87 @@ test("test_293_reland_fast_path_ignores_agent_written_claims", async () => {
   expect(v.ok).toBe(false);
   expect(v.reasons.join("\n")).toMatch(/roster role not completed: re-land fast path claimed without the runner's fast-path record line for this run/);
   expect(v.planRepair).toBeNull();                                       // not a validator reason — never "repaired" into a pass
+});
+
+// #293 dw5 — the builder's scope on a re-land round is the approved diff (the runner's self-gate holds it), and B's review is B's own.
+import { reviewRunIdOf as reviewRunIdOf293 } from "../bin/run-stage.js";
+import { parseReviewEvidence as parseReviewEvidence293 } from "../lib/run-record.js";
+import { verifyReviewProvenance as verifyReviewProvenance293 } from "../lib/review-quorum.js";
+import { relandLoadedOf as relandLoadedOf293 } from "../lib/context.js";
+
+test("test_293_reland_fast_path_builder_brief_is_diff_only — the approved diff bounds the round, and B's review is B's own (test_reland_fast_path_builder_brief_is_diff_only)", async () => {
+  // ── the plan the REAL fast path posted, and the implement-side keys it yields
+  const r = await reland293({ tier: "standard", tierEffective: "load-bearing" });
+  expect(r.code).toBe(0);
+  const plan = r.planHandoffs[0].data;
+  const loaded = relandLoadedOf293(plan);
+  expect(loaded).toMatchObject({ reland: true, approved_head: S293, approved_branch: BRANCH293 });
+  // the plan the builder reads (context.json handoffs.plan) carries the diff-only rule as a non_goal, naming the branch and S
+  expect(plan.non_goals).toEqual([expect.stringContaining(`${BRANCH293} at the approved head ${S293}`)]);
+  expect(plan.non_goals[0]).toMatch(/^Any change other than bringing the diff of .* fix only the listed findings, make no other change/);
+
+  // ── a real repository: the approved branch changes a.js and b.js at S; this issue's branch brings that diff plus one more file
+  const root = mkdtempSync(join(tmpdir(), "fq293g-"));
+  const git = async (...args) => {
+    const x = await realRun200("git", ["-c", "user.email=t@example.invalid", "-c", "user.name=t", "-c", "commit.gpgsign=false", ...args], { cwd: root });
+    expect(x.code, `git ${args.join(" ")}: ${x.stderr}`).toBe(0);
+    return x.stdout.trim();
+  };
+  const put = (p, s) => { mkdirSync(dirname(join(root, p)), { recursive: true }); writeFileSync(join(root, p), s); };
+  await git("init", "-q", "-b", "main");
+  put("factory/lib/a.js", "export const a = 1;\n"); put("factory/lib/b.js", "export const b = 1;\n"); put("factory/lib/c.js", "export const c = 1;\n");
+  await git("add", "-A"); await git("commit", "-q", "-m", "base");
+  await git("checkout", "-q", "-b", BRANCH293);
+  put("factory/lib/a.js", "export const a = 2;\n"); put("factory/lib/b.js", "export const b = 2;\n");
+  await git("add", "-A"); await git("commit", "-q", "-m", "the approved work");
+  const S = await git("rev-parse", "HEAD");
+  await git("checkout", "-q", "main");
+  await git("checkout", "-q", "-b", `claude/fq-${B293}`);
+  await git("merge", "-q", "--no-edit", BRANCH293);
+  const mergeBase = async () => git("merge-base", "main", "HEAD");
+  const ctxFor = (l) => ({ issue: { number: B293 }, handoffs: { plan: { ...plan, files_expected: [] } }, loaded: l });
+  const relandLoaded = { ...relandLoadedOf293({ ...plan, reland: { ...plan.reland, head_sha: S } }) };
+  const scopeOf = (x) => x.findings.filter((f) => f.check === "scope");
+
+  // the diff of the approved head alone: in scope, nothing to say
+  const clean = await makeSelfGateDep({ root, harness: HARNESS_200, run: realRun200, mergeBase, getCtx: () => ctxFor(relandLoaded) })({ gates: GREEN_200 });
+  expect(clean.ranChecks).toContain("scope");
+  expect(scopeOf(clean)).toEqual([]);
+  expect(clean.ok).toBe(true);
+  // one change beyond it: the self-gate names exactly that path (a.js, b.js stay in scope — they are the approved diff)
+  put("factory/lib/c.js", "export const c = 2;\n");
+  await git("add", "-A"); await git("commit", "-q", "-m", "an extra change");
+  const extra = await makeSelfGateDep({ root, harness: HARNESS_200, run: realRun200, mergeBase, getCtx: () => ctxFor(relandLoaded) })({ gates: GREEN_200 });
+  expect(extra.ok).toBe(false);
+  expect(scopeOf(extra).filter((f) => f.blocking).map((f) => f.detail.split(" is outside")[0])).toEqual(["factory/lib/c.js"]);
+  // without the re-land keys the same round (empty files_expected) is not judged at all — the re-land is what bounds it
+  const plain = await makeSelfGateDep({ root, harness: HARNESS_200, run: realRun200, mergeBase, getCtx: () => ctxFor({}) })({ gates: GREEN_200 });
+  expect(scopeOf(plain)).toEqual([]);
+  expect(plain.skippedChecks.find((s) => s.check === "scope")?.detail).toMatch(/files_expected is empty/);
+  // an approved head this checkout cannot read is said out loud, never silently passed as "in scope"
+  const gone = await makeSelfGateDep({ root, harness: HARNESS_200, run: realRun200, mergeBase, getCtx: () => ctxFor({ ...relandLoaded, approved_head: "e".repeat(40) }) })({ gates: GREEN_200 });
+  expect(gone.ranChecks).toContain("scope");
+  expect(scopeOf(gone).map((f) => f.detail)).toEqual([expect.stringMatching(/^scope check could not run — re-land: the approved diff of claude\/fq-271 at eeeeeee could not be read/)]);
+
+  // ── B's review is B's own. A copy of A's approval posted as B's review handoff is refused by the production readers on the
+  // record the fast path actually wrote for B: no review heartbeat on B names a run, and a heartbeat that names A's run 777
+  // finds no line of that run in B's record (the fast path never carried A's line over).
+  const copied = { schema: "factory.review.v1", issue: B293, pr: 308, head_sha: S293, round: 1, decision: "approved", orchestration: "workflow", guarantee: "verified",
+    verdicts: [{ role: "correctness", verdict: "approve", confidence: "high", must_fix: [], should_fix: [], verified: [] }] };
+  expect(reviewRunIdOf293(r.comments[B293], B293).ok).toBe(false);
+  const bRecord = r.bRecord();
+  const aRecord = readFileSync(runRecordPath293({ root: r.root, issue: A293 }), "utf8");
+  expect(parseReviewEvidence293(aRecord, { runId: "777" })).toMatchObject({ headSha: S293, decision: "approved" });   // A's approval is real
+  expect(parseReviewEvidence293(bRecord, { runId: "777" })).toBeNull();
+  const hbB = { body: heartbeatBody293({ issue: B293, stage: "review", runnerId: "gha-777", started: "2026-10-12T00:00Z", last: "2026-10-12T00:00Z" }), author: "factory-bot" };
+  const bound = reviewRunIdOf293([hbB], B293);
+  expect(bound).toMatchObject({ ok: true, runId: "777" });
+  const prov = verifyReviewProvenance293({ handoff: copied, record: parseReviewEvidence293(bRecord, { runId: bound.runId }), prHeadSha: S293, expectedRunId: bound.runId });
+  expect(prov.ok).toBe(false);
+  expect(prov.reason).toMatch(/carries no review-evidence line for run 777/);
+  // and against B's full roster the one copied verdict is not a quorum
+  const approved = requirementFor("factory:approved")({ issue: B293, comments: [{ body: renderHandoff({ stage: "review", issue: B293, data: copied }), createdAt: "2026-10-12T01:00:00Z" }],
+    roster: ["correctness", "qa", "spec-conformance"], rosterSize: 3, gatesChecked: true, gatesFile: { status: "GREEN", head_sha: S293 }, prHeadSha: S293 });
+  expect(approved.ok).toBe(false);
+  expect(approved.reason).toMatch(/verdict count 1 != roster size 3/);
 });
