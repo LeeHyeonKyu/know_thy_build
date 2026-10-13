@@ -4989,3 +4989,63 @@ JSON이었다(#207의 절단과 다르다). 같은 입력에 같은 모델은 �
 `--system-prompt` 세션에 걸리는지는 M0에서 증명할 수 없다 — 그래서 쓰기 거부를 argv에 실었다. 판정 프롬프트는 이제 두 벌(보호된 워크플로
 파일과 `factory/bin`)이고, 한쪽만 고치면 판정이 모드에 따라 달라진다. `max_turns`(12)는 디스패처 기준으로 잡힌 값이라 첫 실제 런에서
 `max_turns_by_stage`를 다시 볼 것.
+## ADR-045 승인된 head를 다시 얹는 재착륙은 plan 토론을 건너뛴다 — 러너의 사실 셋일 때만, 계약은 이슈의 done_when 그대로 — 2026-10-13 (#293, 운영 결정)
+
+**사건**: 2026-10-11~12 재착륙 6건(#249·#254·#260·#271·#289·#212)에서 plan 토론(2라운드 × 4역할)이 매번 "이미 승인된 코드다, 할 일은 base 머지뿐"이라는
+결론에 각 $2~4를 썼고, #212는 그 라운드 때문에 평생 상한($60)을 넘었다. 재착륙은 설계가 아니라 운반이다.
+
+**결정** — plan 스테이지는 에이전트를 띄우기 전에 이슈 본문이 재착륙을 말하는지 본다. 말하고, 아래 (a)가 전부 참이면 토론 없이 러너가 plan.v1을
+게시한다. 하나라도 거짓이거나 읽지 못하면 사유 한 줄(`plan: re-land fast path not taken — <사유> (full plan debate)`)을 남기고 오늘과 같은 토론이다.
+
+(a) **증거의 문턱 — 러너·GitHub의 사실만.** 에이전트 코멘트·핸드오프 본문·`gates.json`은 읽지 않는다.
+1. 원 이슈 A의 `factory/records` 기록에, A의 review 하트비트가 지목한 런이 쓴 `review-evidence:` 줄이 있고 그 줄의 `head_sha`가 본문의 sha S와 같고
+   `decision=approved`다. 하트비트에 묶이지 않은 줄, 다른 이슈의 기록에 있는 줄, 같은 런을 말하며 내용이 다른 두 줄은 문을 열지 않는다.
+   "A의 review 하트비트"는 **팩토리 계정이 게시한** 하트비트만이다 — 같은 모양의 코멘트를 다른 계정이 달아도 런 바인딩을 옮기지 못한다.
+2. S의 `factory/gates`(와 `factory/review`) commit status가 success이고 **팩토리 계정이 게시했다**(머지 스테이지의 `verifyFactoryStatuses` 그대로). 없음·pending·
+   failure·낯선 게시자는 토론이다.
+3. PR head — 브랜치 `claude/fq-<A>`의 head — 가 지금도 S다.
+— `test_293_reland_fast_path_refuses_unverified_heads`, `test_293_reland_fast_path_ignores_agent_written_claims`
+
+(b) **문을 여는 본문 형식.** `## What` 절에 백틱으로 감싼 브랜치 하나와 40자 sha 하나를 쓴다(짧은 sha는 줄과 대조할 수 없어 토론으로 간다).
+파서(`context.js` `relandClaimOf`)의 규칙은 이것이 전부다 — 첫 시도에 걸리는 것은 대개 마지막 줄이다:
+- 절의 시작은 `#`~`###` 제목 `What`(대소문자 무관), 끝은 그다음의 `#`~`###` 제목이다. 그 절 밖(`## Why` 등)은 보지 않는다.
+- **백틱 안의 토큰만** 센다. 백틱이 없는 브랜치 이름이나 sha는 없는 것과 같다.
+- 백틱 안에 `claude/fq-<n>`이 하나도 없으면 재착륙이 아니다(기록 줄도 없다). 이 이슈 자신의 브랜치(`claude/fq-<B>`)는 거부된다.
+- **`## What` 안의 백틱 브랜치가 둘 이상이거나 백틱 40자 sha가 둘 이상이면 토론이다**(`names 2 branches` / `names 2 full head shas`).
+  base 커밋·다른 PR의 브랜치를 언급하려면 백틱 없이 쓰거나 `## What` 밖에 쓴다.
+
+```
+## What
+재착륙: 브랜치 `claude/fq-271`의 head `4f0c2a9e1b7d3c5a8e6f0b2d4c6a8e0f1a3b5c7d`를 main 위에 다시 얹는다.
+
+## done_when
+- [ ] `test_reland_alpha_returns_two` — the alpha path returns 2
+```
+
+done_when 항목은 백틱 `test_…` id로 시작해야 한다 — 러너가 그 id를 `check.ref`로, 나머지 문장을 `text`·`rubric`으로 그대로 옮기고 level은 러너가
+`unit`으로 정한다(본문의 `(level: fast)` 같은 표기는 문장에 남을 뿐이다). `test_reland_…`처럼 이슈 번호가 없는 id도 된다. 옮긴 계약은 바뀌지 않은
+`validatePlanHandoff`(E-7 덮임·수용 계약·`max_done_when`)를 통과해야 하고, 못 하면 면제가 아니라 토론이다. 항목이 없으면 토론이다.
+— `test_293_reland_fast_path_skips_plan_when_the_head_was_approved`, `test_293_reland_shape_does_not_loosen_the_normal_plan_contract`
+
+통과하면 러너가 plan.v1(roles `[]`, rounds `0`, `reland {source_issue, branch, head_sha, run_id, approved_at}` 표식, non_goals에 diff-only 규칙
+한 줄)을 게시하고, 그 표식과 같은 바인딩을 실은 전이로 `factory:planned`에 간 **뒤에** 기록에 한 줄
+`plan: re-land fast path — source #A run <run_id> head <S7> approved <date>, debate skipped`를 쓴다. 게시나 전이가 실패하면 그 줄은 쓰지 않고
+사유 한 줄과 함께 토론이다(토론의 plan 핸드오프가 먼저 게시된 것을 대체한다). 표식은 그 런의 바인딩이 있을 때만 존중된다: 토론 경로의 verify-stage는 표식을 단 핸드오프를 `roster role not completed`로
+거부하고, `factory:planned`는 바인딩 없는 표식을 거부한다. 표식이 없는 핸드오프의 규칙(roles ≥ 2, 로스터·라운드 대조)은 그대로다.
+implement의 `loaded`에는 기존 `approved_head`(= S)·`approved_branch`·`reland: true`와 `reland_brief`(#174의 diff-only 형식: 그 브랜치의 S diff를
+가져오고 적힌 finding만 고친다, 다른 변경 없음)가 실린다 — `k_restart_brief`는 쓰지 않는다. **누가 그것을 읽는가**는 정확히 둘이다: ① 빌더는
+`context.json`(첫 번째로 읽으라는 파일)에서 `loaded.reland_brief`와 plan의 non_goals 규칙을 읽는다 — 워크플로 프롬프트(`.claude/workflows/**`)는
+#293이 바꾸지 않았으므로 프롬프트 본문은 그 규칙을 따로 말하지 않는다. ② 러너의 self-gate는 그 라운드의 #200 scope 검사를
+`git diff <base>...S`가 바꾼 경로로 묶는다(`relandScopeInput`) — 그 밖의 경로는 `Scope change (#<B>)` 줄 없이는 blocking finding이고, S를 읽지 못하면
+"판정하지 못했다"는 finding으로 남는다. — `test_293_reland_fast_path_builder_brief_is_diff_only`
+
+(c) **review와 merge는 건너뛰지 않는다.** tier는 내리지 않고(`loaded.tier`는 실효 tier), K 카운터는 그대로이며, B의 리뷰는 B의 전체 로스터와 B 자신의
+런에 묶인 review-evidence를 요구한다 — A의 승인은 B의 리뷰가 아니다. 절약하는 것은 plan 토론 한 번뿐이다.
+
+(d) **약속하지 않은 둘.** ① "reject 1건 이하 + 그 must_fix가 본문에 인용됨" 예외는 만들지 않았다 — 러너의 증거 줄은 `role=verdict`만 싣고 must_fix는
+에이전트가 쓴 글에만 있어 러너가 판정할 수 없다. 그런 재착륙은 토론으로 간다. ② load-bearing 재착륙의 implement self-critique 라운드를 건너뛰는
+것은 만들지 않았다 — 그 라운드는 `templates/factory/**`(이 이슈의 must_not)와 `.claude/workflows/factory-implement.js`가 띄운다. ②와 빌더 프롬프트에
+diff-only 규칙을 직접 싣는 일은 **#310**(`factory:harness`)으로 넘겼다. ①은 미룬 것이 아니라 거부한 것이다(판정할 러너 사실이 없다).
+
+**남는 것**: 본문 작성자는 확인하지 않는다(허용 목록 없음). plan 판정과 implement 사이에 브랜치가 움직일 수 있다 — 브리프의 sha 고정과 새 head에 대한
+전체 리뷰만이 그것을 막는다. 이 변경을 revert하면 이미 게시된 fast-path plan(roles `[]`)은 옛 verify-stage·requirements에서 거부될 수 있다.

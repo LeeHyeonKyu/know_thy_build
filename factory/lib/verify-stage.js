@@ -473,6 +473,34 @@ export function validatePlanHandoff(plan, { maxDoneWhen = 6, issueBody = "", not
 }
 
 /**
+ * ── #293 — the re-land fast path's marker is honoured only where the runner bound it ─────────────────────────────────────────
+ * A plan handoff the runner posts on the fast path (context.js `relandFastPathOf`) carries `reland {source_issue, branch,
+ * head_sha, run_id, approved_at}` and roles=[] / rounds=0 — no debate role ran. That marker counts only against the binding the
+ * runner holds in the SAME run, after it wrote the fast-path record line: `verifyRelandPlan` here (the runner's own check) and
+ * the `factory:planned` requirement (the binding travels in ctxExtra). Anywhere else it is a claim: `verifyStage` — the debate
+ * path, which the fast path never takes — rejects any handoff carrying one as an incomplete roster, never a repairable defect.
+ */
+export const RELAND_UNBOUND_REASON = "roster role not completed: re-land fast path claimed without the runner's fast-path record line for this run";
+const RELAND_BOUND_KEYS = ["source_issue", "branch", "head_sha", "run_id"];
+export function relandBindingMatches(marker, binding) {
+  if (!marker || typeof marker !== "object" || Array.isArray(marker)) return false;
+  if (!binding || typeof binding !== "object" || Array.isArray(binding)) return false;
+  return RELAND_BOUND_KEYS.every((k) => binding[k] != null && marker[k] != null && String(marker[k]) === String(binding[k]));
+}
+/**
+ * The fast path's own verdict on the handoff it built: the plan.v1 schema, the runner's binding, and the UNCHANGED
+ * `validatePlanHandoff` (E-7 issue coverage, acceptance contract, max_done_when). Nothing is exempted — a failure means debate.
+ */
+export function verifyRelandPlan({ data, binding, issueBody = "", maxDoneWhen = 6 }) {
+  const reasons = [];
+  const v = validate("plan.v1", data);
+  if (!v.ok) reasons.push(`schema plan.v1: ${v.errors.join("; ")}`);
+  if (!relandBindingMatches(data?.reland, binding)) reasons.push(RELAND_UNBOUND_REASON);
+  reasons.push(...validatePlanHandoff(data, { maxDoneWhen, issueBody }));
+  return { ok: reasons.length === 0, reasons };
+}
+
+/**
  * gates: `.factory/out/gates.json`의 내용(없으면 null). 게이트 판정의 단일 출처는 이 파일이다 —
  * 워크플로가 handoff에 적은 gates는 파일과 **일치해야만** 인정되고, 비어 있으면 파일 값으로 채운다.
  * (그래서 schema 검증은 data.gates를 채운 뒤에 돈다.)
@@ -662,6 +690,8 @@ export function verifyStage({ stage, out, transcriptText, agentsLog, roster = []
   for (const role of roster) {
     if (!agentsLog.completed.includes(rolePrefix + role)) reasons.push(`roster role not completed: ${role}`);
   }
+  // #293 — the debate path never carries the runner's re-land binding (the fast path does not come through here).
+  if (stage === "plan" && data && data.reland !== undefined && data.reland !== null) reasons.push(RELAND_UNBOUND_REASON);
   /**
    * ADR-024 / KTB-42 — **qa의 판정은 자기 증거를 부른다.** 매니페스트가 있고 로스터에 qa가 있으면,
    * qa의 verdict는 그 매니페스트 안에 실재하는 claim id를 **최소 하나** 인용해야 한다. 인용 없는

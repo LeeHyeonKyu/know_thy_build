@@ -49,7 +49,24 @@ const SCHEMAS = {
   "plan.v1"(o, e) {
     req(e, o, "issue", "number");
     oneOf(e, o, "tier", ["docs", "standard", "load-bearing"]);
-    const roles = req(e, o, "roles", "array"); if (roles && roles.length < 2) e.push("roles must have ≥2 entries");
+    /*
+     * #293 — `reland` is **optional** and runner-only: the re-land fast path's marker (context.js `relandFastPathOf`). A plan the
+     * runner posted without a debate has roles=[] and rounds=0, so a WELL-FORMED marker lifts the ≥2-roles rule here — and only
+     * here: whether the marker is honoured is the binding check of verify-stage (`relandBindingMatches`) and `factory:planned`.
+     */
+    let relandOk = false;
+    if (o?.reland !== undefined && o.reland !== null) {
+      const m = req(e, o, "reland", "object");
+      if (m) {
+        const before = e.length;
+        if (!Number.isInteger(m.source_issue)) e.push("reland.source_issue must be an integer");
+        if (typeof m.branch !== "string" || !/^claude\/fq-\d+$/.test(m.branch)) e.push("reland.branch must be claude/fq-<n>");
+        if (typeof m.head_sha !== "string" || !SHA.test(m.head_sha)) e.push("reland.head_sha must be a 40-hex sha");
+        if (typeof m.run_id !== "string" || !m.run_id) e.push("reland.run_id must be a non-empty string");
+        relandOk = e.length === before;
+      }
+    }
+    const roles = req(e, o, "roles", "array"); if (roles && roles.length < 2 && !relandOk) e.push("roles must have ≥2 entries");
     req(e, o, "rounds", "number");
     const dw = req(e, o, "done_when", "array") || [];
     if (dw.length === 0) e.push("done_when must have ≥1 item");
