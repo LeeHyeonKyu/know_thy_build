@@ -852,14 +852,15 @@ test("test_237_agent_mode_leaves_debate_stages_passing", async () => {
 
   // the changed meaning of `agent` and the direct-mode guarantee are written down, not decided silently
   const decisions = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "../../docs/factory/DECISIONS.md"), "utf8");
-  // dw4: under the next free number after ADR-044, never reusing a taken one (ADR-039 is the owner-veto decision)
+  // dw4: under the next free number, never reusing a taken one (ADR-039 is the owner-veto decision; ADR-045 is #293's re-land
+  // fast path, which landed on base first — so this record is ADR-046)
   const heads = [...decisions.matchAll(/^## ADR-(\d{3}) /gm)].map((m) => Number(m[1]));
   const mine = [...decisions.matchAll(/^## ADR-(\d{3}) [^\n]*#237/gm)].map((m) => Number(m[1]));
-  expect(mine).toEqual([45]);
-  expect(heads.filter((n) => n === 45)).toHaveLength(1);
-  expect(heads).toContain(44);
-  expect(heads.indexOf(45)).toBe(heads.indexOf(44) + 1);             // 45 follows 44 in the file: the next free number
-  const at = decisions.search(/^## ADR-045 /m);
+  expect(mine).toEqual([46]);
+  expect(heads.filter((n) => n === 46)).toHaveLength(1);
+  expect(heads.filter((n) => n === 45)).toHaveLength(1);              // no second ADR-045 left behind
+  expect(heads.indexOf(46)).toBe(heads.indexOf(45) + 1);             // 46 follows 45 in the file: the next free number
+  const at = decisions.search(/^## ADR-046 /m);
   expect(at).toBeGreaterThan(-1);
   const rest = decisions.slice(at);
   const next = rest.search(/\n##? /);

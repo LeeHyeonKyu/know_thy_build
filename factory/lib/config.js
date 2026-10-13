@@ -34,7 +34,7 @@ export function loadHarness(root) {
 /**
  * #237 (허점 원장 P-11, T-4) — **에이전트가 하나뿐인 스테이지**(토론 없음). `[factory] orchestration = "agent"`는 이제
  * "이 스테이지들은 디스패처 세션(→ Workflow → 에이전트, 세 겹) 없이 역할 세션을 `claude -p`로 직접 띄운다"는 뜻이다
- * (ADR-045). 토론 스테이지(plan·implement·review)는 그 값에서도 `/factory-<stage>` 워크플로를 그대로 탄다.
+ * (ADR-046). 토론 스테이지(plan·implement·review)는 그 값에서도 `/factory-<stage>` 워크플로를 그대로 탄다.
  */
 export const DIRECT_AGENT_STAGES = Object.freeze(["triage", "retro"]);
 
