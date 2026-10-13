@@ -852,11 +852,23 @@ test("test_237_agent_mode_leaves_debate_stages_passing", async () => {
 
   // the changed meaning of `agent` and the direct-mode guarantee are written down, not decided silently
   const decisions = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "../../docs/factory/DECISIONS.md"), "utf8");
-  const at = decisions.indexOf("## ADR-039");
+  // dw4: under the next free number after ADR-044, never reusing a taken one (ADR-039 is the owner-veto decision)
+  const heads = [...decisions.matchAll(/^## ADR-(\d{3}) /gm)].map((m) => Number(m[1]));
+  const mine = [...decisions.matchAll(/^## ADR-(\d{3}) [^\n]*#237/gm)].map((m) => Number(m[1]));
+  expect(mine).toEqual([45]);
+  expect(heads.filter((n) => n === 45)).toHaveLength(1);
+  expect(heads).toContain(44);
+  expect(heads.indexOf(45)).toBe(heads.indexOf(44) + 1);             // 45 follows 44 in the file: the next free number
+  const at = decisions.search(/^## ADR-045 /m);
   expect(at).toBeGreaterThan(-1);
   const rest = decisions.slice(at);
-  const next = rest.indexOf("\n## ", 5);
+  const next = rest.search(/\n##? /);
   const section = next === -1 ? rest : rest.slice(0, next);
+  expect(section).not.toMatch(/^### /m);                                // no other ADR's subsection spliced into this one
+  // ADR-038's amendment still sits directly under ADR-038, not under the new record
+  const amend = decisions.indexOf("### ADR-038 보정");
+  const lastH2BeforeAmend = [...decisions.slice(0, amend).matchAll(/^## (ADR-\d{3})/gm)].pop()[1];
+  expect(lastH2BeforeAmend).toBe("ADR-038");
   expect(section).toContain("#237");
   expect(section).toContain(`\`guarantee\``);
   expect(section).toContain(`\`${DIRECT_GUARANTEE}\``);

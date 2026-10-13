@@ -123,7 +123,7 @@ export function stageClaudeEnv({ root, stage, harnessIssue = false, harness = nu
  * 띄운다. 디스패처가 하던 일은 `loaded.json`을 읽어 Workflow에 넘기고 반환값을 그대로 출력하는 것뿐이었는데, 실패는
  * 바로 그 전달에서 났다(#170 args를 문자열로, #195·#201 잘라서, own-calendar #124 출력 파일 폴링으로 턴 소진).
  *
- * 세션의 모양(ADR-039):
+ * 세션의 모양(ADR-045):
  *   - 시스템 프롬프트 = 역할 md의 본문(`.claude/agents/factory-<stage>.md`, frontmatter는 설정이지 지시가 아니라 뺀다).
  *   - 역할 md 경로와 모델 = roles.toml(`directRoleSpec` — `[triage]`·`[retro.analyst]`의 `agent`·`model`), 모델이 없으면
  *     `loaded`의 roster, 그것도 없으면 md frontmatter의 `model` — 워크플로의 `agent()`와 같은 출처다.

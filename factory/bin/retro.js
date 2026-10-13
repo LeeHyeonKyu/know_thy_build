@@ -998,7 +998,7 @@ export async function collectIssues({ gh, since }) {
 export function retroClaudeArgs({ harness, charter, ciSettingsPath, orchestration = "workflow", agentMd = null, model = null }) {
   // #237 — `orchestration = "agent"`면 디스패처 없이 분석가 세션을 직접 띄운다(run-stage의 `directAgentClaudeArgs` 그대로).
   // `model`은 roles.toml `[retro.analyst].model` — 없을 때만 md frontmatter가 정한다. 워크플로 경로와 같은 출처가 아니다:
-  // `.claude/workflows/factory-retro.js`는 factory-retro/opus를 하드코딩하고 roles.toml을 읽지 않는다(ADR-039 결정 2).
+  // `.claude/workflows/factory-retro.js`는 factory-retro/opus를 하드코딩하고 roles.toml을 읽지 않는다(ADR-045 결정 2).
   if (orchestration === "agent") {
     const role = directAgentRole(agentMd, { model });
     return directAgentClaudeArgs({ prompt: directRetroPrompt(), systemPrompt: role.systemPrompt, model: role.model, tools: role.tools, maxTurns: stageMaxTurns(harness, "retro"), settingsPath: ciSettingsPath, charter });
@@ -1040,7 +1040,7 @@ export function directRetroPrompt({ candidates = RETRO_CANDIDATES_PATH } = {}) {
 export function makeRetroAnalyst({ root, harness, charter, roles = null, run: runner = run, home = homedir(), readFile = (p) => readFileSync(p, "utf8"), readTranscriptText = null }) {
   const orchestration = orchestrationFor(harness, "retro");
   // 역할 md·모델은 roles.toml `[retro.analyst]`에서 온다(`directRoleSpec`) — 이 직접 경로에서만. `workflow` 모드의 분석가는
-  // `.claude/workflows/factory-retro.js`가 하드코딩한 factory-retro/opus라 roles.toml을 바꿔도 따라가지 않는다(ADR-039 결정 2).
+  // `.claude/workflows/factory-retro.js`가 하드코딩한 factory-retro/opus라 roles.toml을 바꿔도 따라가지 않는다(ADR-045 결정 2).
   let r = roles;
   if (!r) { try { r = loadRoles(root); } catch { r = {}; } }
   const spec = directRoleSpec(r, "retro");
