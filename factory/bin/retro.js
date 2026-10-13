@@ -1015,7 +1015,8 @@ export const RETRO_CANDIDATES_PATH = ".factory/out/retro-candidates.json";
  * #237 — 직접 분석가 세션의 사용자 프롬프트. 규칙 본문은 시스템 프롬프트(`.claude/agents/factory-retro.md`의 Lens·You must not)에
  * 이미 있으므로, 여기에는 **역할 md에 없고 `.claude/workflows/factory-retro.js`가 주입하던 것**만 싣는다: 읽는 순서와 후보
  * 파일 경로, `period`를 그대로 베낄 것, `harness` 항목은 `maturity_gaps`와 일대일, 역할별 상한, 출력은 JSON 하나.
- * 워크플로 파일은 보호 경로라 import할 수 없다 — 그 프롬프트를 고치면 이것도 고친다(plan open_risks "prompt drift").
+ * 워크플로 파일은 보호 경로라 import할 수 없다 — 대신 dw6 테스트(`test_237_retro_runs_the_analyst_directly_when_orchestration_is_agent` ④)가
+ * 후보 파일 경로·maturity_gaps 일대일 문장·retro.v1 필드 목록을 두 사본에 대조해, 한쪽만 고치면 실패한다.
  */
 export function directRetroPrompt({ candidates = RETRO_CANDIDATES_PATH } = {}) {
   return `You are the factory's retro analyst. Read, in this order: \`${candidates}\` (written by the retro job just now — \`period\`, `
@@ -1024,7 +1025,8 @@ export function directRetroPrompt({ candidates = RETRO_CANDIDATES_PATH } = {}) {
     + `\`.factory/lessons/*.md\` (each header's \`max\` is that role's cap — propose at most the headroom left); \`.claude/agents/*.md\` `
     + `(Examples 8 good / 8 bad, Perspectives 6 per role); \`docs/factory/CHARTER.md\`.\n\n`
     + `Copy \`period.from\` and \`period.to\` from \`${candidates}\` into your answer exactly as they appear — do not compute a date. `
-    + `\`harness\` entries must match the \`maturity_gaps\` targets one-for-one (anything else is dropped). Every \`evidence_runs\` entry `
+    + `\`harness\` entries are maturity gaps only: \`maturity_gaps\` in \`${candidates}\` is the complete list L1 found, and `
+    + `your \`harness\` entries must match those targets one-for-one (an entry for anything else is dropped). Every \`evidence_runs\` entry `
     + `is an issue you actually read; an item whose \`evidence_runs\` would be empty is left out, and empty arrays are a real answer.\n\n`
     + `Return exactly the factory.retro.v1 fields (period, lessons, examples, perspectives, harness, proposals, summary). Your final `
     + `message is parsed by a machine: emit ONLY that one JSON object — no prose, no code fence. Do not edit any file.`;

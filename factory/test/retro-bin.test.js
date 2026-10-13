@@ -20,6 +20,7 @@ import { makeFakeRun } from "../lib/exec.js";
 import { copyFileSync, existsSync as existsSync237 } from "node:fs";   // mkdirSync comes from the base import below (#230)
 import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { runWorkflow as runWorkflow237 } from "./helpers/run-workflow.js";
 
 const NOW = "2026-09-12T13:45:30Z";
 const CURSOR = "2026-09-05T00:00:00Z";
@@ -1335,7 +1336,7 @@ function retroRoot237() {
 const retroRun237 = (envelope) => makeFakeRun([{ match: (c) => c === "claude", result: { code: 0, stdout: JSON.stringify(envelope), stderr: "" } }]);
 const after237 = (args, flag) => args[args.indexOf(flag) + 1];
 
-test("test_237_retro_runs_the_analyst_directly_and_keeps_its_failure_contract", async () => {
+test("test_237_retro_runs_the_analyst_directly_when_orchestration_is_agent", async () => {
   const root = retroRoot237();
   const md = readFileSync(join(root, RETRO_MD_237), "utf8");
   const agentHarness = { factory: { orchestration: "agent", max_turns: 12 } };
@@ -1418,6 +1419,33 @@ test("test_237_retro_runs_the_analyst_directly_and_keeps_its_failure_contract", 
   const we = makeDeps({ state: freshState(), overrides: { claudeP: wEmpty.claudeP, transcript: wEmpty.transcript } });
   expect(await runRetro({ deps: we.deps, now: NOW })).toBe(0);
   expect(we.last().last_full_failed).toBeUndefined();
+
+  // ④ prompt parity: the workflow analyst prompt is a protected file the runner cannot import, so the clauses the
+  // direct prompt carries are pinned against BOTH copies — dropping one from either side fails here.
+  const directPrompt = args[1];
+  const clauses = [
+    "`.factory/out/retro-candidates.json`",                                                       // the candidates file
+    "your `harness` entries must match those targets one-for-one (an entry for anything else is dropped)", // maturity_gaps 1:1
+  ];
+  const fields = (p) => {
+    const m = p.match(/Return exactly the factory\.retro\.v1 fields \(([^)]*)\)/);
+    expect(m, "direct prompt names the retro.v1 fields").not.toBeNull();
+    return m[1].split(",").map((x) => x.trim());
+  };
+  const repo = join(dirname(fileURLToPath(import.meta.url)), "../..");
+  for (const wf of [".claude/workflows/factory-retro.js", "templates/factory/claude/workflows/factory-retro.js"]) {
+    const { calls } = await runWorkflow237(join(repo, wf), { agent: async () => AGENT_OUT(), args: {} });
+    expect(calls, wf).toHaveLength(1);
+    const wfPrompt = calls[0].prompt;
+    for (const c of clauses) {
+      expect(wfPrompt, `${wf}: ${c}`).toContain(c);
+      expect(directPrompt, `direct: ${c}`).toContain(c);
+    }
+    // JSON-only: the workflow gets it structurally (agent() with the retro.v1 schema), the direct session by prose —
+    // the prose names exactly the fields the workflow schema requires, and says the final message is that JSON alone.
+    expect(calls[0].opts.schema?.required, wf).toEqual(fields(directPrompt));
+    expect(directPrompt).toContain("emit ONLY that one JSON object");
+  }
 });
 
 // ── #230 — the retro maturity-promotion issue is born in backlog and walks through the real door ──────────────────
