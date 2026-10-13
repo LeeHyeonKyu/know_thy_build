@@ -9,3 +9,5 @@ Read this file as a checklist before you start. Entries are appended by the retr
   근거: runs/149.md, runs/156.md, runs/157.md, runs/170.md, runs/178.md. 인용: 0회.
 - [L-2026-10-03-03] diff가 DECISIONS.md·ADR·README·코드 주석에 엔진 동작을 단언하는 문장(종료 코드, 가드가 무엇을 세는가, 실패 몇 번이면 라운드를 잃는가, 리포트가 없을 때 무엇이 되는가)을 넣거나 고치면, 그 문장 옆에 그 동작을 정확히 고정하는 테스트 id를 댈 수 있는지 확인한다 — 댈 수 없으면 테스트를 쓰거나 문장을 뺀다. 문장이 가리키는 경로(예: report가 저장소 밖일 때, transition 실패 1회일 때)를 테스트가 실제로 지나가는지까지 본다.
   근거: runs/18.md, runs/143.md, runs/157.md, runs/174.md. 인용: 0회.
+- [L-2026-10-13-01] diff가 ADR·DECISIONS·README·코드 주석에 '모드와 무관하게', '~와 같은 출처', '어떤 경로로도' 같은 문장을 쓰거나 고쳐서 설정·환경 분기 전체에 걸친 엔진 동작을 단언하면(orchestration=agent|workflow, GITHUB_ACTIONS 설정·미설정, App 설치 토큰·PAT), 핸드오프 전에 그 문장이 덮는 분기를 하나씩 적는다. 그리고 분기마다 그 분기의 env·config를 명시적으로 주입하고 문장이 말하는 결과를 단언하는 테스트 id를 하나씩 댄다. 테스트가 없는 분기가 하나라도 있…
+  근거: runs/231.md, runs/237.md. 인용: 0회.
