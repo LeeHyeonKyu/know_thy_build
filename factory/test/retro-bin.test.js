@@ -15,6 +15,12 @@ import { validate } from "../lib/schemas.js";
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { makeRetroAnalyst, RETRO_CANDIDATES_PATH } from "../bin/retro.js";
+import { makeFakeRun } from "../lib/exec.js";
+import { copyFileSync, existsSync as existsSync237 } from "node:fs";   // mkdirSync comes from the base import below (#230)
+import { dirname } from "node:path";
+import { fileURLToPath } from "node:url";
+import { runWorkflow as runWorkflow237 } from "./helpers/run-workflow.js";
 
 const NOW = "2026-09-12T13:45:30Z";
 const CURSOR = "2026-09-05T00:00:00Z";
@@ -1309,6 +1315,188 @@ test("ymdOf reduces a cursor timestamp to the date the proposal PR needs", async
   expect(ymdOf("2026-09-05T00:00:00Z")).toBe("2026-09-05");
   expect(ymdOf("2026-09-05")).toBe("2026-09-05");
   expect(ymdOf(undefined)).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+});
+
+/**
+ * ── #237 (gap ledger P-11, T-4) — retro launches its analyst directly under `orchestration = "agent"` ────────────
+ *
+ * No `/factory-retro` dispatcher: one session whose system prompt is `.claude/agents/factory-retro.md`, model opus,
+ * write tools denied, prompt naming the candidates file. Its answer is the session's final message — the session's
+ * own tool results are never mined for a `retro.v1` (that rescue exists for a dispatcher re-typing a Workflow
+ * result; a direct analyst has no such hop, and a file it merely read is not its answer). The failure contract is
+ * today's: `last_full_failed`, `merges_since` and the cursor kept, never a zero-yield retro.
+ */
+const RETRO_MD_237 = ".claude/agents/factory-retro.md";
+function retroRoot237() {
+  const r = mkdtempSync(join(tmpdir(), "retro-237-"));
+  mkdirSync(join(r, ".claude/agents"), { recursive: true });
+  copyFileSync(join(dirname(fileURLToPath(import.meta.url)), "../..", RETRO_MD_237), join(r, RETRO_MD_237));
+  return r;
+}
+const retroRun237 = (envelope) => makeFakeRun([{ match: (c) => c === "claude", result: { code: 0, stdout: JSON.stringify(envelope), stderr: "" } }]);
+const after237 = (args, flag) => args[args.indexOf(flag) + 1];
+
+test("test_237_retro_runs_the_analyst_directly_when_orchestration_is_agent", async () => {
+  const root = retroRoot237();
+  const md = readFileSync(join(root, RETRO_MD_237), "utf8");
+  const agentHarness = { factory: { orchestration: "agent", max_turns: 12 } };
+  const okEnvelope = { result: JSON.stringify(AGENT_OUT()), total_cost_usd: 0.42, usage: { input_tokens: 1200, output_tokens: 300 }, session_id: "s-237" };
+  const rescue = () => workflowTranscript(AGENT_OUT());                 // a valid retro.v1 sitting in the session's tool results
+
+  // ① the direct analyst: argv, input, and the same adoption as the workflow path
+  const run = retroRun237(okEnvelope);
+  const direct = makeRetroAnalyst({ root, harness: agentHarness, charter: { budget: { usd_per_stage: 5 } }, run, readTranscriptText: rescue });
+  const a = makeDeps({ state: freshState(), overrides: { claudeP: direct.claudeP, transcript: direct.transcript } });
+  expect(await runRetro({ deps: a.deps, now: NOW })).toBe(0);
+  expect(run.calls).toHaveLength(1);
+  const { args } = run.calls[0];
+  expect(args[0]).toBe("-p");
+  expect(args.filter((x) => /^\/factory-/.test(x))).toEqual([]);     // no dispatcher slash command anywhere in the argv
+  expect(args[1].startsWith("/")).toBe(false);
+  expect(args[1]).toContain(RETRO_CANDIDATES_PATH);
+  expect(RETRO_CANDIDATES_PATH).toBe(".factory/out/retro-candidates.json");
+  expect(existsSync237(join(root, RETRO_CANDIDATES_PATH))).toBe(true);
+  const sys = after237(args, "--system-prompt");
+  expect(sys.startsWith("---")).toBe(false);
+  expect(sys).toContain("## Purpose");
+  expect(md.trimEnd().endsWith(sys.trimEnd())).toBe(true);
+  expect(after237(args, "--model")).toBe("opus");
+  expect(after237(args, "--disallowedTools").split(",")).toEqual(expect.arrayContaining(["Edit", "Write", "MultiEdit", "NotebookEdit", "Bash"]));
+  expect(after237(args, "--allowedTools").split(",")).toEqual(["Read", "Grep", "Glob"]);
+  // read-only like the role: the available tool set IS the role's whitelist, and spawning a child session is denied
+  expect(after237(args, "--tools")).toBe("Read,Grep,Glob");
+  expect(after237(args, "--disallowedTools").split(",")).toEqual(expect.arrayContaining(["Agent", "Task", "Workflow"]));
+  // roles.toml `[retro.analyst]` names the role file and the model of the DIRECT analyst (not the md frontmatter's `opus`).
+  // The workflow analyst does NOT read roles.toml — factory-retro.js hardcodes its agentType/model (ADR-046 decision 2) —
+  // so the two sources are pinned to each other by test_237_retro_analyst_role_in_roles_toml_matches_the_workflow_hardcoded_analyst.
+  writeFileSync(join(root, ".claude/agents/alt-retro.md"), "---\nname: alt-retro\ntools: Read, Glob\nmodel: opus\n---\n\n## Purpose\nAlternate retro analyst.\n");
+  const altRun = retroRun237(okEnvelope);
+  const alt = makeRetroAnalyst({ root, harness: agentHarness, charter: {}, run: altRun, roles: { retro: { analyst: { agent: ".claude/agents/alt-retro.md", model: "sonnet" } } } });
+  await alt.claudeP({ period: { from: CURSOR, to: NOW }, candidates: emptyCandidates(), stats: {}, history: [], maturity_gaps: [] });
+  expect(after237(altRun.calls[0].args, "--system-prompt")).toBe("## Purpose\nAlternate retro analyst.");
+  expect(after237(altRun.calls[0].args, "--model")).toBe("sonnet");
+  expect(after237(altRun.calls[0].args, "--tools")).toBe("Read,Glob");
+  expect(after237(args, "--permission-mode")).toBe("dontAsk");
+  expect(after237(args, "--max-turns")).toBe("12");
+  expect(after237(args, "--output-format")).toBe("json");
+  expect(after237(args, "--settings")).toBe(join(root, ".factory/ci-settings.json"));
+  expect(after237(args, "--max-budget-usd")).toBe("5");
+
+  const w = makeDeps({ state: freshState() });                          // the workflow path: same retro.v1 via the dispatcher
+  expect(await runRetro({ deps: w.deps, now: NOW })).toBe(0);
+  expect(a.last().last_full_failed).toBeUndefined();
+  for (const dep of ["applyLessons", "applyRoleAdditions", "publishLessons", "publishProposal", "createIssue"]) {
+    expect(a.deps[dep].mock.calls, dep).toEqual(w.deps[dep].mock.calls);
+  }
+  expect(a.deps.applyLessons).toHaveBeenCalled();
+
+  // ② workflow: the argv is today's, unchanged
+  const wrun = retroRun237(okEnvelope);
+  const wf = makeRetroAnalyst({ root, harness: { factory: { orchestration: "workflow", max_turns: 12 } }, charter: {}, run: wrun, readTranscriptText: rescue });
+  await wf.claudeP({ period: { from: CURSOR, to: NOW }, candidates: emptyCandidates(), stats: {}, history: [], maturity_gaps: [] });
+  expect(wrun.calls[0].args).toEqual(["-p", "/factory-retro", "--permission-mode", "dontAsk", "--max-turns", "12", "--output-format", "json", "--settings", join(root, ".factory/ci-settings.json")]);
+
+  // ③ a dead direct analyst cannot stretch the interval: each failure is today's `last_full_failed`
+  const dead = {
+    "empty result": { result: "", session_id: "s" },
+    "is_error envelope": { is_error: true, result: "boom", session_id: "s" },
+    "retro.v1 mismatch": { result: JSON.stringify({ lessons: [] }), session_id: "s" },
+  };
+  for (const [name, envelope] of Object.entries(dead)) {
+    const an = makeRetroAnalyst({ root, harness: agentHarness, charter: {}, run: retroRun237(envelope), readTranscriptText: rescue });
+    const { deps, recorded, last } = makeDeps({ state: freshState({ merges_since: 2, n: 3 }), overrides: { claudeP: an.claudeP, transcript: an.transcript } });
+    expect(await runRetro({ deps, now: NOW }), name).toBe(0);
+    const s = last();
+    expect(s.last_full_failed?.at, name).toBe(NOW);
+    expect(s.last_full_failed.reason, name).toBeTruthy();
+    expect(s.merges_since, name).toBe(3);
+    expect(s.cursor.last_retro_at, name).toBe(CURSOR);
+    expect(s.history, name).toEqual([]);
+    expect(deps.applyLessons, name).not.toHaveBeenCalled();
+    expect(recorded.join("\n"), name).toContain("retro: full analysis failed");
+  }
+  // the contrast that pins ③: on the workflow path the same empty result IS rescued from the transcript
+  const wEmpty = makeRetroAnalyst({ root, harness: { factory: { orchestration: "workflow" } }, charter: {}, run: retroRun237({ result: "", session_id: "s" }), readTranscriptText: rescue });
+  const we = makeDeps({ state: freshState(), overrides: { claudeP: wEmpty.claudeP, transcript: wEmpty.transcript } });
+  expect(await runRetro({ deps: we.deps, now: NOW })).toBe(0);
+  expect(we.last().last_full_failed).toBeUndefined();
+
+  // ④ prompt parity: the workflow analyst prompt is a protected file the runner cannot import, so the clauses the
+  // direct prompt carries are pinned against BOTH copies — dropping one from either side fails here.
+  const directPrompt = args[1];
+  const clauses = [
+    "`.factory/out/retro-candidates.json`",                                                       // the candidates file
+    "your `harness` entries must match those targets one-for-one (an entry for anything else is dropped)", // maturity_gaps 1:1
+  ];
+  const fields = (p) => {
+    const m = p.match(/Return exactly the factory\.retro\.v1 fields \(([^)]*)\)/);
+    expect(m, "direct prompt names the retro.v1 fields").not.toBeNull();
+    return m[1].split(",").map((x) => x.trim());
+  };
+  const repo = join(dirname(fileURLToPath(import.meta.url)), "../..");
+  for (const wf of [".claude/workflows/factory-retro.js", "templates/factory/claude/workflows/factory-retro.js"]) {
+    const { calls } = await runWorkflow237(join(repo, wf), { agent: async () => AGENT_OUT(), args: {} });
+    expect(calls, wf).toHaveLength(1);
+    const wfPrompt = calls[0].prompt;
+    for (const c of clauses) {
+      expect(wfPrompt, `${wf}: ${c}`).toContain(c);
+      expect(directPrompt, `direct: ${c}`).toContain(c);
+    }
+    // JSON-only: the workflow gets it structurally (agent() with the retro.v1 schema), the direct session by prose —
+    // the prose names exactly the fields the workflow schema requires, and says the final message is that JSON alone.
+    expect(calls[0].opts.schema?.required, wf).toEqual(fields(directPrompt));
+    expect(directPrompt).toContain("emit ONLY that one JSON object");
+  }
+});
+
+// dw6 parity, the whole prompt (skeptic f1/f2): the direct analyst's prompt IS the workflow analyst's prompt, rendered
+// by the REAL workflow script for the same candidates path, followed by one JSON-only tail — so every rule the workflow
+// states (period copy, evidence_runs, headroom, "never invent", prompt → lesson → gate, maturity_gaps 1:1) reaches the
+// direct analyst word for word, and an edit to ANY sentence of either copy fails here. The workflow has no JSON-only
+// prose: it gets that structurally from `agent(…, {schema: RETRO_V1})`, so the tail's field list is pinned to the schema
+// the workflow passes — dropping the schema from the workflow (or a field from either side) fails too.
+test("test_237_direct_retro_prompt_is_the_workflow_analyst_prompt_word_for_word", async () => {
+  const { directRetroPrompt } = await import("../bin/retro.js");
+  const repo = join(dirname(fileURLToPath(import.meta.url)), "../..");
+  for (const wf of [".claude/workflows/factory-retro.js", "templates/factory/claude/workflows/factory-retro.js"]) {
+    for (const candidates of [undefined, "tmp/other-candidates.json"]) {
+      const { calls } = await runWorkflow237(join(repo, wf), { agent: async () => AGENT_OUT(), args: candidates ? { candidates } : {} });
+      expect(calls, wf).toHaveLength(1);
+      const wfPrompt = calls[0].prompt;
+      const direct = directRetroPrompt(candidates ? { candidates } : {});
+      expect(direct.slice(0, wfPrompt.length), `${wf} (${candidates ?? "default"})`).toBe(wfPrompt);
+      const tail = direct.slice(wfPrompt.length);
+      expect(tail).toContain("emit ONLY that one JSON object");
+      expect(tail).toContain("Do not edit any file.");
+      const m = tail.match(/Return exactly the factory\.retro\.v1 fields \(([^)]*)\)/);
+      expect(m, "the tail names the retro.v1 fields").not.toBeNull();
+      expect(calls[0].opts.schema?.required, wf).toBeDefined();
+      expect(m[1].split(",").map((x) => x.trim()), wf).toEqual(calls[0].opts.schema.required);
+    }
+  }
+});
+
+// dw6 adoption parity (skeptic f4): the direct analyst takes its role file and model from roles.toml `[retro.analyst]`;
+// the workflow analyst is hardcoded in the workflow script (`agent(…, {agentType, model})`) and never reads roles.toml
+// (ADR-046 decision 2). Those are two sources, so the shipped roles.toml must name exactly the role and model the shipped
+// workflow hardcodes — an edit to either (a model bump in roles.toml, a new agentType in the workflow) fails here instead
+// of quietly running a different analyst in one mode only.
+test("test_237_retro_analyst_role_in_roles_toml_matches_the_workflow_hardcoded_analyst", async () => {
+  const { directRoleSpec } = await import("../bin/run-stage.js");
+  const { parse: parseToml } = await import("smol-toml");
+  const repo = join(dirname(fileURLToPath(import.meta.url)), "../..");
+  const pairs = [
+    [".factory/roles.toml", ".claude/workflows/factory-retro.js"],
+    ["templates/factory/factory/roles.toml", "templates/factory/claude/workflows/factory-retro.js"],
+  ];
+  for (const [rolesPath, wf] of pairs) {
+    const { calls } = await runWorkflow237(join(repo, wf), { agent: async () => AGENT_OUT(), args: {} });
+    const { agentType, model } = calls[0].opts;
+    expect(typeof agentType, wf).toBe("string");
+    expect(typeof model, wf).toBe("string");
+    const spec = directRoleSpec(parseToml(readFileSync(join(repo, rolesPath), "utf8")), "retro");
+    expect(spec, `${rolesPath} vs ${wf}`).toEqual({ md: `.claude/agents/${agentType}.md`, model });
+  }
 });
 
 // ── #230 — the retro maturity-promotion issue is born in backlog and walks through the real door ──────────────────

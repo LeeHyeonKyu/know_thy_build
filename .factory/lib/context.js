@@ -1,6 +1,6 @@
 import { mkdirSync, writeFileSync, statSync, readdirSync, readFileSync } from "node:fs";
 import { basename, join } from "node:path";
-import { loadHarness, loadCharter, loadRoles, rosterFor, planRoundsFor } from "./config.js";
+import { loadHarness, loadCharter, loadRoles, rosterFor, planRoundsFor, orchestrationFor } from "./config.js";
 import { latestHandoff } from "./handoff.js";
 import { tierFloor, maxTier, normalizeTier } from "./gates.js";
 import { changedFiles } from "./changed-files.js";
@@ -361,7 +361,9 @@ export async function buildContext({ root, gh, issue, stage, run = null, base = 
      * 읽어 판정하고, `verify-stage`는 후자로 그 판정을 덮어쓴다 — 둘은 같은 CHARTER에서 온다.
      */
     ...(stage === "triage" ? { triage: { default: charter.triage?.default ?? null, never_automate: charter.never_automate ?? [], ...submission } } : {}),
-    orchestration: harness.factory?.orchestration ?? "workflow",
+    // #237 — 설정값이 아니라 **이 스테이지의 실효값**(`orchestrationFor`): `agent`는 triage·retro에만 걸리고 토론
+    // 스테이지는 `workflow`로 남는다. verify-stage가 핸드오프의 자기 신고를 이 값과 대조한다(run-stage·bin/verify-stage.js 둘 다).
+    orchestration: orchestrationFor(harness, stage),
     spec_path: spec ? spec[0] : null,
     handoffs,
     harness: { maturity: harness.harness?.maturity, commands: harness.commands, gates: harness.gates },

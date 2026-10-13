@@ -5,6 +5,11 @@ import { tmpdir } from "node:os";
 import { buildContext, roleContextFor, contextManifestsFor, contextManifestLines, CONTEXT_MANIFEST_PREFIX } from "../lib/context.js";
 import { renderHandoff } from "../lib/handoff.js";
 import { validateManifest } from "../lib/qa-evidence.js";
+import { dirname } from "node:path";
+import { fileURLToPath } from "node:url";
+import { orchestrationFor } from "../lib/config.js";
+import { makeStageVerifyDep, DIRECT_GUARANTEE } from "../bin/run-stage.js";
+import { verifyStageCli } from "../bin/verify-stage.js";
 
 function root() {
   const r = mkdtempSync(join(tmpdir(), "ctx-"));
@@ -742,6 +747,135 @@ test("test_174_builder_context_takes_the_brief_bound_to_the_restart_transition",
   const loaded = await loadedFrom();
   expect(loaded.k_restart_brief.findings).toEqual(real);
   expect(loaded.k_restart_brief.paths).toEqual(["factory/lib/self-gate.js"]);
+});
+
+/**
+ * ── #237 (gap ledger P-11, T-4) — `orchestration = "agent"` is resolved PER STAGE ───────────────────────────────
+ *
+ * `agent` now means "the single-agent stages (triage, retro) call their agent directly". The debate stages keep
+ * their `/factory-<stage>` workflows, and their workflow stamps `orchestration: 'workflow'` — so the value the
+ * runner checks that stamp against must be the per-stage one, or every plan/implement/review run of a repo that
+ * flips the key lands on needs-human with `orchestration workflow != configured agent`.
+ */
+test("test_237_agent_mode_leaves_debate_stages_passing", async () => {
+  const r = root();
+  writeFileSync(join(r, ".factory/harness.toml"), readFileSync(join(r, ".factory/harness.toml"), "utf8").replace('orchestration = "workflow"', 'orchestration = "agent"'));
+  const gh = { issue: vi.fn(async () => ({ number: 30, title: "T", body: "", labels: [] })), comments: vi.fn(async () => []) };
+  const effective = {};
+  for (const stage of ["triage", "plan", "implement", "review"]) {
+    const ctx = await buildContext({ root: r, gh, issue: 30, stage });
+    effective[stage] = ctx.orchestration;
+    expect(JSON.parse(readFileSync(join(r, ".factory/out/loaded.json"), "utf8")).orchestration, stage).toBe(ctx.orchestration);
+  }
+  expect(effective).toEqual({ triage: "agent", plan: "workflow", implement: "workflow", review: "workflow" });
+  expect(orchestrationFor({ factory: { orchestration: "agent" } }, "retro")).toBe("agent");
+  expect(orchestrationFor({ factory: { orchestration: "workflow" } }, "retro")).toBe("workflow");
+  expect(orchestrationFor({ factory: { orchestration: "workflow" } }, "triage")).toBe("workflow");
+
+  // a plan run whose workflow handoff is valid reaches factory:planned — through run-stage's verify wiring …
+  const ctx = await buildContext({ root: r, gh, issue: 30, stage: "plan" });
+  mkdirSync(join(r, ".factory/out"), { recursive: true });
+  writeFileSync(join(r, ".factory/out/agents.jsonl"), ctx.roster.flatMap((role, i) => [
+    JSON.stringify({ hook_event_name: "SubagentStart", agent_id: `a${i}`, agent_type: `plan-${role}` }),
+    JSON.stringify({ hook_event_name: "SubagentStop", agent_id: `a${i}`, agent_type: `plan-${role}` }),
+  ]).join("\n") + "\n");
+  const plan = {
+    schema: "factory.plan.v1", issue: 30, tier: "standard", roles: ctx.roster, rounds: ctx.rounds,
+    done_when: [{ id: "dw1", text: "POST /notes returns 201 with the created id", check: { kind: "test", ref: "test_30_create" }, rubric: "the id in the body is the stored row's id", level: "unit" }],
+    files_expected: [], dissent_log: [], non_goals: [], open_risks: [], orchestration: "workflow", guarantee: "structural",
+  };
+  const envelope = { is_error: false, result: JSON.stringify(plan), num_turns: 4, total_cost_usd: 1 };
+  const transitions = [];
+  const deps = {
+    charterReady: async () => true, trustWorkspace: async () => {}, claim: async () => ({ ok: true }),
+    heartbeat: async () => ({ stop() {} }), assertHandoff: async () => ({ ok: true }),
+    buildContext: async () => ctx, resetAgentsLog: async () => {}, claudeP: async () => envelope, gates: async () => null,
+    verifyStage: makeStageVerifyDep({ root: r, stage: "plan", getCtx: () => ctx, getCharter: () => ({ never_automate: [] }), transcriptOf: () => "" }),
+    writeHandoff: async () => {}, transition: async (t) => { transitions.push(t); return { ok: true, to: t.to }; },
+    runRecord: () => {}, release: async () => true,
+  };
+  expect(await runStage({ stage: "plan", issue: 30, deps })).toBe(0);
+  expect(transitions.map((t) => t.to)).toEqual(["factory:planned"]);
+
+  // … and through the standalone diagnostic CLI, which reads the same per-stage value from context.json
+  writeFileSync(join(r, ".factory/out/plan.json"), JSON.stringify(envelope));
+  const cli = verifyStageCli({ root: r, argv: ["plan", "30"], home: r });
+  expect(cli.reasons.filter((x) => /orchestration/.test(x))).toEqual([]);
+  expect(cli.ok).toBe(true);
+
+  // implement and review — the GATED debate stages: a valid workflow handoff (stamped 'workflow') under the key
+  // `agent` goes through the real verify wiring (gates file, roster, agents log) to its normal end label, not needs-human.
+  const SHA = "c".repeat(40);
+  const GREEN = { schema: "factory.gates.v1", status: "GREEN", level: "unit", head_sha: SHA };
+  const debateRun = async (stage, handoff, { agentsLog = "", over = {} } = {}) => {
+    const c = await buildContext({ root: r, gh, issue: 30, stage });
+    expect(c.orchestration, stage).toBe("workflow");
+    writeFileSync(join(r, ".factory/out/agents.jsonl"), agentsLog);
+    const env = { is_error: false, result: JSON.stringify(handoff), num_turns: 4, total_cost_usd: 1 };
+    const moved = [], lines = [];
+    const d = {
+      charterReady: async () => true, trustWorkspace: async () => {}, claim: async () => ({ ok: true }),
+      heartbeat: async () => ({ stop() {} }), assertHandoff: async () => ({ ok: true }),
+      buildContext: async () => c, resetAgentsLog: async () => {}, claudeP: async () => env, gates: async () => GREEN,
+      verifyStage: makeStageVerifyDep({ root: r, stage, getCtx: () => c, getCharter: () => ({ never_automate: [] }), transcriptOf: () => "" }),
+      writeHandoff: async () => {}, transition: async (t) => { moved.push(t); return { ok: true, to: t.to }; },
+      runRecord: (l) => lines.push(...l), release: async () => true, ...over,
+    };
+    const code = await runStage({ stage, issue: 30, deps: d });
+    return { code, to: moved.map((t) => t.to), reasons: moved.map((t) => t.reason).filter(Boolean), lines, ctx: c };
+  };
+  const impl = await debateRun("implement", {
+    issue: 30, head_sha: SHA, pr: 31, gates: { status: "GREEN", level: "unit" }, verifier: { verdict: "accepted" },
+    orchestration: "workflow", guarantee: "structural",
+  }, { over: { selfGate: async () => ({ ok: true, ranChecks: ["gates"], findings: [] }), syncStageArtifact: () => {} } });
+  expect(impl.reasons.join(" | ")).not.toMatch(/orchestration/);
+  expect(impl.to).toEqual(["factory:in-progress", "factory:awaiting-review"]);   // the claim, then the hand-off
+  expect(impl.code).toBe(0);
+
+  const reviewCtx = await buildContext({ root: r, gh, issue: 30, stage: "review" });
+  expect(reviewCtx.roster.length).toBeGreaterThan(0);
+  const approve = (role) => ({ role, verdict: "approve", confidence: "high", must_fix: [], should_fix: [], verified: [] });
+  const rev = await debateRun("review", {
+    issue: 30, pr: 31, head_sha: SHA, round: 1, verdicts: reviewCtx.roster.map(approve), orchestration: "workflow", guarantee: "structural",
+  }, { agentsLog: reviewCtx.roster.flatMap((role, i) => [
+    JSON.stringify({ hook_event_name: "SubagentStart", agent_id: `r${i}`, agent_type: `reviewer-${role}` }),
+    JSON.stringify({ hook_event_name: "SubagentStop", agent_id: `r${i}`, agent_type: `reviewer-${role}` }),
+  ]).join("\n") + "\n" });
+  expect(rev.reasons.join(" | ")).not.toMatch(/orchestration/);
+  expect(rev.to).toEqual(["factory:approved"]);
+  expect(rev.code).toBe(0);
+  // the contrast that makes this bite: the SAME handoffs checked against the configured value (the pre-#237 wiring) fail
+  for (const [stage, h] of [["implement", { issue: 30, head_sha: SHA, pr: 31, verifier: { verdict: "accepted" }, orchestration: "workflow", guarantee: "structural" }]]) {
+    const v = makeStageVerifyDep({ root: r, stage, getCtx: () => ({ ...impl.ctx, orchestration: "agent" }), getCharter: () => ({ never_automate: [] }), transcriptOf: () => "" })({ out: { is_error: false, result: JSON.stringify(h) }, gates: GREEN });
+    expect(v.reasons).toContain("orchestration workflow != configured agent");
+  }
+
+  // the changed meaning of `agent` and the direct-mode guarantee are written down, not decided silently
+  const decisions = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "../../docs/factory/DECISIONS.md"), "utf8");
+  // dw4: under the next free number, never reusing a taken one (ADR-039 is the owner-veto decision; ADR-045 is #293's re-land
+  // fast path, which landed on base first — so this record is ADR-046)
+  const heads = [...decisions.matchAll(/^## ADR-(\d{3}) /gm)].map((m) => Number(m[1]));
+  const mine = [...decisions.matchAll(/^## ADR-(\d{3}) [^\n]*#237/gm)].map((m) => Number(m[1]));
+  expect(mine).toEqual([46]);
+  expect(heads.filter((n) => n === 46)).toHaveLength(1);
+  expect(heads.filter((n) => n === 45)).toHaveLength(1);              // no second ADR-045 left behind
+  expect(heads.indexOf(46)).toBe(heads.indexOf(45) + 1);             // 46 follows 45 in the file: the next free number
+  const at = decisions.search(/^## ADR-046 /m);
+  expect(at).toBeGreaterThan(-1);
+  const rest = decisions.slice(at);
+  const next = rest.search(/\n##? /);
+  const section = next === -1 ? rest : rest.slice(0, next);
+  expect(section).not.toMatch(/^### /m);                                // no other ADR's subsection spliced into this one
+  // ADR-038's amendment still sits directly under ADR-038, not under the new record
+  const amend = decisions.indexOf("### ADR-038 보정");
+  const lastH2BeforeAmend = [...decisions.slice(0, amend).matchAll(/^## (ADR-\d{3})/gm)].pop()[1];
+  expect(lastH2BeforeAmend).toBe("ADR-038");
+  expect(section).toContain("#237");
+  expect(section).toContain(`\`guarantee\``);
+  expect(section).toContain(`\`${DIRECT_GUARANTEE}\``);
+  expect(section).toMatch(/triage/);
+  expect(section).toMatch(/retro/);
+  expect(section).toMatch(/orchestration = "agent"/);
 });
 
 /**
