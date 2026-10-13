@@ -155,6 +155,29 @@ Before implementing any feature, check if a design contract exists at `docs/feat
 If one exists: read it, follow the approved structure, do not modify signature contract tests.
 If none exists: run `/know-thy-build:architect` before implementing.
 
+## 운영 머지 — 소유자는 서명 기계가 아니다 (2026-10-10, 소유자 결정, ADR-039)
+
+소유자: "사람 역할 하는 agent를 하나 띄워서 나한테 PR 검토 받지 않고 merge하도록 해." 그래서:
+
+1. **공장이 만든 PR**은 CHARTER `self_change.auto_merge_judge: true` — 만장일치 리뷰 + GREEN + 거부권 창(CHARTER `veto_minutes`, 2026-10-12부터 15분) + 차단기 닫힘이면 공장이 머지한다(ADR-033). 소유자에게 머지를 요청하지 않는다.
+2. **운영 세션이 만든 PR**(`.github/**`·templates·CHARTER·`factory/**` 핫픽스 등 판정 경로 포함)은 운영 세션이 운영 door(`gh pr merge <n> --squash --admin`, CHARTER `operator_merge_judge: true`)로 직접 머지한다. 단, 머지 전에 **반드시**:
+   - 전체 스위트(`GITHUB_ACTIONS=true npx vitest run`)와, 워크플로를 건드렸으면 `actionlint`가 clean이고 PR 체크가 GREEN이다.
+   - **대역 리뷰어 에이전트**는 **판정 로직을 새로 바꾸는 엔진 변경**(merge-stage·integrity·게이트·워크플로·훅·CHARTER 규칙의 의미 변경)에만 띄운다(`Agent`, fresh `general-purpose`, 읽기 전용, cold read, `approve | reject(must_fix)`; reject면 고치고 다시). 2026-10-12 소유자 "토큰 사용량이 너무 많다": 대역 리뷰 1회가 90~150k 토큰이라, **이미 공장 리뷰를 통과한 코드의 재착륙(base 머지·번호 정리만)·문서·테스트 핀·숫자 하나짜리 설정 변경**은 운영 세션이 diff를 직접 읽고 PR 본문에 무엇을 확인했는지 적은 뒤 머지한다. 공장 리뷰가 로스터 크기 때문에 멈춘 PR(판정 경로인데 standard 티어)은 빠진 렌즈만 대역 1명으로 메운다.
+   - PR 본문에 그 판정 요지(`Stand-in review: approve — …` 또는 `Operator read: …`)를 남긴다.
+3. 소유자에게 남는 것은 **거부권**(revert·`factory:veto`·차단기 리셋)이다. 사람에게 무언가를 요청하는 것은 토큰·시크릿·계정처럼 **사람만 할 수 있는 것**뿐이다.
+
+## 운영 세션 비용 규칙 (2026-10-13, /333 결정 — `docs/superpowers/plans/2026-10-13-factory-cost-and-latency-cut.md` §7)
+
+2026-10-11~13 실측(message id 기준, 정정판): 운영 API 호출 496 · 출력 358k · 캐시 읽기 228M(호출당 459k) · 공장 ≈ $427 · 벽시계 35h — 결과물(착륙 PR 19건)에 비해 과했다. 트랜스크립트 집계는 **message id로 중복 제거**한다(병렬 도구 호출이 항목별로 쪼개져 2배로 부풀 수 있다). 그래서:
+
+1. **승인된 PR의 base 충돌**: 충돌 hunk가 **0**이고 ADR-041 §2 `conflict-scope`가 GREEN이고 범위 테스트가 GREEN이면 운영 세션이 리베이스해 door로 넣는다(PR 본문에 scope 결과·hunk 수 기재). hunk가 하나라도 있으면 공장의 conflict-only 라운드(재큐)다. 공장 재큐는 "코드가 바뀌어야 할 때"만.
+2. **감시는 종료 상태만**: `docs/factory/ops/watch-terminal.sh <issue…>`(merged/needs-human/blocked/wont-do만 출력, 15분 간격, 여러 이슈를 한 프로세스로). 라벨이 바뀔 때마다 깨어나는 모니터 금지. 진행 보고는 상태가 바뀐 때만 한 줄.
+3. **조사·리뷰는 서브에이전트 1회**(브리프 ≤ 300자, 결론 ≤ 200자, 읽기 전용). 메인 세션은 결정·실행만. 로그·run 기록 grep을 메인에서 반복하지 않는다.
+4. **메인 컨텍스트 150k 초과 → `/compact` 요청 또는 새 세션.** 캐시 읽기 439M의 뿌리는 큰 컨텍스트 위의 짧은 턴 반복이었다(허점 원장 M-4의 재발).
+5. **대역 리뷰는 판정 로직 엔진 변경에만**(#294). 테스트 핀·문서·재착륙·설정 숫자는 운영 세션이 읽고 PR 본문에 적는다.
+6. **사람 몫은 세션당 한 번 한 줄.** 병렬 투입은 파일이 겹치지 않는 이슈 3건까지(`comm -12`로 Impact paths 대조).
+7. **측정**: 주간 표(`docs/factory/digests/`) — 착륙 PR 기준 평생 비용 중앙값·큐→머지 벽시계·운영 API 호출·캐시 읽기·사람 요청. 목표 $10 / 1h / 10호출 / 3M. 작업 전에 호출·토큰·시간을 **예측해 적고** 끝난 뒤 비교한다(첫 비교 2026-10-13: 호출 8/≤10, 출력 15.7k/15k, 캐시 5.4M/4.5M — 호출당 컨텍스트 681k를 과소 추정, 벽시계 3분/15분 과대).
+
 ## SDD 비용 정책 (2026-09-21, 소유자 승인)
 
 서브에이전트 주도 개발(SDD)로 이 저장소를 바꿀 때 지키는 규칙. 리뷰 깊이는 줄이지 않는다 — 실제 결함은 적대적 리뷰가 잡았다.

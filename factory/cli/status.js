@@ -11,7 +11,7 @@ import { lastTransition } from "../lib/retro/issue-comments.js";
 import { parseHandoffs } from "../lib/handoff.js";
 import { overlapFrom } from "../lib/retro/harvest.js";
 import { summarizeUsage } from "../lib/usage.js";
-import { buildStatus, renderStatus } from "../lib/status.js";
+import { buildStatus, renderStatus, runNeedsJobs, ACTIONS_RUN_LIMIT } from "../lib/status.js";
 
 const LAST_RE = /last:\s*(\S+)/;
 const STAGE_RE = /stage:\s*(\S+)/;
@@ -76,13 +76,57 @@ async function collectOverlap(gh, merged, nowIso) {
   return overlapFrom(sets);
 }
 
+/**
+ * #234 (gap P-8) — `ACTIONS BLOCKED?` 줄의 입력. 최근 20개 런을 읽고, **판정에 잡이 필요한 런에만**(`runNeedsJobs`: 실패,
+ * 그리고 큐에 24분 넘게 앉았다 취소된 런) 잡을 읽고, 스텝이 돈 실패 잡에만 annotation을 읽는다 — billing 문구는
+ * `gh run list`의 어떤 필드에도 없고 annotation에만 온다. `factory:queue` 이슈의 라벨 시각은 `labeled` 이벤트에서,
+ * 못 읽으면 `updatedAt`(라벨 시각보다 늦거나 같다 — 나이를 줄이는 쪽으로만 틀리므로 거짓 경보를 만들지 않는다).
+ *
+ * 런 목록 자체를 못 읽으면 null — 줄을 내지 않고 나머지 화면은 그대로 그린다(읽기 전용 보고는 지표 하나 때문에 죽지
+ * 않는다, d5). 잡·annotation 하나의 실패는 그 런을 "모른다"(jobs 없음)로 남긴다: 모르는 런은 막힘으로 세지 않는다.
+ */
+async function collectActions(gh, queueIssues) {
+  let rows;
+  try { rows = await gh.recentRuns(ACTIONS_RUN_LIMIT); }
+  catch { return null; }
+  if (!Array.isArray(rows)) return null;
+  const runs = [];
+  for (const r of rows) {
+    const run = { ...r };
+    if (runNeedsJobs(r)) {
+      try {
+        const jobs = await gh.runJobs(r.id);
+        run.jobs = [];
+        for (const j of jobs) {
+          const job = { ...j, annotations: [] };
+          if (r.conclusion === "failure" && j.conclusion === "failure" && Number(j.steps) > 0) {
+            try { job.annotations = await gh.jobAnnotations(j.id); } catch { /* 그 잡의 문구를 모른다 — billing으로 세지 않는다 */ }
+          }
+          run.jobs.push(job);
+        }
+      } catch { delete run.jobs; }
+    }
+    runs.push(run);
+  }
+  const queued = [];
+  for (const i of queueIssues) {
+    let labeledAt = null;
+    try {
+      const ev = await gh.labelEvents(i.number, "factory:queue");
+      labeledAt = ev.length ? ev[ev.length - 1].at : null;
+    } catch { /* 이벤트를 못 읽었다 — updatedAt으로 떨어진다 */ }
+    queued.push({ number: i.number, labeledAt: labeledAt ?? i.updatedAt ?? null });
+  }
+  return { runs, queued };
+}
+
 // STATES에서 status가 직접 조회할 상태 라벨 — backlog(factory 상태가 아님)·factory:merged(별도 closed
 // 조회)·factory:wont-do(종결, 볼 것 없음)는 뺀다.
 const STATUS_STATE_LABELS = [...STATES].filter((l) => l !== "backlog" && l !== "factory:merged" && l !== "factory:wont-do");
 
 /**
  * `factory status [--json]` — 읽기 전용(§13 `:status`의 비대화형 버전). mutating gh 메서드는 절대
- * 호출하지 않는다: issueList/prList/comments만 쓴다.
+ * 호출하지 않는다: issueList/prList/comments와 #234의 런 조회(recentRuns/runJobs/jobAnnotations/labelEvents)만 쓴다.
  */
 export async function statusCommand({ root, argv = [], io, gh, run = realRun, now, readRecords = realReadRecords }) {
   const json = argv.includes("--json");
@@ -148,7 +192,9 @@ export async function statusCommand({ root, argv = [], io, gh, run = realRun, no
 
   const overlap = await collectOverlap(ghClient, merged, nowIso);
 
-  const status = buildStatus({ issues, prs, heartbeats, quarantine, thresholds, charter, usage, overlap, now: nowIso });
+  const actions = await collectActions(ghClient, issues.filter((i) => (i.labels || []).includes("factory:queue")));
+
+  const status = buildStatus({ issues, prs, heartbeats, quarantine, thresholds, charter, usage, overlap, now: nowIso, actions });
 
   if (json) io.out(JSON.stringify(status));
   else io.out(renderStatus(status));

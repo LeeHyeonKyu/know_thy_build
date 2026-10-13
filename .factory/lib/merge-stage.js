@@ -3,7 +3,7 @@ import { gatesDetailLines, verdictLine, DETAIL_MAX_FAILING, GATES_DETAIL_PREFIX 
 import { parseVitestJson } from "./parsers/vitest-json.js";
 import { isMergeBaseError, MERGE_BASE_BLOCKED_REASON, GIT_DIFF_BLOCKED_REASON } from "./blocked-errors.js";
 import { isGitDiffError } from "./changed-files.js";
-import { LESSONS_POLICY_RULE as LESSONS_RULE_RE, HARNESS_SECTION_POLICY_RULE as HARNESS_SECTION_RULE_RE, TESTS_MODIFIED_POLICY_RULE as TESTS_RULE_RE } from "./integrity.js";
+import { LESSONS_POLICY_RULE as LESSONS_RULE_RE, HARNESS_SECTION_POLICY_RULE as HARNESS_SECTION_RULE_RE, TESTS_MODIFIED_POLICY_RULE as TESTS_RULE_RE, MUST_NOT_TOUCH_RULE, MUST_NOT_ADD_RULE, ADDITIVE_ONLY_POLICY_RULE as ADDITIVE_RULE_RE } from "./integrity.js";
 import { blockedOriginMarker } from "./retro/issue-comments.js";
 import { parseBlocks } from "./harness-request.js";
 import { verifyReviewQuorum, verifyReviewProvenance, NOT_BOUND } from "./review-quorum.js";
@@ -383,7 +383,8 @@ async function waitForChecksSettled({ prChecks, pr, required, sleep, waitSec = D
  *      factoryLogins()  → { ok, logins: string[], reason? }  팩토리 자신의 계정 이름(값이 아니라 이름)
  *    humanGate?       → CHARTER `merge.human_gate`(boolean|undefined) — 머지 전이 텍스트에만 쓴다.
  *    #179 자기 변경 경로(ADR-033): selfChange?(CHARTER `self_change`), engine?(base에서 계산), neverAutomate?(CHARTER
- *    NEVER_AUTOMATE 글롭 — 경로를 탈 때 필수, 없으면 blocked), vetoWindow·vetoLabel·now·sleep?·jobStartedAt·jobTimeoutMinutes.
+ *    NEVER_AUTOMATE 글롭 — 경로를 탈 때 필수, 없으면 blocked), vetoWindow·vetoLabel·now·sleep?·jobStartedAt·jobTimeoutMinutes,
+ *    gitTokenTtlMinutes?(체크아웃 토큰의 수명(분) — App 설치 토큰이면 60, 만료 없는 PAT면 null/0; 창 + 여유가 그 안에 들어야 연다).
  *    그 경로의 머지는 `mergePr(pr, { matchHeadCommit })`로 창 뒤에 재검증한 head를 못 박는다.
  * headSha: review·merge가 checkoutHead로 고정한 PR head — 없으면 gates().head_sha로 대신한다(둘 다
  * 없으면 "unknown"으로 남긴다. 아무것도 지어내지 않는다).
@@ -660,8 +661,35 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
     // 외부 감사 H5: 네 번째 제목 — 기존 테스트의 수정·삭제.
     const testsChanged = (pol.violations || []).filter((v) => TESTS_RULE_RE.test(v.rule));
     const testFiles = [...new Set(testsChanged.map((v) => v.file))];
-    const additive = pol.files.filter((f) => !lessons.includes(f) && !frozenFiles.includes(f) && !testFiles.includes(f));
+    /**
+     * #286 — 다섯 번째 제목: 이슈 본문의 `must_not:` 계약. 예전엔 위 셋에 안 걸린 파일이 전부 "역할 섹션" 제목으로 떨어져서,
+     * must_not 위반만 있던 PR #255의 사람이 역할 프롬프트를 찾아 헤맸다. 이제 역할 섹션 제목은 **자기 규칙**(additive-only)으로
+     * 고른다 — 한 파일이 두 종류를 다 가지면 두 제목에 다 나온다. 규칙이 하나도 안 실린 파일(위반 목록 없이 `files`만 온 오래된
+     * 모양)은 오늘처럼 역할 섹션 제목이다(사람에게 넘어가는 것은 같고, 제목 없이 사라지지 않는다).
+     */
+    const mustNot = (pol.violations || []).filter((v) => MUST_NOT_TOUCH_RULE.test(v.rule) || MUST_NOT_ADD_RULE.test(v.rule));
+    const mustNotFiles = [...new Set(mustNot.map((v) => v.file))];
+    const classified = (v) => LESSONS_RULE_RE.test(v.rule) || HARNESS_SECTION_RULE_RE.test(v.rule) || TESTS_RULE_RE.test(v.rule)
+      || MUST_NOT_TOUCH_RULE.test(v.rule) || MUST_NOT_ADD_RULE.test(v.rule);
+    const ruled = new Set((pol.violations || []).filter(classified).map((v) => v.file));
+    const additiveRuled = new Set((pol.violations || []).filter((v) => ADDITIVE_RULE_RE.test(v.rule)).map((v) => v.file));
+    const additive = pol.files.filter((f) => additiveRuled.has(f) || (!ruled.has(f) && !lessons.includes(f) && !frozenFiles.includes(f) && !testFiles.includes(f)));
     const sections = [], reasons = [];
+    if (mustNot.length) {
+      const said = mustNot.map((v) => `${v.file} (${v.rule})`);
+      reasons.push(`issue must_not contract violated — ${HUMAN_MERGE_REQUIRED_TEXT}: ${said.join(", ")}`);
+      sections.push({
+        heading: "이슈 must_not 계약 위반",
+        why: [
+          "이 PR의 diff가 추적 이슈 본문의 `must_not:` 계약을 깹니다 — 그 금지는 이슈(사람이 쓰거나 승인한 글)에 있고",
+          "PR은 그것을 고칠 수 없습니다. implement 게이트 `must-not`과 같은 함수로 셌습니다(1.4.14 / KTB #73).",
+          "러너가 생성한 미러 경로는 이 계약에서 빠집니다(#286) — 아래는 그 밖의 위반입니다.",
+          "", "깨진 계약 줄:", ...said.map((s) => `- ${s}`),
+          "", "위반한 파일:",
+        ],
+        files: mustNotFiles,
+      });
+    }
     if (additive.length) {
       reasons.push(`agent role sections edited outside Examples/Perspectives — ${HUMAN_MERGE_REQUIRED_TEXT}: ${additive.join(", ")}`);
       sections.push({
@@ -1183,13 +1211,33 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
     if (!Number.isFinite(openedAt)) return await undecidable(what, "clock returned no time");
     const windowMs = vetoMinutes * 60 * 1000;
     const remainingMs = started + timeout * 60 * 1000 - openedAt;
+    const marginMin = VETO_POST_WINDOW_MARGIN_MS / 60000;
     // 창 뒤의 일(리뷰 재검증·승인·머지·전이)도 같은 잡 안에서 끝나야 한다 — 잡이 창 끝에서 죽으면 finally가 돌지 않는다(KTB-24).
     if (remainingMs < windowMs + VETO_POST_WINDOW_MARGIN_MS) {
-      const marginMin = VETO_POST_WINDOW_MARGIN_MS / 60000;
       const reason = `veto window does not fit in this merge job — timeout-minutes: ${timeout} leaves ${Math.max(0, Math.floor(remainingMs / 60000))} min, CHARTER self_change.veto_minutes: ${vetoMinutes} plus a ${marginMin} min margin for the post-window re-verify and merge; raise timeout-minutes in .github/workflows/factory-merge.yml above ${vetoMinutes + marginMin} (plus the gate time) or lower veto_minutes — no window was opened`;
       const t = await toBlocked(reason);
       record([`merge: veto window not started — ${reason}`, ...refusal(t)]);
       return 2;
+    }
+    /**
+     * ADR-038 보정(2026-10-11, #249·#212) — 잡의 **git 자격증명**도 창보다 오래 살아야 한다. 체크아웃이 심은 토큰이 GitHub App
+     * 설치 토큰이면 민팅 뒤 60분에 만료되는데(GitHub 문서: "The installation access token will expire after 1 hour"), 창은 60분이라
+     * 창이 닫힌 뒤의 `factory/records` fetch·push와 락 해제가 전부 "could not read Username"으로 죽었다 — 그리고 그 실패는
+     * "review evidence not bound to a factory run"으로 읽혀 needs-human이 됐다. 두 배우 모드에서는 엔진이 자기 git에 `GH_TOKEN`
+     * (만료 없는 머지 PAT)으로 인증하므로(run-stage `main`의 `gitAuthEnv`) 워크플로가 수명 0을 싣고, 단일 배우 App 모드만 60을
+     * 싣는다(`FACTORY_GIT_TOKEN_TTL_MINUTES`; 0/없음 = 만료 없음). 수명이 있으면 잡 시작(민팅은 그 직후다 — 보수적인 앵커)부터
+     * 창 + 여유가 그 안에 들어야 연다. 아니면 창을 열지 않고 blocked — 한 시간 뒤에 알 수 없는 이유로 죽는 것보다 지금 이유를 말하는
+     * 것이 낫다.
+     */
+    const ttl = d.gitTokenTtlMinutes;
+    if (Number.isFinite(ttl) && ttl > 0) {
+      const tokenLeftMs = started + ttl * 60 * 1000 - openedAt;
+      if (tokenLeftMs < windowMs + VETO_POST_WINDOW_MARGIN_MS) {
+        const reason = `veto window outlives this job's git credential — the checkout token is a GitHub App installation token that expires ${ttl} min after the job started (${Math.max(0, Math.floor(tokenLeftMs / 60000))} min left), CHARTER self_change.veto_minutes: ${vetoMinutes} plus a ${marginMin} min margin for the post-window re-verify, records sync and merge; set FACTORY_MERGE_TOKEN in the factory-merge environment (two-actor mode — the engine's own git then authenticates with that non-expiring token) or lower veto_minutes so that the window plus the ${marginMin} min margin fits in what is left of the token when the window opens — no window was opened`;
+        const t = await toBlocked(reason);
+        record([`merge: veto window not started — ${reason}`, ...refusal(t)]);
+        return 2;
+      }
     }
     const closesAt = new Date(openedAt + windowMs).toISOString();
     const description = vetoWindowDescription(closesAt);

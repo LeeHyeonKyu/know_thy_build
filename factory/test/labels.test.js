@@ -3,6 +3,7 @@ import { STATES, canTransition, factoryLabelOf, STAGE_OF_TARGET, ENTRY_LABELS, B
 import { HARNESS_LABEL } from "../lib/label-catalog.js";
 import { HARNESS_LABEL as HARNESS_LABEL_RUN_STAGE } from "../bin/run-stage.js";
 import { HARNESS_LABEL as HARNESS_LABEL_RETRO } from "../bin/retro.js";
+import { TRANSITIONS } from "../lib/labels.js";
 
 test("states are the spec's 13 labels", () => {
   expect([...STATES].sort()).toEqual([
@@ -198,4 +199,16 @@ test("planned and rework can go to blocked (pre-session implement failures); blo
   expect(canTransition("factory:rework", "factory:blocked")).toBe(true);
   expect(canTransition("factory:blocked", "factory:needs-human")).toBe(true);
   expect(canTransition("factory:planned", "factory:merged")).toBe(false);
+});
+
+// #227 — review (awaiting-review) and merge (approved) send a handoff PR that is definitely gone (not found, another branch, CLOSED)
+// back to `factory:planned` so implement opens a new PR. Without these two edges the real transition() refuses the move and the issue
+// lands in needs-human with a graph-refusal comment — the exact dead end #207 hit. Only run-stage's not-visible route takes them
+// (pinned in run-stage.test.js); the other exits of both states are unchanged.
+test("test_227_review_with_an_invisible_pr_returns_to_planned — labels.js carries awaiting-review → planned and approved → planned", () => {
+  expect(canTransition("factory:awaiting-review", "factory:planned")).toBe(true);
+  expect(canTransition("factory:approved", "factory:planned")).toBe(true);
+  // the rest of both states' exits are what they were
+  expect([...TRANSITIONS.get("factory:awaiting-review")].sort()).toEqual(["factory:approved", "factory:blocked", "factory:needs-human", "factory:needs-info", "factory:planned", "factory:rework"]);
+  expect([...TRANSITIONS.get("factory:approved")].sort()).toEqual(["factory:blocked", "factory:merged", "factory:needs-human", "factory:planned", "factory:rework"]);
 });

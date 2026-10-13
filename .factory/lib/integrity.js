@@ -1,4 +1,5 @@
 import { matchesAny } from "./glob.js";
+import { inMirrorFamily } from "./mirror.js";
 
 const SKIP_PRAGMAS = [/\.skip\s*\(/, /\bxit\s*\(/, /\bxdescribe\s*\(/, /@pytest\.mark\.skip/, /istanbul ignore/, /pragma:\s*no cover/, /Stryker disable/];
 
@@ -229,6 +230,22 @@ export function mustNotViolations({ contract, changed = [], added = new Map() })
 }
 
 /**
+ * 설계 2026-09-30 §8.3 (S3) · DECISIONS 1.4.36/1.4.37 · #286 — must_not 계약에 **무엇을 대는가**의 단일 본체. KTB 자기 저장소에서
+ * 미러 가족(`inMirrorFamily` — 생성물의 유일한 정의)은 러너가 `factory/**`에서 생성해 커밋한 것이지 빌더의 변경이 아니다(빌더는 거기
+ * 쓸 수 없다). 그래서 `mirrorSelf`가 참이면 그 경로를 `changed`와 `added` 양쪽에서 뺀다; 가족 밖의 `.factory/**`(harness.toml,
+ * lessons/**, out/**)는 그대로 센다. implement 게이트(gates.js)와 merge의 `policyViolations`가 이 함수 하나를 부른다 — 둘이
+ * 갈라지면 게이트가 GREEN이라 한 PR을 머지가 막는다(#254 → PR #255). 적용 여부(`mirrorSelf`)는 호출자가 정한다: 게이트는 자기
+ * 워킹 트리(`mirrorApplicable`), merge는 base revision(`mirrorApplicableAtRev`) — 이 함수는 트리를 읽지 않는다.
+ * → `{ changed, added, excluded }` (`excluded` = 뺀 changed 경로 수). 입력을 바꾸지 않는다.
+ */
+export function mustNotScope({ changed = [], added = new Map(), mirrorSelf = false } = {}) {
+  const addedMap = added instanceof Map ? added : new Map();
+  if (mirrorSelf !== true) return { changed: [...changed], added: new Map(addedMap), excluded: 0 };
+  const kept = changed.filter((p) => !inMirrorFamily(p));
+  return { changed: kept, added: new Map([...addedMap].filter(([f]) => !inMirrorFamily(f))), excluded: changed.length - kept.length };
+}
+
+/**
  * **사라진 lessons 파일은 정책 사안이다**(fix round 2의 "알려진 한계"를 닫는다).
  * `.factory/lessons/**`는 `[protected].except`라 보호 목록에 들어가지 않고, 삭제된 경로에는 내용 규칙도
  * 걸리지 않는다(N2) — 그래서 `.factory/lessons/reviewer-qa.md`를 지우거나 옮기는 diff는 L0에서도 L1에서도
@@ -267,6 +284,8 @@ export function additiveOnlyViolations({ file, allowed, added, removed, headText
   if (headerAdded) v.push({ file, rule: "additive-only: header added" });
   return v;
 }
+/** `additiveOnlyViolations`가 만드는 규칙 문자열의 단일 출처 — L1(`merge-stage.js`)이 역할 섹션 제목을 이 규칙으로 고른다(#286). */
+export const ADDITIVE_ONLY_POLICY_RULE = /^additive-only(?: sections \(.*\) — removals or edits outside allowed sections|: header added)$/;
 
 // ── 외부 감사 M9: harness 모드에서도 얼어 있는 harness.toml의 세 섹션 (ADR-023) ────────────────
 /**
@@ -342,7 +361,7 @@ export function harnessSectionViolations({ file = HARNESS_FILE, added = [], remo
  * 삭제된 파일은 `git show <head>:<f>`가 실패하는데, 그것은 판정 불가가 아니라 **빈 내용**이다
  * (삭제 = 전부 removal = 정책 위반). 그 외 git 실패는 fail-closed `ok:false`다.
  */
-export async function policyViolations({ run, cwd, base, head = "HEAD", harness, issueBody = "" }) {
+export async function policyViolations({ run, cwd, base, head = "HEAD", harness, issueBody = "", mirrorSelf = false }) {
   if (!base) return { ok: false, files: [], violations: [], reason: "base is empty (merge-base not resolved)" };
   const prot = harness?.protected || {};
   const ns = await run("git", NAME_STATUS(base, head), { cwd });
@@ -374,6 +393,9 @@ export async function policyViolations({ run, cwd, base, head = "HEAD", harness,
   for (const e of changed) if (e.deleted) violations.push(...lessonsGone(e.path, true));
   // 1.4.14 (KTB #73) — 이슈 본문의 `must_not:` 계약. implement 게이트와 **같은 함수**로 센다(둘이 갈라지면 게이트가
   // GREEN이라 한 PR을 머지가 막거나, 그 반대가 된다). 추가된 줄은 `add` 토큰이 있을 때만 한 번 읽는다.
+  // #286 — 미러 가족의 면제도 게이트와 같은 본체(`mustNotScope`)다. `mirrorSelf`는 호출자(run-stage의 merge dep)가 base revision에서
+  // 정한다 — 기본값 false는 오늘의 판정 그대로다. 뺀 경로 수는 `mirror_excluded`로 돌려준다(머지 run 기록이 그 수를 적는다).
+  let mirrorExcluded = 0;
   const mn = mustNotContract(issueBody);
   if (mn.touch.length || mn.add.length) {
     let added = new Map();
@@ -385,7 +407,9 @@ export async function policyViolations({ run, cwd, base, head = "HEAD", harness,
         added = addedLines(u0a.stdout);
       }
     }
-    violations.push(...mustNotViolations({ contract: mn, changed: changed.map((e) => e.path), added }));
+    const scope = mustNotScope({ changed: changed.map((e) => e.path), added, mirrorSelf });
+    mirrorExcluded = scope.excluded;
+    violations.push(...mustNotViolations({ contract: mn, changed: scope.changed, added: scope.added }));
   }
   // M9 — harness.toml의 얼어붙은 섹션도 글롭과 무관하게 센다(L0와 같은 판정). 내용은 워킹 트리가
   // 아니라 revision의 blob으로 읽는다: 이 스테이지는 PR head를 체크아웃한 트리 위에서 돌기 때문에
@@ -415,7 +439,7 @@ export async function policyViolations({ run, cwd, base, head = "HEAD", harness,
       headText: shown.code === 0 ? shown.stdout : "",
     }));
   }
-  return { ok: true, files: [...new Set(violations.map((v) => v.file))], violations, tests_allowed: testsAllowed };
+  return { ok: true, files: [...new Set(violations.map((v) => v.file))], violations, tests_allowed: testsAllowed, mirror_excluded: mirrorExcluded };
 }
 
 /**
@@ -484,6 +508,12 @@ const isProtectedPath = (f, prot) => matchesAny(prot.factory || [], f) && !match
  * 추가한 것이 아니기 때문이다(fix round 2, N1).
  */
 const isProtectedEntry = ({ path, deleted }, prot) => (!deleted && additiveGlobFor(path, prot) ? false : isProtectedPath(path, prot));
+/**
+ * #287 — 살아 있는(삭제되지 않은) 경로 하나에 대한 `isProtectedEntry` 그대로. triage의 tier 올림이 merge의 보호 경로 판정
+ * (`protectedPaths`)과 **같은 술어**를 쓰도록 내보낸다 — 글롭 규칙을 verify-stage.js에 다시 적지 않는다(규칙이 둘로 갈라지지 않게).
+ * triage는 diff가 아니라 신고된 impact_paths를 보므로 삭제를 모른다: 삭제된 additive_only 파일의 보호는 merge만 본다(#287 non_goal).
+ */
+export const isProtectedLivePath = (path, prot) => isProtectedEntry({ path, deleted: false }, prot || {});
 
 /** 판정 불가 — ok:false에 이유를 한 줄로 싣는다(file은 "-": 특정 파일의 위반이 아니다). */
 const cannotCompute = (reason) => ({ ok: false, violations: [{ file: "-", rule: `integrity could not be computed: ${reason}` }], protected: [], policy: [], tests_allowed: [], checked: { files: [] } });

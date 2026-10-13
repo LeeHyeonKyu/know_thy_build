@@ -2858,11 +2858,16 @@ test("test_179_judge_path_unanimity_is_provenance_bound", async () => {
 });
 
 // ── #179 self-critique — NEVER_AUTOMATE은 자기 변경 경로 안에서도 사람 머지다 ─────────────────────────────────────
-// `templates/factory/docs/**`는 비판정 목록에 있지만 CHARTER NEVER_AUTOMATE의 `templates/factory/**`에도 걸린다. 스위치가 켜져도
-// 그런 PR은 창을 열지 않고(게이트도 돌지 않고) 오늘의 보호 경로 hand-off 그대로 사람에게 간다. 글롭은 실제 CHARTER에서 읽는다.
+// `templates/factory/docs/**`는 비판정 목록에 있는데, 2026-10-11(허점 원장 P-4)까지는 CHARTER NEVER_AUTOMATE의 `templates/factory/**`에도
+// 걸렸다. 스위치가 켜져도 그런 PR은 창을 열지 않고(게이트도 돌지 않고) 오늘의 보호 경로 hand-off 그대로 사람에게 간다. P-4 뒤 실제 CHARTER는
+// 판정 로직 템플릿만 적어 그 교집합이 **없다** — 그래서 여기서는 실제 목록에 `templates/factory/docs/**`를 더해 넣어 메커니즘을 핀한다
+// (NEVER_AUTOMATE이 비판정 경로를 덮을 때의 동작은 CHARTER가 무엇을 적든 같아야 한다). 실제 목록의 모양도 함께 핀한다.
 test("test_179_never_automate_beats_self_change", async () => {
   const QA_DOC = "templates/factory/docs/QA.md";
-  expect(NEVER_AUTOMATE_179).toContain("templates/factory/**");                 // 실제 CHARTER의 항목이다
+  expect(NEVER_AUTOMATE_179).not.toContain("templates/factory/**");             // P-4: 템플릿 전체 금지는 사라졌다
+  // 정확히 일곱 — 넓은 글롭이 조용히 돌아오면 여기서 소리 난다(P-4 뒤 실제 CHARTER의 모양 그대로).
+  expect([...NEVER_AUTOMATE_179].sort()).toEqual([".env*", ".github/workflows/publish.yml", "factory/hooks/**", "templates/factory/claude/settings.json", "templates/factory/factory/ci-settings*.json", "templates/factory/factory/harness.toml", "templates/factory/github/workflows/**"]);
+  const NEVER_AUTOMATE_WITH_DOCS = [...NEVER_AUTOMATE_179, "templates/factory/docs/**"];
   expect(classifyProtected179([QA_DOC], { engine: true })).toEqual({ non_judge: [QA_DOC], judge: [] });   // 구멍의 전제: 비판정이다
 
   const cases = [
@@ -2871,7 +2876,7 @@ test("test_179_never_automate_beats_self_change", async () => {
     ["judge path with both switches on", ["factory/lib/gates.js", QA_DOC], { auto_merge_non_judge: true, auto_merge_judge: true, veto_minutes: 60 }],
   ];
   for (const [label, files, selfChange] of cases) {
-    const d = selfD179({ protectedPaths: vi.fn(async () => ({ ok: true, files })), selfChange, reviewRoster: vi.fn(async () => ({ ok: true, roles: ["correctness", "qa"], tier: "load-bearing" })) });
+    const d = selfD179({ protectedPaths: vi.fn(async () => ({ ok: true, files })), selfChange, neverAutomate: NEVER_AUTOMATE_WITH_DOCS, reviewRoster: vi.fn(async () => ({ ok: true, roles: ["correctness", "qa"], tier: "load-bearing" })) });
     const { code, lines } = await run179(d);
     const reason = `protected paths changed — human merge required: ${files.join(", ")}`;
     expect(code, label).toBe(2);
@@ -2881,7 +2886,7 @@ test("test_179_never_automate_beats_self_change", async () => {
     expect(lines, label).toEqual([
       "merge: PR #9 is OPEN",
       "merge: PR #9 not conflicting (MERGEABLE)",
-      `merge: self-change path refused — CHARTER NEVER_AUTOMATE matches ${QA_DOC} (templates/factory/**); a NEVER_AUTOMATE path is always human-merged`,
+      `merge: self-change path refused — CHARTER NEVER_AUTOMATE matches ${QA_DOC} (templates/factory/docs/**); a NEVER_AUTOMATE path is always human-merged`,
       `merge: ${reason}`,
     ]);
     for (const dep of [d.vetoWindow.open, d.vetoWindow.read, d.vetoLabel, d.sleep, d.gates, d.mergePr]) expect(dep, label).not.toHaveBeenCalled();
@@ -3021,6 +3026,35 @@ test("test_179_job_budget_keeps_a_post_window_margin", async () => {
   expect((await run179(fits)).code).toBe(0);
   expect(fits.vetoWindow.open).toHaveBeenCalledTimes(1);
   expect(fits.mergePr).toHaveBeenCalledTimes(1);
+});
+
+// ADR-038 보정(2026-10-11, #249·#212) — 잡 예산만이 아니라 잡의 **git 자격증명**도 창보다 오래 살아야 한다. App 설치 토큰은 민팅 뒤
+// 60분에 만료되는데 창이 60분이라, 창이 닫힌 뒤의 records fetch·push·락 해제가 전부 인증 실패로 죽었고 그것이 "review evidence not
+// bound to a factory run"으로 읽혀 needs-human이 됐다. 워크플로가 `FACTORY_GIT_TOKEN_TTL_MINUTES`로 수명을 싣고, 창 + 여유가 그 안에
+// 들어야 연다 — 아니면 열지 않고 blocked로 이유를 말한다. 만료 없는 머지 PAT(두 배우 모드)는 null/0 = 검사 없음.
+test("test_adr038_veto_window_refuses_when_the_checkout_token_expires_before_it_closes", async () => {
+  // 잡 시작 2분 뒤에 창을 연다(clock179 기본값). 수명 60 → 남은 58분 < 창 60 + 여유 10: 열지 않는다. 수명 71 → 남은 69분도 모자란다.
+  for (const [ttl, left] of [[60, 58], [71, 69]]) {
+    const d = selfD179({ jobTimeoutMinutes: 90, gitTokenTtlMinutes: ttl });
+    const r = await run179(d);
+    const at = `ttl ${ttl}`;
+    expect(r.code, at).toBe(2);
+    const last = d.transition.mock.calls.at(-1)[0];
+    expect(last.to, at).toBe("factory:blocked");
+    expect(last.reason, at).toMatch(/veto window outlives this job's git credential/);
+    expect(last.reason, at).toMatch(new RegExp(`expires ${ttl} min after the job started \\(${left} min left\\)`));
+    expect(last.reason, at).toMatch(/veto_minutes: 60/);
+    expect(last.reason, at).toMatch(/set FACTORY_MERGE_TOKEN in the factory-merge environment/);
+    for (const dep of [d.vetoWindow.open, d.comment, d.sleep, d.mergePr]) expect(dep, at).not.toHaveBeenCalled();
+    expect(r.lines.some((l) => /^merge: veto window not started — .*git credential/.test(l)), at).toBe(true);
+  }
+  // 남은 70분 = 창 60 + 여유 10 → 연다(경계는 포함). 수명 없음(null·0 — 만료 없는 머지 PAT)도 연다.
+  for (const [label, ttl] of [["ttl 72", 72], ["no ttl", null], ["ttl 0", 0]]) {
+    const fits = selfD179({ jobTimeoutMinutes: 90, gitTokenTtlMinutes: ttl });
+    expect((await run179(fits)).code, label).toBe(0);
+    expect(fits.vetoWindow.open, label).toHaveBeenCalledTimes(1);
+    expect(fits.mergePr, label).toHaveBeenCalledTimes(1);
+  }
 });
 
 // 창 뒤에 검증한 head가 곧 머지되는 head다 — 자기 변경 경로는 `mergePr`에 그 sha를 넘겨(`--match-head-commit`) 재검증과
@@ -4044,5 +4078,210 @@ test("test_208_evidence_publish_count_across_merge_exits", async () => {
     const r = await drive(ev);
     expect(typeof r === "number" ? r : r.code, name).toBe(code);
     expect(ev.publishPrEvidence.mock.calls.length, name).toBe(calls);
+  }
+});
+
+// ── #254 (gap P-12 / ledger M-6) — 올린 tier의 패널 parity: 계획하는 패널 = 리뷰하는 패널 = 머지하는 패널 ──────────
+// 한 triage handoff(신고 standard, impact_paths는 load-bearing)를 **실제 생산 경로**로 만든다 — 러너의 verifyStage dep
+// (`[load_bearing].paths` 주입) → 러너의 writeHandoff(tier_effective 스탬프) → 이슈 코멘트 → parseHandoffs.
+// 그 하나의 기록에서 plan 컨텍스트, review 컨텍스트, resolveReviewRoster, merge 스테이지의 정족수 dep,
+// sweeper 사람-머지 팔(sweep.js와 같은 조립: review handoff의 tier_effective → tierFromReviewHandoff)이 모두
+// load-bearing의 역할 수를 내야 한다. 어디 한 곳이라도 신고(standard) 수를 내면 실패한다.
+import { mkdtempSync as mkdtemp254, mkdirSync as mkdir254, writeFileSync as write254 } from "node:fs";
+import { join as join254 } from "node:path";
+import { tmpdir as tmpdir254 } from "node:os";
+import { buildContext as buildContext254 } from "../lib/context.js";
+import { resolveReviewRoster as resolveReviewRoster254, tierFromReviewHandoff as tierFromReviewHandoff254 } from "../lib/review-roster.js";
+import { sweep as sweep254 } from "../lib/sweeper.js";
+import { loadCharter as loadCharter254, loadHarness as loadHarness254, loadRoles as loadRoles254, rosterFor as rosterFor254 } from "../lib/config.js";
+import { makeVerifyStageDep as makeVerifyStageDep254, makeWriteHandoffDep as makeWriteHandoffDep254, makeMergeReviewRosterDep as makeMergeReviewRosterDep254 } from "../bin/run-stage.js";
+
+test("test_254_raised_tier_quorum_parity_plan_review_merge", async () => {
+  const fixtureRoot = () => {
+    const r = mkdtemp254(join254(tmpdir254(), "merge-254-"));
+    mkdir254(join254(r, ".factory"), { recursive: true }); mkdir254(join254(r, "docs/factory"), { recursive: true });
+    write254(join254(r, ".factory/harness.toml"), `schema = 1\n[harness]\nmaturity = "M0"\n[factory]\norchestration = "workflow"\n[commands]\nunit = "npm test"\n[gates]\nrequired = ["unit"]\nfast = ["unit"]\nfull = ["unit"]\ndeep = ["unit"]\n[load_bearing]\npaths = ["factory/bin/run-stage.js"]\n`);
+    write254(join254(r, "docs/factory/CHARTER.md"), `---\nschema: factory.charter.v1\nstatus: ready\ntier_default: standard\nlimits:\n  K: 3\nroster:\n  docs: [correctness]\n  standard: [correctness, qa]\n  load-bearing: [correctness, qa, security, architecture]\nplan_roles:\n  default: [architect, skeptic, operator]\nplan_rounds: { default: 3 }\nplan:\n  debate_tiers: [load-bearing]\n---\n`);
+    write254(join254(r, ".factory/roles.toml"), `[review.correctness]\nagent = "c.md"\n[review.qa]\nagent = "q.md"\n[review.security]\nagent = "s.md"\n[review.architecture]\nagent = "ar.md"\n[plan.architect]\nagent = "a.md"\n[plan.skeptic]\nagent = "sk.md"\n[plan.operator]\nagent = "o.md"\n[plan.synthesizer]\nagent = "syn.md"\n`);
+    return r;
+  };
+  const docsDiff = () => makeFakeRun([{ match: (c, a) => c === "git" && a[0] === "diff", result: { code: 0, stdout: "M\tdocs/a.md\n", stderr: "" } }]);
+
+  const panels = async (issue, impact_paths) => {
+    const root = fixtureRoot();
+    const comments = [];
+    const gh = {
+      issue: async () => ({ number: issue, title: "T", body: "", labels: [] }),
+      comments: async () => comments.map((body, i) => ({ id: i + 1, body, createdAt: `2026-10-11T00:00:0${i}Z` })),
+      comment: async (_i, body) => { comments.push(body); },
+    };
+    const charter = loadCharter254(root), harness = loadHarness254(root), roles = loadRoles254(root);
+    // triage — 러너의 verifyStage dep와 writeHandoff dep(트리아지 전의 컨텍스트로 스탬프)를 그대로 지난다
+    const triageCtx = await buildContext254({ root, gh, issue, stage: "triage" });
+    const out = { is_error: false, result: JSON.stringify({ schema: "factory.triage.v1", issue, disposition: "ready", tier: "standard", impact_paths, reason: "r", orchestration: "workflow" }) };
+    const v = makeVerifyStageDep254({ root, stage: "triage", getCtx: () => triageCtx, getCharter: () => charter, getHarness: () => harness })({ out, gates: null });
+    expect(v.ok).toBe(true);
+    await makeWriteHandoffDep254({ gh, issue, stage: "triage", getCtx: () => triageCtx })({ data: v.data });
+    // plan — diff 없음
+    const plan = await buildContext254({ root, gh, issue, stage: "plan" });
+    // review — diff는 docs만(바닥이 tier를 지켜 주지 않는다), 그 컨텍스트로 review handoff를 실제 writer가 쓴다
+    const review = await buildContext254({ root, gh, issue, stage: "review", run: docsDiff(), base: "b" });
+    await makeWriteHandoffDep254({ gh, issue, stage: "review", getCtx: () => review })({ data: { schema: "factory.review.v1", issue, verdicts: [] } });
+    const all = await gh.comments();
+    const resolved = await resolveReviewRoster254({ charter, roles: () => roles, comments: all });
+    const merge = await makeMergeReviewRosterDep254({ run: docsDiff(), root, gh, issue, getCharter: () => charter, getHarness: () => harness, mergeBase: async () => "b" })();
+    // sweeper 사람-머지 팔 — **실제 `sweep()`**(lib/sweeper.js)을 돌린다: review handoff에서 tier_effective를 꺼내는 것도,
+    // 정족수 로스터를 `factory:merged` 전이에 싣는 것도 생산 코드다. 테스트가 쓰는 것은 sweep.js main()의 `reviewRoster`
+    // 배선 세 줄뿐이다(main()은 export되지 않고 sweep.js는 이 이슈의 files_expected 밖이다 — sweep.js:116-121과 같은 모양).
+    const sweepCalls = [];
+    const sweepReviewRoster = (comments, handoffTier = null) => {
+      sweepCalls.push(handoffTier);
+      return resolveReviewRoster254({ charter, roles: () => roles, comments, effectiveTier: handoffTier ? tierFromReviewHandoff254(handoffTier) : null });
+    };
+    const park = [
+      { id: 900, body: "<!-- factory-transition:v1 from=factory:awaiting-review to=factory:approved by=script -->\nfactory:awaiting-review \u2192 factory:approved", createdAt: "2026-10-11T00:10:00Z" },
+      { id: 901, body: "<!-- factory-transition:v1 from=factory:approved to=factory:needs-human by=script -->\nfactory:approved → factory:needs-human — protected paths changed — human merge required: .factory/harness.toml (see PR #4)", createdAt: "2026-10-11T00:20:00Z" },
+    ];
+    const transitions = [];
+    await sweep254({
+      gh: {
+        searchIssues: async (l, opts) => (l === "factory:needs-human" && opts?.state === "all" ? [{ number: issue, updatedAt: "2026-10-11T00:20:00Z" }] : []),
+        comments: async () => [...all, ...park], comment: async () => "u", patchComment: async () => {}, issueList: async () => [],
+        mergedPrForBranch: async () => 4,
+        prMergeInfo: async () => ({ headSha: "c".repeat(40), mergeSha: "d".repeat(40), mergedAt: "2026-10-11T00:45:00Z", mergedBy: "owner" }),
+        commitStatuses: async () => [{ context: "factory/review", state: "success", creatorLogin: "ktb-bot" }, { context: "factory/gates", state: "success", creatorLogin: "ktb-bot" }],
+        prChecks: async () => [{ name: "factory/gates", state: "SUCCESS", bucket: "pass" }],
+        issueState: async () => ({ number: issue, state: "OPEN", closedAt: null }), closeIssue: async () => {},
+      },
+      charter, thresholds: { quarantine_max: 5, quarantine_ttl_days: 28, quarantine_return_after: 30 }, now: "2026-10-11T01:00:00Z", staleMinutes: 30,
+      transition: async (t) => { transitions.push(t); return { ok: true, to: t.to }; }, release: async () => {},
+      factoryLogins: async () => ({ ok: true, logins: ["ktb-bot"] }), reviewRoster: sweepReviewRoster, requiredChecks: ["factory/gates"],
+      quarantine: { quarantined: [] }, saveQuarantine: () => {},
+    });
+    const merged = transitions.find((t) => t.to === "factory:merged");
+    // 팔이 review handoff에서 실제로 꺼낸 값과, 전이에 실은 로스터 — sweeper의 판정 재료 그 자체다
+    const sweeper = merged ? { ok: true, roles: merged.ctxExtra.roster, rosterSize: merged.ctxExtra.rosterSize, handoffTier: sweepCalls[0] } : { ok: false, roles: [] };
+    return { charter, roles, plan, review, resolved, merge, sweeper };
+  };
+
+  const hit = await panels(254, ["factory/lib/context.js", "factory/bin/run-stage.js"]);
+  const LB_REVIEW = rosterFor254(hit.charter, hit.roles, "review", "load-bearing");
+  const LB_PLAN = rosterFor254(hit.charter, hit.roles, "plan", "load-bearing");
+  expect(LB_REVIEW).toHaveLength(4);                                   // 픽스처가 두 tier를 실제로 가른다
+  expect(rosterFor254(hit.charter, hit.roles, "review", "standard")).toHaveLength(2);
+  expect([hit.plan.tier_effective, hit.plan.plan.mode, hit.plan.rounds]).toEqual(["load-bearing", "debate", 3]);
+  expect(hit.plan.roster).toEqual(LB_PLAN);
+  expect(hit.review.roster).toEqual(LB_REVIEW);
+  for (const [name, ros] of [["resolveReviewRoster", hit.resolved], ["merge quorum", hit.merge], ["sweeper human-merged", hit.sweeper]]) {
+    expect(ros.ok, name).toBe(true);
+    expect(ros.roles, name).toEqual(LB_REVIEW);
+    expect(ros.roles.length, name).toBe(hit.review.roster.length);
+  }
+  // sweeper는 review handoff의 tier_effective(러너 writer가 찍은 값)를 읽었고, 전이의 정족수 크기도 load-bearing이다
+  expect([hit.sweeper.handoffTier, hit.sweeper.rosterSize]).toEqual(["load-bearing", LB_REVIEW.length]);
+
+  // 대조 — 같은 신고, load-bearing 경로 없음: 다섯 소비자 모두 standard의 수(그래서 위의 4는 올림에서 온 것이다)
+  const plain = await panels(255, ["factory/lib/context.js"]);
+  expect(plain.plan.plan.mode).toBe("single");
+  for (const ros of [plain.review.roster, plain.resolved.roles, plain.merge.roles, plain.sweeper.roles]) expect(ros).toHaveLength(2);
+});
+
+// ── #286 — must_not violations get their own heading (KTB-10 I3: a wrong title sends the human to the wrong place) ──────
+// #254 → PR #255: the only policy violations were the issue's `must_not` contract, but the hand-off said "agent role sections
+// edited outside Examples/Perspectives" — the leftover bucket — and the owner went looking at role prompts. The fixture
+// violations come from the REAL producers (`mustNotViolations`, `additiveOnlyViolations`), never hand-typed rule strings.
+const mustNot286 = async () => {
+  const { mustNotContract, mustNotViolations, addedLines } = await import("../lib/integrity.js");
+  const contract = mustNotContract("re-land\n\nmust_not:\n- touch: `.github/**`, `.claude/**`\n- add: `smol-toml`\n");
+  const u0 = ["--- a/src/a.js", "+++ b/src/a.js", "@@ -3,0 +4,1 @@", "+import 'smol-toml';"].join("\n");
+  return (changed) => mustNotViolations({ contract, changed, added: changed.includes("src/a.js") ? addedLines(u0) : new Map() });
+};
+const additive286 = async (file) => {
+  const { additiveOnlyViolations } = await import("../lib/integrity.js");
+  return additiveOnlyViolations({ file, allowed: ["Examples", "Perspectives"], added: [], removed: [{ line: 3, text: "You are the builder." }], headText: "# x\n## Role\n" });
+};
+const MUST_NOT_HEADING_286 = "**이슈 must_not 계약 위반 — 팩토리가 자동 머지하지 않습니다.**";
+const ROLE_HEADING_286 = "**역할 프롬프트의 허용 섹션 밖 편집 — 팩토리가 자동 머지하지 않습니다.**";
+/** The comment's text under one heading, up to the next heading or the closing line. */
+const sectionUnder286 = (body, heading) => {
+  const at = body.indexOf(heading);
+  if (at < 0) return null;
+  const rest = body.slice(at + heading.length);
+  const ends = [rest.indexOf("\n**"), rest.indexOf("diff를 확인한 뒤")].filter((i) => i >= 0);
+  return rest.slice(0, Math.min(...ends));
+};
+const policyRun286 = async (violations) => {
+  const comment = vi.fn(async () => {});
+  const { lines, record } = makeRecord();
+  const d = baseD({ policyViolations: vi.fn(async () => ({ ok: true, files: [...new Set(violations.map((v) => v.file))], violations })), comment });
+  const code = await run(d, { record });
+  const { to, reason } = d.transition.mock.calls.at(-1)[0];
+  return { code, to, reason, body: comment.mock.calls[0]?.[1] ?? "", lines, d };
+};
+
+test("test_merge_stage_names_must_not_violations_in_their_own_bucket — #286", async () => {
+  const { MUST_NOT_TOUCH_RULE, MUST_NOT_ADD_RULE } = await import("../lib/integrity.js");
+  const violations = (await mustNot286())([".github/workflows/x.yml", "src/a.js"]);
+  expect(violations.map((v) => [MUST_NOT_TOUCH_RULE.test(v.rule), MUST_NOT_ADD_RULE.test(v.rule)])).toEqual([[true, false], [false, true]]);
+  const r = await policyRun286(violations);
+  expect(r.code).toBe(2);
+  expect(r.to).toBe("factory:needs-human");
+  expect(r.reason.startsWith("issue must_not contract violated — ")).toBe(true);
+  expect(HUMAN_MERGE_REQUIRED.test(r.reason)).toBe(true);
+  // the rule sentence is carried unchanged — which glob, which token on which line
+  for (const v of violations) {
+    expect(r.reason).toContain(v.file);
+    expect(r.reason).toContain(v.rule);
+    expect(r.body).toContain(v.rule);
+  }
+  expect(r.body).toContain(MUST_NOT_HEADING_286);
+  const section = sectionUnder286(r.body, MUST_NOT_HEADING_286);
+  expect(section).toContain("`.github/workflows/x.yml`");
+  expect(section).toContain("`src/a.js`");
+  // the wrong title the owner got on #255 is gone from both the reason and the comment
+  expect(r.reason).not.toContain("agent role sections edited outside Examples/Perspectives");
+  expect(r.body).not.toContain("agent role sections edited outside Examples/Perspectives");
+  expect(r.body).not.toContain(ROLE_HEADING_286);
+  expect(r.lines.some((l) => l.includes("issue must_not contract violated — "))).toBe(true);
+  expect(r.d.mergePr).not.toHaveBeenCalled();
+});
+
+test("test_286_must_not_and_role_section_violations_get_separate_headings", async () => {
+  const mn = await mustNot286();
+  const ROLE_REASON = "agent role sections edited outside Examples/Perspectives — human merge required: ";
+  // (1) two files: a must_not violation in one, an additive-only violation in another agent file
+  {
+    const role = await additive286(".claude/agents/factory-builder.md");
+    expect(role.length).toBeGreaterThan(0);
+    const must = mn([".github/workflows/x.yml"]);
+    const r = await policyRun286([...must, ...role]);
+    expect(r.to).toBe("factory:needs-human");
+    expect(r.reason).toContain("issue must_not contract violated — ");
+    expect(r.reason).toContain(`${ROLE_REASON}.claude/agents/factory-builder.md`);
+    const mustSection = sectionUnder286(r.body, MUST_NOT_HEADING_286), roleSection = sectionUnder286(r.body, ROLE_HEADING_286);
+    expect(mustSection).toContain("`.github/workflows/x.yml`");
+    expect(mustSection).not.toContain("`.claude/agents/factory-builder.md`");
+    expect(roleSection).toContain("`.claude/agents/factory-builder.md`");
+    expect(roleSection).not.toContain("`.github/workflows/x.yml`");
+    // the role reason names only the role file
+    const roleReason = r.reason.slice(r.reason.indexOf(ROLE_REASON) + ROLE_REASON.length).split(/;| \(see PR/)[0];
+    expect(roleReason).toBe(".claude/agents/factory-builder.md");
+  }
+  // (2) one agent file carrying both kinds — neither heading hides the other
+  {
+    const file = ".claude/agents/x.md";
+    const both = [...mn([file]), ...(await additive286(file))];
+    expect(both.length).toBe(2);
+    const r = await policyRun286(both);
+    expect(r.reason).toContain("issue must_not contract violated — ");
+    expect(r.reason).toContain(`${ROLE_REASON}${file}`);
+    expect(sectionUnder286(r.body, MUST_NOT_HEADING_286)).toContain(`\`${file}\``);
+    expect(sectionUnder286(r.body, ROLE_HEADING_286)).toContain(`\`${file}\``);
+  }
+  // (3) a must_not violation on an agent file with NO additive-only violation is not an agent-role-section edit
+  {
+    const r = await policyRun286(mn([".claude/agents/y.md"]));
+    expect(r.reason).not.toContain("agent role sections edited");
+    expect(r.body).not.toContain(ROLE_HEADING_286);
   }
 });

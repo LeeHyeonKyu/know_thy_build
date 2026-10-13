@@ -43,6 +43,31 @@ export const engineCrashLine = ({ stage, runnerId, runId = null, error }) => {
   return `${ENGINE_CRASH_PREFIX} stage=${stage} runner=${runnerId} run_id=${runId ?? "n/a"} error=${name} — ${msg}`;
 };
 /**
+ * #212 (ADR-041) — **conflict-round 줄.** 승인된 PR이 base와 충돌해 rework로 돌아온 라운드가 충돌 해소만 했을 때(self-gate의
+ * `conflict-scope`가 GREEN — 러너가 진짜 merge 커밋에서 잰 사실) 러너만 쓴다(`bin/run-stage.js`). 그 섹션의 비용은 `lib/budget.js`가
+ * 평생 상한에서 `CONFLICT_ROUND_EXCLUDED_RUNS`개까지 빼고 따로 보고한다 — base가 움직여서 생긴 돈이지 사람·에이전트가 고른 돈이 아니다.
+ * usage 줄에 키(`conflict=true`)를 붙이지 않는다: 그 줄의 모양은 `USAGE_RE`가 소유하고, 키 하나는 위조 방어(ADR-036 2)를 다시 연다.
+ *
+ * 위조 방어는 engine-crash 줄과 같은 겹이다: ① 쓰는 쪽 — `runStage`의 `record()`가 진짜 태그가 아닌 모든 줄의 줄머리 `conflict-round:`를
+ * 인용하고(`quoteConflictRoundLines`), `neutralizeRecordLine`이 한 원소 안의 개행 뒤 조각을 인용한다; ② 읽는 쪽 — **자리**: 섹션 본문의
+ * 첫 줄(줄 맨 앞부터)이고, 그 섹션의 스테이지(implement — 충돌을 푸는 쓰기 스테이지는 그것뿐이다)·러너를 지목할 때만 센다.
+ */
+export const CONFLICT_ROUND_PREFIX = "conflict-round:";
+const CONFLICT_ROUND_RE = /^conflict-round: stage=(\S+) runner=(\S+) run_id=(\S+) approved=([0-9a-f]{40}) head=([0-9a-f]{40}) —/;
+export const conflictRoundLine = ({ stage, runnerId, runId = null, approvedHead, head }) =>
+  `${CONFLICT_ROUND_PREFIX} stage=${stage} runner=${runnerId} run_id=${runId ?? "n/a"} approved=${approvedHead} head=${head} — a resolution-only base-merge round: its cost is kept out of the lifetime cap (ADR-041)`;
+/**
+ * #212 skeptic (ADR-041 4, "둘 다 아니면 하나도 아니다") — **태그 취소 줄.** 러너는 태그가 든 섹션을 먼저 쓰고(실패하면 마커도 안 나간다),
+ * 그다음 K 마커를 게시한다. 마커 게시가 실패하면 러너가 다음 섹션 첫 줄에 이 줄을 써서 같은 러너의 태그를 거둔다 — 그 런의 비용은 다시 센다.
+ * 위조는 세는 쪽으로만 간다: 이 줄은 면제를 **없앨** 뿐 만들지 못한다(그래서 쓰는 쪽에서 인용하지 않는다).
+ */
+const CONFLICT_REVOKED_RE = /^conflict-round-revoked: stage=(\S+) runner=(\S+) run_id=(\S+) —/;
+export const conflictRoundRevokedLine = ({ stage, runnerId, runId = null, error }) =>
+  `conflict-round-revoked: stage=${stage} runner=${runnerId} run_id=${runId ?? "n/a"} — the conflict-round marker was not posted (${String(error?.message ?? error ?? "").replace(/\s+/g, " ").trim().slice(0, 200)}); the tag above is withdrawn and this run's cost counts toward the cap`;
+/** 진짜 태그가 아닌 텍스트에서, 어느 줄이든 줄머리의 `conflict-round:`를 인용 표시한다(①). 줄머리 규칙은 `quoteEngineCrashLines`와 같다. */
+export const quoteConflictRoundLines = (text) => String(text).replace(/(^|[\n\r\u2028\u2029])(\s*)conflict-round:/g, "$1$2(quoted) conflict-round:");
+
+/**
  * #196 rework sec1 — **"줄머리"는 읽는 쪽이 정한다.** 파서는 줄을 `.trim()`하고(그 공백 집합은 JS `\s`와 같다: NBSP·\v·\f·\r·
  * U+2028·BOM·U+3000…), `HEADER_RE`의 `^`(/m)는 \n뿐 아니라 \r·U+2028·U+2029 뒤에서도 선다. 그래서 인용은 그 줄 끝 넷 뒤의
  * **`\s` 전부**를 건너뛰고 본다 — `[ \t]`만 보던 예전 모양은 NBSP 한 글자로 뚫렸다.
@@ -63,7 +88,7 @@ export const neutralizeRecordLine = (line) => {
   const s = quoteRecordHeaders(line);
   const m = LINE_TERMINATOR_RE.exec(s);
   if (!m) return s;
-  const rest = quoteEngineCrashLines(s.slice(m.index)).replace(/(^|[\n\r\u2028\u2029])(\s*)usage:/g, "$1$2(quoted) usage:");
+  const rest = quoteConflictRoundLines(quoteEngineCrashLines(s.slice(m.index))).replace(/(^|[\n\r\u2028\u2029])(\s*)usage:/g, "$1$2(quoted) usage:");
   return s.slice(0, m.index) + rest;
 };
 /**
@@ -75,6 +100,17 @@ function sectionEngineCrash(lines, stage, runner) {
   if (body.length < 2 || !body[0].startsWith(`error: ${stage} aborted — `)) return false;
   const m = ENGINE_CRASH_RE.exec(body[1]);
   return Boolean(m && m[1] === stage && m[2] === runner);
+}
+
+/**
+ * #212 — 섹션이 러너가 쓴 conflict-round 섹션인가(②): 본문의 첫 줄(trim하지 않은 줄 — 러너는 줄 맨 앞부터 쓴다)이 그 섹션의 스테이지·러너를
+ * 지목하는 conflict-round 줄이고, 그 스테이지가 implement일 때만이다. 다른 자리의 같은 문구는 세지 않는다(모르는 것은 세는 쪽으로 기운다).
+ */
+function sectionConflictRound(lines, stage, runner) {
+  const body = lines.filter((l) => l.trim() !== "");
+  if (stage !== "implement" || body.length < 1) return null;
+  const m = CONFLICT_ROUND_RE.exec(body[0]);
+  return m && m[1] === stage && m[2] === runner ? { runId: m[3] } : null;   // the tag's run_id: a revocation withdraws only its own run's tag
 }
 
 /** "YYYY-MM-DDTHH:MMZ"(초 없는 short form)도, 일반 ISO도 받는다. 파싱 불가면 null. */
@@ -117,9 +153,10 @@ function parseUsageLine(line) {
  * run 기록 전체 텍스트 → 스테이지별 배열. `usage:` 줄이 없는 섹션(예: verdict만 남긴 리뷰 스테이지)은
  * usage 관련 필드 전부가 null이다 — 0이 아니다(0은 "돌았지만 비용 없음"과 혼동된다).
  */
-export function parseRunRecord(text) {
+export function parseRunRecord(text, { reviewReworks = false } = {}) {
   const matches = [...text.matchAll(HEADER_RE)];
   const out = [];
+  const tagRunIds = [];                                               // #212 skeptic — out[i]'s tag run_id (kept off the entry: its shape is unchanged)
   for (let i = 0; i < matches.length; i++) {
     const m = matches[i];
     const start = m.index + m[0].length;
@@ -130,6 +167,9 @@ export function parseRunRecord(text) {
     const parsed = usageLineText ? parseUsageLine(usageLineText) : null;
     // #196 — 키는 크래시 섹션에만 선다: 크래시 줄이 없는 기록의 항목은 바이트 하나 안 바뀐다(옛 소비자·고정이 그대로 본다).
     const engineCrash = sectionEngineCrash(body.split("\n"), m[1], m[3].trim());
+    // #212 — 같은 규칙: 키는 conflict-round 섹션에만 선다(그 줄이 없는 기록의 항목은 바이트 하나 안 바뀐다).
+    const conflictRound = engineCrash ? null : sectionConflictRound(body.split("\n"), m[1], m[3].trim());
+    tagRunIds.push(conflictRound ? conflictRound.runId : null);
     out.push({
       stage: m[1],
       at: m[2],
@@ -142,7 +182,28 @@ export function parseRunRecord(text) {
       num_turns: parsed ? parsed.num_turns : null,
       models: parsed ? parsed.models : null,
       ...(engineCrash ? { engine_crash: true } : {}),
+      ...(conflictRound ? { conflict_round: true } : {}),
+      // #212 dw6 — only on request (`lib/budget.js`): a review section that did NOT pass the round — its runner `transition:` line goes
+      // anywhere but factory:approved (factory:rework, and factory:needs-human when the rejection lands at round K / the 2K ceiling,
+      // which is where the #196 flow's re-review sits). A forged line can only ADD a rejection (that counts a conflict round again) —
+      // it never hides one. cf2: a REFUSED transition (`transition refused: <reason>`, run-stage `refusal(t)`) did not reach
+      // factory:approved either — transition.js parks the issue in factory:needs-human — so it ends the conflict round the same way.
+      // Skeptic (round 3) — two runner transitions do NOT end the review and are not read: the engine-crash block (an `engine_crash` section,
+      // `transition: factory:blocked (cause=engine-crash)` — the sweeper retries the review) and the harness park (`transition:
+      // factory:needs-info` — unparked back to review when the harness issue closes). Either way the retried review decides.
+      ...(reviewReworks && m[1] === "review" && !engineCrash && bodyLines.some((l) => /^transition: factory:(?!(?:approved|needs-info)(?:\s|$))\S/.test(l) || /^transition refused:/.test(l)) ? { review_rejected: true } : {}),
     });
+    // #212 skeptic — a runner revocation (first body line, naming this section's implement stage and runner) withdraws ITS run's
+    // conflict-round tag: tag without marker is not a conflict round. The runner writes it right after its own tag, so it is the LATEST
+    // earlier tag with the same runner AND run_id — not every tag of that runner (outside CI every run is `local/<host>` run_id n/a, and
+    // GHA re-runs share GITHUB_RUN_ID). Records without the line are untouched.
+    const first = body.split("\n").filter((l) => l.trim() !== "")[0] ?? "";
+    const rv = CONFLICT_REVOKED_RE.exec(first);
+    if (rv && m[1] === "implement" && rv[1] === m[1] && rv[2] === m[3].trim()) {
+      for (let j = out.length - 2; j >= 0; j--) {
+        if (out[j].conflict_round && String(out[j].runner).trim() === rv[2] && tagRunIds[j] === rv[3]) { delete out[j].conflict_round; break; }
+      }
+    }
   }
   return out;
 }

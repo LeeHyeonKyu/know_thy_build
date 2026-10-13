@@ -272,3 +272,36 @@ test("every workflow that runs a claude session marks the job start first and co
     expect(text, name).toMatch(/scrub-artifacts\.js .*--collect-transcripts/);
   }
 });
+
+// #271 arch1 — the ONE collector of "which env values are secrets" (every scrub caller uses it; see run-stage.test.js
+// test_271_gate_red_finding_scrub_list_comes_from_the_shared_collector for the single-owner check).
+import { secretValues } from "../bin/scrub-artifacts.js";
+
+test("test_271_secret_values_is_a_pure_ordered_collector_of_set_secret_env_values", () => {
+  const env = { GITHUB_TOKEN: "gh-literal-value-0001", FACTORY_BOT_TOKEN: "bot-literal-value-0002", ANTHROPIC_API_KEY: "", CLAUDE_CODE_OAUTH_TOKEN: 7, OTHER_SECRET: "not-in-the-list-0003" };
+  // SECRET_ENV order (FACTORY_BOT_TOKEN before GITHUB_TOKEN), empty and non-string values skipped, other names ignored
+  expect(secretValues(env)).toEqual(["bot-literal-value-0002", "gh-literal-value-0001"]);
+  expect(secretValues(null)).toEqual([]);
+  expect(secretValues(undefined)).toEqual([]);
+  expect(secretValues({})).toEqual([]);
+  // it never reads process.env on its own — the caller decides which env is the job's
+  const prev = process.env.FACTORY_BOT_TOKEN;
+  process.env.FACTORY_BOT_TOKEN = "process-env-only-value-0004";
+  try {
+    expect(secretValues({})).toEqual([]);
+    expect(secretValues(undefined)).toEqual([]);
+  } finally {
+    if (prev === undefined) delete process.env.FACTORY_BOT_TOKEN; else process.env.FACTORY_BOT_TOKEN = prev;
+  }
+  // a null env no longer throws in runCli (the one announced behaviour change); shape rules still run
+  const dir = mkdtempSync(join(tmpdir(), "scrub-271-"));
+  try {
+    const p = join(dir, "a.log");
+    const ghp = "ghp_" + "Z9".repeat(18);
+    writeFileSync(p, `token ${ghp}\n`);
+    const lines = [];
+    expect(runCli([p], null, (l) => lines.push(l))).toBe(0);
+    expect(readFileSync(p, "utf8")).not.toContain(ghp);
+    expect(readFileSync(p, "utf8")).toContain("[REDACTED:gh-token]");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});

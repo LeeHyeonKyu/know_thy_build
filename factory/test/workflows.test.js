@@ -219,7 +219,9 @@ test("factory-triage.js: a missing args.loaded fails the stage closed with a nam
     args: { issue: 11, context: ".factory/out/context.json", loaded: null },
   });
 
-  expect(calls).toEqual([]);
+  // #288 dw3 — rewritten (plan done_when dw3) to the 'reader fails' case: args.loaded is missing, so the workflow now tries the reader, once() re-spawns it, and nothing else ever runs.
+  expect(calls.filter((c) => c.opts.label !== "load:reader")).toEqual([]);
+  expect(calls.map((c) => c.opts.label)).toEqual(["load:reader", "load:reader"]);
   expect(phases).toEqual(["Load"]);
   expect(calls.filter((c) => c.opts.agentType === "factory-triage")).toHaveLength(0);
   expect(result).toEqual({ issue: 11, error: "context payload missing", orchestration: "workflow", guarantee: "structural" });
@@ -450,8 +452,12 @@ test("factory-plan.js: an objection that survives the re-synthesis is recorded i
   expect(labelled(calls, "sign:")).toHaveLength(8);
   // 1.4.43: the injected entry carries a deterministic id and a severity (own-calendar #111 — an entry without
   // them is named by position by the validator and can never be covered).
+  // #299 tests_changed_allowed — P-13 pin, 1 of 2 (the other is the same injected line in the "superseded, not duplicated"
+  // test below). The issue counted the branch's two changed lines as "P-15·P-13"; both are in fact this one P-13 downgrade
+  // (medium → low, the objection moves to signoff_objections). P-15 changed no existing pin: its cap is new behaviour,
+  // pinned only by the new test_243_single_mode_* / test_299_single_mode_* tests.
   expect(result.dissent_log).toEqual([
-    { id: "signoff-skeptic", severity: "medium", role: "skeptic", objection: "the rollback path is still unspecified", resolution: "unresolved — proceeding" },
+    { id: "signoff-skeptic", severity: "low", role: "skeptic", objection: "the rollback path is still unspecified", resolution: "unresolved — proceeding; surfaced in signoff_objections" },
   ]);
   expect(validate("plan.v1", result).ok).toBe(true);
 });
@@ -557,7 +563,9 @@ test("factory-plan.js: a missing args.loaded fails the stage closed — no debat
     args: { issue: 42, context: ".factory/out/context.json", loaded: null },
   });
 
-  expect(calls).toEqual([]);
+  // #288 dw3 — rewritten (plan done_when dw3) to the 'reader fails' case: args.loaded is missing, so the workflow now tries the reader, its answer has no loaded_json string (unparseable — a non-null answer is not re-spawned), and nothing else ever runs.
+  expect(calls.filter((c) => c.opts.label !== "load:reader")).toEqual([]);
+  expect(calls.map((c) => c.opts.label)).toEqual(["load:reader"]);
   expect(phases).toEqual(["Load"]);
   expect(result).toEqual({ issue: 42, error: "context payload missing", orchestration: "workflow", guarantee: "structural" });
   expect(validate("plan.v1", result).ok).toBe(false);
@@ -592,7 +600,8 @@ test("factory-plan.js: an objection the synthesizer already logged is superseded
   expect(result.dissent_log.filter((d) => d.role === "skeptic" && d.objection === OBJECTION)).toHaveLength(1);
   expect(result.dissent_log).toEqual([
     { role: "architect", objection: "files_expected is too wide", resolution: "narrowed to two paths" },
-    { id: "signoff-skeptic", severity: "medium", role: "skeptic", objection: OBJECTION, resolution: "unresolved — proceeding" },
+    // #299 tests_changed_allowed — P-13 pin, 2 of 2 (see "survives the re-synthesis" above for why both are P-13, none P-15)
+    { id: "signoff-skeptic", severity: "low", role: "skeptic", objection: OBJECTION, resolution: "unresolved — proceeding; surfaced in signoff_objections" },
   ]);
 });
 
@@ -1470,7 +1479,9 @@ test("factory-implement.js: a missing args.loaded fails the stage closed — not
     args: { issue: 42, context: ".factory/out/context.json", loaded: null },
   });
 
-  expect(calls).toEqual([]);
+  // #288 dw3 — rewritten (plan done_when dw3) to the 'reader fails' case: args.loaded is missing, so the workflow now tries the reader, its answer has no loaded_json string (unparseable — a non-null answer is not re-spawned), and nothing else ever runs.
+  expect(calls.filter((c) => c.opts.label !== "load:reader")).toEqual([]);
+  expect(calls.map((c) => c.opts.label)).toEqual(["load:reader"]);
   expect(phases).toEqual(["Load"]);
   expect(result).toEqual({ issue: 42, error: "context payload missing", orchestration: "workflow", guarantee: "structural" });
   expect(validate("implement.v1", { ...result, gates: { status: "GREEN" } }).ok).toBe(false);
@@ -1875,7 +1886,9 @@ test("factory-review.js: a missing args.loaded fails the stage closed — no rev
     args: { issue: 42, context: ".factory/out/context.json", loaded: null },
   });
 
-  expect(calls).toEqual([]);
+  // #288 dw3 — rewritten (plan done_when dw3) to the 'reader fails' case: args.loaded is missing, so the workflow now tries the reader, its answer has no loaded_json string (unparseable — a non-null answer is not re-spawned), and nothing else ever runs.
+  expect(calls.filter((c) => c.opts.label !== "load:reader")).toEqual([]);
+  expect(calls.map((c) => c.opts.label)).toEqual(["load:reader"]);
   expect(phases).toEqual(["Load"]);
   expect(result).toEqual({ issue: 42, error: "context payload missing", orchestration: "workflow", guarantee: "structural" });
   expect(validate("review.v1", result).ok).toBe(false);
@@ -2121,7 +2134,9 @@ test("a missing args.loaded fails every stage closed — no role runs, and the e
   for (const file of WORKFLOW_FILES) {
     const stub = async () => null;
     const { result, calls, phases } = await runWorkflow(file, { agent: stub, args: { issue: 5, context: ".factory/out/context.json" } });
-    expect(calls, file).toEqual([]);
+    // #288 dw3 — rewritten (plan done_when dw3) to the 'reader fails' case: args.loaded is missing, so the workflow now tries the reader, once() re-spawns it, and nothing else ever runs.
+    expect(calls.filter((c) => c.opts.label !== "load:reader"), file).toEqual([]);
+    expect(calls.map((c) => c.opts.label), file).toEqual(["load:reader", "load:reader"]);
     expect(phases, file).toEqual(["Load"]);
     expect(result, file).toEqual({ issue: 5, error: "context payload missing", orchestration: "workflow", guarantee: "structural" });
   }
@@ -2405,4 +2420,949 @@ test("factory-retro.js: once() is byte-identical to the four stage workflows', a
   // P4-R6: retro는 로스터가 없다 — 로더를 부르면 읽을 context.json 자체가 없는 잡에서 없는 파일을 읽는다.
   expect(retro).not.toContain("factory-loader");
   expect(retro).not.toContain("context.json");
+});
+
+/**
+ * #238 (P-14) dw3 — the repair-turn `loaded.json` the engine now produces (`plan_repair` string[]; the rejected plan goes to
+ * context.json as `plan_repair_previous`, never into loaded.json) is fed, unchanged, to the shipped factory-plan.js. The loaded payload comes from the real producer
+ * (`buildContext`), not a hand-written fixture: if the new key ever displaced or reshaped `plan_repair`, the workflow's
+ * `Array.isArray(loaded.plan_repair)` would quietly turn today's targeted repair into a blind retry.
+ */
+import { mkdirSync as mkdirSync238 } from "node:fs";
+import { buildContext as buildContext238 } from "../lib/context.js";
+test("test_238_current_workflow_still_renders_repair_reasons_from_new_shape", async () => {
+  // One real root per mode: the CHARTER decides the mode (tier standard → single by default; `plan.mode: debate` → debate), and
+  // the loaded object handed to the workflow is the file the real buildContext wrote — roster, rounds and plan block included.
+  const realLoaded = async (mode) => {
+    const r = mkdtempSync(join(tmpdir(), `wf238${mode}-`));
+    mkdirSync238(join(r, ".factory"), { recursive: true }); mkdirSync238(join(r, "docs/factory"), { recursive: true });
+    writeFileSync(join(r, ".factory/harness.toml"), `schema = 1\n[harness]\nmaturity = "M0"\n[factory]\norchestration = "workflow"\n[commands]\nunit = "npm test"\n[gates]\nrequired = ["unit"]\nfast = ["unit"]\nfull = ["unit"]\ndeep = ["unit"]\n`);
+    writeFileSync(join(r, "docs/factory/CHARTER.md"), `---\nschema: factory.charter.v1\nstatus: ready\ntier_default: standard\nroster:\n  standard: [correctness]\nplan_roles:\n  default: [architect, skeptic]\nplan_rounds: { docs: 2, default: 3 }\n${mode === "debate" ? "plan:\n  mode: debate\n" : ""}---\n`);
+    writeFileSync(join(r, ".factory/roles.toml"), `[triage]\nagent = ".claude/agents/factory-triage.md"\nmodel = "sonnet"\n[review.correctness]\nagent = ".claude/agents/review-correctness.md"\nmodel = "opus"\n[plan.architect]\nagent = ".claude/agents/plan-architect.md"\nmodel = "opus"\n[plan.skeptic]\nagent = ".claude/agents/plan-skeptic.md"\nmodel = "opus"\n[plan.synthesizer]\nagent = ".claude/agents/plan-synthesizer.md"\nmodel = "opus"\n`);
+    const gh = { issue: async () => ({ number: 42, title: "T", body: "", labels: ["factory:ready"] }), comments: async () => [] };
+    const rejected = { schema: "factory.plan.v1", issue: 42, done_when: [{ id: "dw1", text: "REJECTED-PLAN-MARKER", verify: "test_42_x", level: "unit" }], dissent_log: [{ id: "d2", severity: "high" }] };
+    await buildContext238({ root: r, gh, issue: 42, stage: "plan", planRepair: R1_REPAIR_REASONS, planRepairPrevious: rejected });
+    const loaded = JSON.parse(readFileSync(join(r, ".factory/out/loaded.json"), "utf8"));
+    // the new shape really is the engine's: plan_repair untouched in loaded.json; the rejected plan rides in context.json only (dw1).
+    expect(loaded.plan_repair).toEqual(R1_REPAIR_REASONS);
+    expect(Object.keys(loaded)).not.toContain("plan_repair_previous");
+    expect(JSON.parse(readFileSync(join(r, ".factory/out/context.json"), "utf8")).plan_repair_previous).toEqual(rejected);
+    return loaded;
+  };
+
+  for (const mode of ["debate", "single"]) {
+    const loaded = await realLoaded(mode);
+    // the producer itself chose this mode and roster — nothing below is overridden by the test.
+    expect(loaded.plan?.mode, mode).toBe(mode);
+    expect(loaded.roster.map((x) => x.name), mode).toEqual(mode === "debate" ? ["architect", "skeptic"] : ["synthesizer", "skeptic"]);
+    const { calls } = await runWorkflow(FACTORY_PLAN_WORKFLOW, {
+      agent: planStub(),
+      args: { issue: 42, context: ".factory/out/context.json", loaded },
+    });
+    const writer = mode === "debate"
+      ? calls.find((c) => c.opts.agentType === "plan-synthesizer")
+      : calls.find((c) => typeof c.opts.label === "string" && c.opts.label.startsWith("plan:"));
+    expect(writer, `${mode}: the plan writer was dispatched`).toBeTruthy();
+    if (mode === "debate") expect(calls.some((c) => typeof c.opts.label === "string" && c.opts.label.startsWith("R1:")), "debate ran R1").toBe(true);
+    else expect(calls.some((c) => typeof c.opts.label === "string" && c.opts.label.startsWith("R1:")), "single runs no R1").toBe(false);
+    expect(writer.prompt, mode).toContain("REPAIR TURN (KTB-51)");
+    for (const reason of R1_REPAIR_REASONS) expect(writer.prompt, `${mode}: ${reason}`).toContain(reason);
+  }
+});
+
+/*
+ * --- #243 (gap P-6 / P-13 / P-15, template side), re-landed by #299 ---
+ * The plan workflow's half of the validator changes in #232 / #238 / #239: issue done_when coverage is asked for and
+ * carried (`covers_issue`), a surviving sign-off objection is surfaced as a top-level `signoff_objections` entry that
+ * says the same thing as its dissent_log line, and the single-mode skeptic merge never pushes done_when past
+ * `max_done_when`. Every assertion runs the shipped template.
+ *
+ * #299 — P-14's writer-only repair turn is NOT delivered: a non-empty `plan_repair` is the only repair trigger (no second
+ * switch), and the repair turn still dispatches the whole roster, because run-stage resets agents.jsonl before it
+ * (run-stage.js:1220) and verify-stage requires every roster role completed (verify-stage.js:662-664) — a writer-only turn
+ * would be `roster role not completed` → needs-human.
+ */
+import { verifyStage as verifyStage243, validatePlanHandoff as validatePlanHandoff243 } from "../lib/verify-stage.js";
+
+const dw243 = (id, over = {}) => ({ id, text: `TEXT-${id}`, check: { kind: "test", ref: `test_42_${id}` }, rubric: `bar for ${id}`, level: "unit", ...over });
+const SIGNOFF_OBJECTION_243 = "the rollback path is still unspecified";
+
+// debate stub whose skeptic objects at both sign-offs (the objection survives the re-synthesis).
+const objectingDebateStub243 = () => async (prompt, opts) => {
+  if (opts.label?.startsWith("R1:")) return posFix(roleOf(opts));
+  if (opts.label?.startsWith("R2:")) return xexFix(roleOf(opts));
+  if (opts.agentType === "plan-synthesizer") return planFix();
+  if (opts.label?.startsWith("sign:")) {
+    return roleOf(opts) === "skeptic" ? { vote: "object", reason: SIGNOFF_OBJECTION_243 } : { vote: "accept", reason: "ok" };
+  }
+  return null;
+};
+
+test("test_243_plan_workflow_schema_carries_covers_issue_and_signoff_objections", async () => {
+  // the schema each writer answers in — debate synthesizer and single-mode planner — declares both fields
+  const schemas = [];
+  const capture = (inner) => async (prompt, opts) => { if (opts.schema) schemas.push({ who: opts.label || opts.agentType, schema: opts.schema }); return inner(prompt, opts); };
+  const { result } = await runWorkflow(FACTORY_PLAN_WORKFLOW, {
+    agent: capture(objectingDebateStub243()),
+    args: { issue: 42, context: ".factory/out/context.json", loaded: planLoaderFix() },
+  });
+  await runWorkflow(FACTORY_PLAN_WORKFLOW, {
+    agent: capture(async (prompt, opts) => (opts.label === "plan:synthesizer" ? singlePlanFix() : opts.label === "skeptic:skeptic" ? { risks: [], done_when: [] } : null)),
+    args: { issue: 42, context: ".factory/out/context.json", loaded: singleLoaderFix() },
+  });
+  const writers = schemas.filter((s) => s.who === "plan-synthesizer" || s.who === "plan:synthesizer");
+  expect(writers.length).toBeGreaterThanOrEqual(2);
+  for (const { who, schema } of writers) {
+    expect(schema.properties.done_when.items.properties.covers_issue, who).toEqual({ type: "array", items: { type: "string" } });
+    expect(schema.required, who).not.toContain("signoff_objections");                     // optional: a clean plan has none
+    const so = schema.properties.signoff_objections;
+    expect(so?.type, who).toBe("array");
+    expect(so.items.properties.role, who).toEqual({ type: "string" });
+    expect(so.items.properties.text, who).toEqual({ type: "string" });
+    expect(schema.required, who).not.toContain("covers_issue");
+    expect(schema.properties.done_when.items.required, who).not.toContain("covers_issue");
+  }
+
+  // two failed sign-offs: the objection is in dissent_log once and in signoff_objections once, saying the same thing
+  const entries = result.dissent_log.filter((d) => typeof d?.id === "string" && d.id.startsWith("signoff-"));
+  expect(entries).toHaveLength(1);
+  expect(entries[0]).toEqual({
+    id: "signoff-skeptic", severity: "low", role: "skeptic", objection: SIGNOFF_OBJECTION_243,
+    resolution: "unresolved — proceeding; surfaced in signoff_objections",
+  });
+  expect(result.dissent_log.filter((d) => /^signoff-/.test(d?.id || "") && d.severity === "medium")).toEqual([]);
+  expect(result.dissent_log.filter((d) => /^signoff-/.test(d?.id || "") && d.severity !== "low")).toEqual([]);
+  expect(result.signoff_objections).toEqual([{ id: "signoff-skeptic", role: "skeptic", text: SIGNOFF_OBJECTION_243 }]);
+  expect(result.signoff_objections[0].role).toBe(entries[0].role);
+  expect(result.signoff_objections[0].text).toBe(entries[0].objection);
+  expect(validate("plan.v1", result).ok).toBe(true);
+
+  // a clean sign-off adds no field at all (existing handoffs keep their shape)
+  const { result: clean } = await runWorkflow(FACTORY_PLAN_WORKFLOW, {
+    agent: planStub(),
+    args: { issue: 42, context: ".factory/out/context.json", loaded: planLoaderFix() },
+  });
+  expect("signoff_objections" in clean).toBe(false);
+});
+
+const runSingle243 = async ({ planner, skeptic, max = 6 }) => runWorkflow(FACTORY_PLAN_WORKFLOW, {
+  agent: async (prompt, opts) => {
+    if (opts.label === "plan:synthesizer") return singlePlanFix({ done_when: planner, dissent_log: [] });
+    if (opts.label === "skeptic:skeptic") return skeptic;
+    return null;
+  },
+  args: { issue: 42, context: ".factory/out/context.json", loaded: singleLoaderFix({ plan: { mode: "single", max_done_when: max } }) },
+});
+
+test("test_243_single_mode_merge_caps_skeptic_items_at_max_done_when", async () => {
+  // 6 planner + 2 skeptic, cap 6 → the planner's 6, unchanged; both skeptic items cut and logged low under their own id
+  const planner6 = ["p1", "p2", "p3", "p4", "p5", "p6"].map((id) => dw243(id));
+  const { result: full } = await runSingle243({ planner: planner6, skeptic: { risks: ["r"], done_when: [dw243("s1"), dw243("s2")] } });
+  expect(full.done_when).toEqual(planner6);
+  const cut = full.dissent_log.filter((d) => d.severity === "low" && /s[12]/.test(d.id));
+  expect(cut.map((d) => d.id)).toEqual(["cap-s1", "cap-s2"]);
+  for (const d of cut) {
+    expect(d.objection).toContain(d.id.slice(4));                                       // names the original id
+    expect(d.role).toBeTruthy();
+    expect(typeof d.resolution).toBe("string");
+  }
+  expect(full.dissent_log).toHaveLength(2);
+  expect(validatePlanHandoff243(full, { maxDoneWhen: 6 })).toEqual([]);
+
+  // 4 planner + 3 skeptic → the first two skeptic items fill the two free slots in order; the third is cut and logged low
+  const planner4 = ["p1", "p2", "p3", "p4"].map((id) => dw243(id));
+  const { result: part } = await runSingle243({ planner: planner4, skeptic: { risks: [], done_when: [dw243("s1"), dw243("s2"), dw243("s3")] } });
+  expect(part.done_when.map((d) => d.id)).toEqual(["p1", "p2", "p3", "p4", "s1", "s2"]);
+  expect(part.done_when.slice(0, 4)).toEqual(planner4);
+  expect(part.dissent_log.map((d) => [d.id, d.severity])).toEqual([["cap-s3", "low"]]);
+  expect(part.debate.skeptic_added.done_when).toBe(2);
+
+  // a planner that alone is over the cap is never truncated by the workflow — every skeptic item is cut instead
+  const planner7 = ["p1", "p2", "p3", "p4", "p5", "p6", "p7"].map((id) => dw243(id));
+  const { result: over } = await runSingle243({ planner: planner7, skeptic: { risks: [], done_when: [dw243("s1")] } });
+  expect(over.done_when).toEqual(planner7);
+  expect(over.dissent_log.map((d) => d.id)).toEqual(["cap-s1"]);
+
+  // under the cap nothing is cut and nothing is logged
+  const { result: room } = await runSingle243({ planner: planner4.slice(0, 2), skeptic: { risks: [], done_when: [dw243("s1")] } });
+  expect(room.done_when.map((d) => d.id)).toEqual(["p1", "p2", "s1"]);
+  expect(room.dissent_log).toEqual([]);
+});
+
+test("test_243_single_mode_cap_never_downgrades_orphaned_skeptic_dissent", async () => {
+  const medium = { id: "k1", role: "skeptic", severity: "medium", objection: "the cache is never invalidated", resolution: "gated by s3" };
+  // 4+3: the third skeptic item is the only cover of a medium dissent → it takes a free slot ahead of an item covering nothing
+  const planner4 = ["p1", "p2", "p3", "p4"].map((id) => dw243(id));
+  const { result: kept } = await runSingle243({
+    planner: planner4,
+    skeptic: { risks: [], done_when: [dw243("s1"), dw243("s2"), dw243("s3", { covers: ["k1"] })], dissent: [medium] },
+  });
+  expect(kept.done_when.slice(0, 4)).toEqual(planner4);
+  expect(kept.done_when).toHaveLength(6);
+  expect(kept.done_when.map((d) => d.id)).toContain("s3");
+  expect(kept.done_when.map((d) => d.id)).toContain("s1");                              // the other free slot keeps order
+  expect(kept.dissent_log.find((d) => d.id === "k1")).toEqual(medium);
+  expect(kept.dissent_log.filter((d) => d.severity === "low").map((d) => d.id)).toEqual(["cap-s2"]);
+  expect(validatePlanHandoff243(kept, { maxDoneWhen: 6 })).toEqual([]);
+
+  // 6+1: the covering item is cut — the dissent it covered stays medium, and the validator names it
+  const planner6 = ["p1", "p2", "p3", "p4", "p5", "p6"].map((id) => dw243(id));
+  const { result: orphan } = await runSingle243({
+    planner: planner6,
+    skeptic: { risks: [], done_when: [dw243("s3", { covers: ["k1"] })], dissent: [medium] },
+  });
+  expect(orphan.done_when).toEqual(planner6);
+  expect(orphan.dissent_log.find((d) => d.id === "k1")).toEqual(medium);
+  expect(orphan.dissent_log.find((d) => d.id === "cap-s3")?.severity).toBe("low");
+  const reasons = validatePlanHandoff243(orphan, { maxDoneWhen: 6 });
+  expect(reasons.find((r) => r.startsWith("dissent without done_when"))).toMatch(/^dissent without done_when: k1\b/);
+});
+
+test("test_243_plan_repair_with_previous_reruns_synthesis_only", async () => {
+  /*
+   * #299 — despite the id (kept because the issue names it), this test pins that writer-only ("synthesis only") repair
+   * (P-14) is NOT delivered. A non-empty `loaded.plan_repair` alone is the repair trigger, and the repair turn reruns the
+   * whole roster — the roster guard (run-stage.js:1194/1220 resets agents.jsonl; verify-stage.js:662-664 requires every
+   * roster role completed) would send a writer-only turn to needs-human. What the repair turn does gain: the writer is
+   * told the reasons and pointed at `plan_repair_previous`, and the handoff names what it repairs (`repair_of`).
+   */
+  const kinds = (calls) => calls.map((c) => c.opts.label || c.opts.agentType);
+  const singleStub = async (prompt, opts) => {
+    if (opts.label === "plan:synthesizer") return singlePlanFix();
+    if (opts.label === "skeptic:skeptic") return { risks: [], done_when: [] };
+    return null;
+  };
+  const rosterReasons = (run, loaded) => {
+    const completed = [...new Set(run.calls.map((c) => c.opts.agentType).filter(Boolean))];
+    const v = verifyStage243({
+      stage: "plan",
+      out: { is_error: false, result: "```json\n" + JSON.stringify({ schema: "factory.plan.v1", ...run.result }) + "\n```" },
+      agentsLog: { starts: [], stops: [], completed, orphans: [] },
+      roster: loaded.roster.map((r) => r.name), rolePrefix: "plan-", expectedRounds: loaded.rounds, orchestration: "workflow",
+      planLimits: { max_done_when: 6 }, issueBody: "",
+    });
+    return v.reasons.filter((r) => r.startsWith("roster role not completed"));
+  };
+
+  // single mode: repair (plan_repair only, no other key) and no repair dispatch the same two passes
+  const repair = await runWorkflow(FACTORY_PLAN_WORKFLOW, {
+    agent: singleStub,
+    args: { issue: 42, context: ".factory/out/context.json", loaded: singleLoaderFix({ plan_repair: R1_REPAIR_REASONS }) },
+  });
+  const normal = await runWorkflow(FACTORY_PLAN_WORKFLOW, {
+    agent: singleStub,
+    args: { issue: 42, context: ".factory/out/context.json", loaded: singleLoaderFix() },
+  });
+  expect(kinds(repair.calls)).toEqual(["plan:synthesizer", "skeptic:skeptic"]);
+  expect(kinds(normal.calls)).toEqual(["plan:synthesizer", "skeptic:skeptic"]);
+  const writer = repair.calls[0];
+  for (const reason of R1_REPAIR_REASONS) expect(writer.prompt).toContain(reason);
+  expect(writer.prompt).toContain("`plan_repair_previous` in `.factory/out/context.json`");
+  expect(repair.result.repair_of).toBe("plan_repair_previous in .factory/out/context.json");
+  expect(validate("plan.v1", repair.result).ok).toBe(true);
+  expect(rosterReasons(repair, singleLoaderFix())).toEqual([]);
+  // no repair → today: no pointer, no repair_of key
+  expect(normal.calls[0].prompt).not.toContain("plan_repair_previous");
+  expect(normal.calls[0].prompt).not.toContain("REPAIR TURN");
+  expect("repair_of" in normal.result).toBe(false);
+
+  // debate mode: the repair turn runs R1, R2, synthesis and sign-off exactly like a normal turn
+  const debateRepair = await runWorkflow(FACTORY_PLAN_WORKFLOW, {
+    agent: planStub(),
+    args: { issue: 42, context: ".factory/out/context.json", loaded: planLoaderFix({ plan_repair: R1_REPAIR_REASONS }) },
+  });
+  const debate = await runWorkflow(FACTORY_PLAN_WORKFLOW, {
+    agent: planStub(),
+    args: { issue: 42, context: ".factory/out/context.json", loaded: planLoaderFix() },
+  });
+  for (const [name, run] of [["repair", debateRepair], ["normal", debate]]) {
+    expect(labelled(run.calls, "R1:"), name).toHaveLength(4);
+    expect(labelled(run.calls, "R2:"), name).toHaveLength(4);
+    expect(labelled(run.calls, "sign:"), name).toHaveLength(4);
+    expect(run.calls.filter((c) => c.opts.agentType === "plan-synthesizer"), name).toHaveLength(1);
+  }
+  const synth = debateRepair.calls.find((c) => c.opts.agentType === "plan-synthesizer");
+  for (const reason of R1_REPAIR_REASONS) expect(synth.prompt).toContain(reason);
+  expect(synth.prompt).toContain("`plan_repair_previous` in `.factory/out/context.json`");
+  expect(debateRepair.result.repair_of).toBe("plan_repair_previous in .factory/out/context.json");
+  expect(rosterReasons(debateRepair, planLoaderFix())).toEqual([]);
+  expect("repair_of" in debate.result).toBe(false);
+  expect(debate.calls.find((c) => c.opts.agentType === "plan-synthesizer").prompt).not.toContain("plan_repair_previous");
+});
+
+test("test_243_no_second_switch_for_plan_repair", () => {
+  // #299 — `plan_repair_synthesis_only` was a key run-stage never writes (factory/lib/context.js, factory/bin/run-stage.js);
+  // gating repair behaviour on it meant the repair path never ran in production. The shipped workflow must not read it.
+  const src = readFileSync(FACTORY_PLAN_WORKFLOW, "utf8");
+  expect(src).not.toContain("plan_repair_synthesis_only");
+  expect(src).not.toMatch(/synthesisOnly/);
+});
+
+test("test_243_planner_prompt_requires_covering_issue_done_when", async () => {
+  const RULE = /cover every item under the issue body's `## done_when`/i;
+  const mustSay = (prompt, who) => {
+    expect(prompt, who).toMatch(RULE);
+    expect(prompt, who).toContain("covers_issue");
+    expect(prompt, who).toContain("issue-dw<n>");
+    expect(prompt, who).toMatch(/adding items[^.]*is allowed/i);
+    expect(prompt, who).toMatch(/omitting one is rejected/i);
+  };
+
+  // single mode — the planner's prompt
+  const single = await runWorkflow(FACTORY_PLAN_WORKFLOW, {
+    agent: async (prompt, opts) => (opts.label === "plan:synthesizer" ? singlePlanFix() : opts.label === "skeptic:skeptic" ? { risks: [], done_when: [] } : null),
+    args: { issue: 42, context: ".factory/out/context.json", loaded: singleLoaderFix() },
+  });
+  mustSay(single.calls.find((c) => c.opts.label === "plan:synthesizer").prompt, "single planner");
+
+  // debate — the initial synthesis and the sign-off revision both carry it
+  const debate = await runWorkflow(FACTORY_PLAN_WORKFLOW, {
+    agent: objectingDebateStub243(),
+    args: { issue: 42, context: ".factory/out/context.json", loaded: planLoaderFix() },
+  });
+  const synth = debate.calls.filter((c) => c.opts.agentType === "plan-synthesizer");
+  expect(synth).toHaveLength(2);
+  mustSay(synth[0].prompt, "debate synthesis");
+  mustSay(synth[1].prompt, "debate sign-off revision");
+  expect(synth[1].prompt).toContain(SIGNOFF_OBJECTION_243);
+
+  // the synthesizer's agent file states the same rule
+  const md = readFileSync(new URL("../../templates/factory/claude/agents/plan-synthesizer.md", import.meta.url).pathname, "utf8");
+  expect(md).toContain("covers_issue");
+  expect(md).toMatch(/## done_when/);
+  expect(md).toMatch(/issue-dw<n>/);
+});
+
+test("test_243_signoff_objection_survives_verify_stage_normalization", async () => {
+  // the workflow's REAL return value (two failed sign-offs), wrapped the way run-stage hands it to verifyStage
+  const { result } = await runWorkflow(FACTORY_PLAN_WORKFLOW, {
+    agent: objectingDebateStub243(),
+    args: { issue: 42, context: ".factory/out/context.json", loaded: planLoaderFix() },
+  });
+  expect(result.signoff_objections?.length).toBe(1);
+  // the state dw5 is about: the dissent_log line is LOW, so verify-stage's own sign-off sweep skips it and the
+  // signoff_objections on the posted data can only be the one the workflow wrote
+  const line = result.dissent_log.find((d) => d.id === "signoff-skeptic");
+  expect(line.severity).toBe("low");
+  const roster = PLAN_ROSTER.map((r) => r.name);
+  const v = verifyStage243({
+    stage: "plan",
+    out: { is_error: false, result: "The workflow returned:\n```json\n" + JSON.stringify({ schema: "factory.plan.v1", ...result }) + "\n```" },
+    agentsLog: { starts: [], stops: [], completed: [...roster.map((r) => `plan-${r}`), "plan-synthesizer"], orphans: [] },
+    roster, rolePrefix: "plan-", expectedRounds: 3, orchestration: "workflow", planLimits: { max_done_when: 6 }, issueBody: "",
+  });
+  expect(v.data).toBeTruthy();
+  const posted = v.data.signoff_objections;
+  expect(Array.isArray(posted)).toBe(true);
+  const entry = posted.find((o) => o.role === "skeptic");
+  expect(entry).toBeTruthy();
+  expect(entry.text).toBe(SIGNOFF_OBJECTION_243);
+  expect(posted).toEqual(result.signoff_objections);
+  expect(v.data.dissent_log.some((d) => d.id === "signoff-skeptic" && d.severity === "low" && d.objection === SIGNOFF_OBJECTION_243)).toBe(true);
+  expect(v.reasons.filter((r) => /signoff-skeptic/.test(r))).toEqual([]);
+});
+
+/*
+ * --- #299: the plan's own done_when (dw1-dw4), each a test that adds evidence the test_243_* ids above do not ---
+ */
+
+// A real loaded.json / context.json pair written by the real producer (buildContext) — same CHARTER shape as test_238's.
+const realPlanLoaded299 = async (mode, opts = {}) => (await realPlanPair299(mode, opts)).loaded;
+// The same, plus the context.json the writer reads (where run-stage's `plan_repair_previous` lands, never loaded.json).
+const realPlanPair299 = async (mode, { planRepair = null, planRepairPrevious = null } = {}) => {
+  const r = mkdtempSync(join(tmpdir(), `wf299${mode}-`));
+  mkdirSync238(join(r, ".factory"), { recursive: true }); mkdirSync238(join(r, "docs/factory"), { recursive: true });
+  writeFileSync(join(r, ".factory/harness.toml"), `schema = 1\n[harness]\nmaturity = "M0"\n[factory]\norchestration = "workflow"\n[commands]\nunit = "npm test"\n[gates]\nrequired = ["unit"]\nfast = ["unit"]\nfull = ["unit"]\ndeep = ["unit"]\n`);
+  writeFileSync(join(r, "docs/factory/CHARTER.md"), `---\nschema: factory.charter.v1\nstatus: ready\ntier_default: standard\nroster:\n  standard: [correctness]\nplan_roles:\n  default: [architect, skeptic]\nplan_rounds: { docs: 2, default: 3 }\n${mode === "debate" ? "plan:\n  mode: debate\n" : ""}---\n`);
+  writeFileSync(join(r, ".factory/roles.toml"), `[triage]\nagent = ".claude/agents/factory-triage.md"\nmodel = "sonnet"\n[review.correctness]\nagent = ".claude/agents/review-correctness.md"\nmodel = "opus"\n[plan.architect]\nagent = ".claude/agents/plan-architect.md"\nmodel = "opus"\n[plan.skeptic]\nagent = ".claude/agents/plan-skeptic.md"\nmodel = "opus"\n[plan.synthesizer]\nagent = ".claude/agents/plan-synthesizer.md"\nmodel = "opus"\n`);
+  const gh = { issue: async () => ({ number: 42, title: "T", body: "", labels: ["factory:ready"] }), comments: async () => [] };
+  await buildContext238({ root: r, gh, issue: 42, stage: "plan", planRepair, planRepairPrevious });
+  const loaded = JSON.parse(readFileSync(join(r, ".factory/out/loaded.json"), "utf8"));
+  expect(loaded.plan?.mode, mode).toBe(mode);
+  return { loaded, context: JSON.parse(readFileSync(join(r, ".factory/out/context.json"), "utf8")) };
+};
+
+// A writer that returns a plan the real validator accepts (check + rubric on every item), and a sign-off that accepts.
+const validPlan299 = () => planFix({ done_when: [dw243("dw1")], dissent_log: [] });
+const cleanStub299 = (skepticAdd = { risks: [], done_when: [] }) => async (prompt, opts) => {
+  if (opts.label?.startsWith("R1:")) return posFix(roleOf(opts));
+  if (opts.label?.startsWith("R2:")) return xexFix(roleOf(opts));
+  if (opts.label?.startsWith("sign:")) return { vote: "accept", reason: "ok" };
+  if (opts.label?.startsWith("skeptic:")) return skepticAdd;
+  if (opts.agentType === "plan-synthesizer" || opts.label?.startsWith("plan:")) return validPlan299();
+  return null;
+};
+const verify299 = (run, loaded, issueBody = "") => verifyStage243({
+  stage: "plan",
+  out: { is_error: false, result: "```json\n" + JSON.stringify({ schema: "factory.plan.v1", ...run.result }) + "\n```" },
+  agentsLog: { starts: [], stops: [], completed: [...new Set(run.calls.map((c) => c.opts.agentType).filter(Boolean))], orphans: [] },
+  roster: loaded.roster.map((x) => x.name), rolePrefix: "plan-", expectedRounds: loaded.rounds, orchestration: "workflow",
+  planLimits: { max_done_when: loaded.plan?.max_done_when ?? 6 }, issueBody,
+});
+const writerOf299 = (calls) => calls.find((c) => c.opts.agentType === "plan-synthesizer" || (typeof c.opts.label === "string" && c.opts.label.startsWith("plan:")));
+const dispatch299 = (calls) => calls.map((c) => c.opts.label || c.opts.agentType);
+
+test("test_299_planner_prompt_requires_covering_issue_done_when", async () => {
+  // dw1 — every plan WRITER is told to cover the issue's done_when (in both modes, on a normal and on a repair turn, with
+  // loaded.json from the real producer); the single-mode skeptic, which only adds, is not.
+  const COVER = "Cover every item under the issue body's `## done_when`";
+  for (const mode of ["debate", "single"]) {
+    for (const planRepair of [null, R1_REPAIR_REASONS]) {
+      const loaded = await realPlanLoaded299(mode, { planRepair });
+      const run = await runWorkflow(FACTORY_PLAN_WORKFLOW, { agent: cleanStub299(), args: { issue: 42, context: ".factory/out/context.json", loaded } });
+      const label = `${mode}${planRepair ? " repair" : ""}`;
+      const writer = writerOf299(run.calls);
+      expect(writer, label).toBeTruthy();
+      expect(writer.prompt, label).toContain(COVER);
+      expect(writer.prompt, label).toContain("covers_issue: [<the issue item's test_… id, or issue-dw<n>");
+      for (const c of run.calls.filter((x) => x !== writer && x.opts.agentType !== "plan-synthesizer")) {
+        expect(c.prompt, `${label}: ${c.opts.label} is not a writer`).not.toContain(COVER);
+      }
+    }
+  }
+  // and the issue's done_when the plan covers through `covers` is accepted by the real validator (verify-stage.js:455-458)
+  const loaded = await realPlanLoaded299("single");
+  const covering = { ...validPlan299(), done_when: [dw243("dw1", { covers: ["test_42_issue_item"] })] };
+  const run = await runWorkflow(FACTORY_PLAN_WORKFLOW, {
+    agent: async (p, o) => (o.label?.startsWith("plan:") ? covering : { risks: [], done_when: [] }),
+    args: { issue: 42, context: ".factory/out/context.json", loaded },
+  });
+  const issueBody = "## done_when\n- [ ] `test_42_issue_item` — the issue's own item\n";
+  expect(verify299(run, loaded, issueBody).reasons).toEqual([]);
+  const dropped = await runWorkflow(FACTORY_PLAN_WORKFLOW, { agent: cleanStub299(), args: { issue: 42, context: ".factory/out/context.json", loaded } });
+  expect(verify299(dropped, loaded, issueBody).reasons.join("\n")).toContain("test_42_issue_item");
+});
+
+test("test_299_schema_and_signoff_objections_survive_normalization", async () => {
+  // dw2 — two roles object at both sign-offs: each objection reaches the posted handoff (after the real verifyStage
+  // normalization) as its own signoff_objections entry, and the plan is not refused for them; a clean pass posts none.
+  const OBJ = { architect: "files_expected leaves out the migration", operator: "no rollback runbook is named" };
+  const stub = async (prompt, opts) => {
+    if (opts.label?.startsWith("sign:")) {
+      const role = roleOf(opts);
+      return OBJ[role] ? { vote: "object", reason: OBJ[role] } : { vote: "accept", reason: "ok" };
+    }
+    return cleanStub299()(prompt, opts);
+  };
+  const { result, calls } = await runWorkflow(FACTORY_PLAN_WORKFLOW, { agent: stub, args: { issue: 42, context: ".factory/out/context.json", loaded: planLoaderFix() } });
+  // the writer's schema keeps the fields the validator reads
+  const schema = calls.find((c) => c.opts.agentType === "plan-synthesizer").opts.schema;
+  expect(Object.keys(schema.properties.done_when.items.properties)).toEqual(expect.arrayContaining(["covers", "covers_issue"]));
+  expect(Object.keys(schema.properties)).toContain("signoff_objections");
+  const v = verify299({ result, calls }, planLoaderFix());
+  expect(v.reasons).toEqual([]);
+  expect(v.data.signoff_objections).toEqual([
+    { id: "signoff-architect", role: "architect", text: OBJ.architect },
+    { id: "signoff-operator", role: "operator", text: OBJ.operator },
+  ]);
+  for (const role of Object.keys(OBJ)) {
+    expect(v.data.dissent_log.filter((d) => d.id === `signoff-${role}` && d.objection === OBJ[role]), role).toHaveLength(1);
+  }
+  const clean = await runWorkflow(FACTORY_PLAN_WORKFLOW, { agent: cleanStub299(), args: { issue: 42, context: ".factory/out/context.json", loaded: planLoaderFix() } });
+  const vc = verify299(clean, planLoaderFix());
+  expect(vc.reasons).toEqual([]);
+  expect("signoff_objections" in vc.data).toBe(false);
+
+  // the workflow is the ONLY author of signoff_objections: a writer (single-mode planner, debate synthesizer or sign-off
+  // revision) that returns the field itself — a role that never voted, or a stale objection carried from a rejected plan
+  // — never reaches the posted handoff. verifyStage posts the field unchanged (the dissent_log line is low), so a forged
+  // entry here would read to the operator as real dissent.
+  const FORGED = [{ id: "signoff-skeptic", role: "skeptic", text: "FORGED — this role never objected" }];
+  const forging = (inner) => async (prompt, opts) => {
+    const out = await inner(prompt, opts);
+    const writes = opts.agentType === "plan-synthesizer" || opts.label?.startsWith("plan:");
+    return writes && out ? { ...out, signoff_objections: FORGED } : out;
+  };
+  for (const [name, loaded] of [["single", await realPlanLoaded299("single")], ["debate", planLoaderFix()]]) {
+    const forged = await runWorkflow(FACTORY_PLAN_WORKFLOW, { agent: forging(cleanStub299()), args: { issue: 42, context: ".factory/out/context.json", loaded } });
+    expect("signoff_objections" in forged.result, `${name}: clean pass, writer-supplied field`).toBe(false);
+    const vf = verify299(forged, loaded);
+    expect(vf.reasons, name).toEqual([]);
+    expect("signoff_objections" in vf.data, `${name}: posted`).toBe(false);
+  }
+  // a real objection plus a forging writer (synthesis AND revision forge): only the roles that actually objected are posted
+  const mixed = await runWorkflow(FACTORY_PLAN_WORKFLOW, { agent: forging(stub), args: { issue: 42, context: ".factory/out/context.json", loaded: planLoaderFix() } });
+  expect(verify299(mixed, planLoaderFix()).data.signoff_objections).toEqual([
+    { id: "signoff-architect", role: "architect", text: OBJ.architect },
+    { id: "signoff-operator", role: "operator", text: OBJ.operator },
+  ]);
+
+  // cf1 — the posted text keeps the engine's 120-character cap (verify-stage SIGNOFF_TEXT_MAX), the first 120 verbatim;
+  // the dissent_log line keeps the whole objection
+  const LONG = "the rollback path is unspecified: ".padEnd(300, "x");
+  const longStub = async (prompt, opts) => (opts.label === "sign:architect" ? { vote: "object", reason: LONG } : stub(prompt, opts));
+  const long = await runWorkflow(FACTORY_PLAN_WORKFLOW, { agent: longStub, args: { issue: 42, context: ".factory/out/context.json", loaded: planLoaderFix() } });
+  const vl = verify299(long, planLoaderFix());
+  expect(vl.data.signoff_objections.find((o) => o.role === "architect").text).toBe(LONG.slice(0, 120));
+  expect(vl.data.dissent_log.find((d) => d.id === "signoff-architect").objection).toBe(LONG);
+});
+
+test("test_299_single_mode_skeptic_cap_keeps_orphaned_dissent", async () => {
+  // dw3 — loaded.json from the real producer (its own max_done_when); the merged handoff never exceeds the cap, the
+  // planner's items are intact, and a high dissent whose only cover was cut keeps its severity and is still named by
+  // the real verifyStage (it is not laundered into a pass).
+  const loaded = await realPlanLoaded299("single");
+  const cap = loaded.plan.max_done_when;
+  expect(Number.isInteger(cap) && cap > 0).toBe(true);
+  const planner = Array.from({ length: cap }, (_, i) => dw243(`p${i + 1}`));
+  const high = { id: "k9", role: "skeptic", severity: "high", objection: "the export drops rows past 10k", resolution: "gated by s9" };
+  const run = await runWorkflow(FACTORY_PLAN_WORKFLOW, {
+    agent: async (p, o) => (o.label?.startsWith("plan:") ? { ...validPlan299(), done_when: planner }
+      : o.label?.startsWith("skeptic:") ? { risks: ["rows"], done_when: [dw243("s9", { covers: ["k9"] })], dissent: [high] } : null),
+    args: { issue: 42, context: ".factory/out/context.json", loaded },
+  });
+  expect(run.result.done_when).toHaveLength(cap);
+  expect(run.result.done_when).toEqual(planner);
+  expect(run.result.dissent_log.find((d) => d.id === "k9")).toEqual(high);
+  const v = verify299(run, loaded);
+  expect(v.reasons.some((r) => /^dissent without done_when: .*\bk9\b/.test(r))).toBe(true);
+  expect(v.reasons.filter((r) => /max_done_when|done_when has \d+/.test(r))).toEqual([]);
+});
+
+test("test_299_plan_repair_turn_reaches_planned_without_second_switch", async () => {
+  /*
+   * dw4 — writer-only repair (P-14) is NOT delivered, by design: run-stage resets agents.jsonl before the repair turn
+   * (run-stage.js:1194/1220) and verify-stage requires every roster role completed (verify-stage.js:662-664), so a
+   * writer-only turn would be refused as `roster role not completed` and every plan repair would go to needs-human.
+   * What IS pinned: a non-empty `plan_repair` alone (from the real buildContext) makes a repair turn that dispatches the
+   * whole roster, tells the writer every reason and where the rejected plan is, names it in `repair_of`, and passes the
+   * real verifyStage; `plan_repair_synthesis_only` changes nothing; an empty or all-blank `plan_repair` is today's turn.
+   */
+  const rejected = { schema: "factory.plan.v1", issue: 42, done_when: [{ id: "dw1", text: "REJECTED" }] };
+  const POINTER = "plan_repair_previous in .factory/out/context.json";
+  for (const mode of ["debate", "single"]) {
+    const baseline = await runWorkflow(FACTORY_PLAN_WORKFLOW, { agent: cleanStub299(), args: { issue: 42, context: ".factory/out/context.json", loaded: await realPlanLoaded299(mode) } });
+    for (const previous of [rejected, null]) {
+      const label = `${mode}${previous ? " +previous" : ""}`;
+      const { loaded, context } = await realPlanPair299(mode, { planRepair: R1_REPAIR_REASONS, planRepairPrevious: previous });
+      expect(loaded.plan_repair, label).toEqual(R1_REPAIR_REASONS);
+      // the pointer's target as the real producer writes it: in context.json only when run-stage carried a plan
+      // (run-stage.js:1202-1203 → context.js:386), never in loaded.json — so the workflow cannot know which case it is in
+      expect("plan_repair_previous" in loaded, label).toBe(false);
+      if (previous) expect(context.plan_repair_previous, label).toEqual(previous);
+      else expect("plan_repair_previous" in context, label).toBe(false);
+      const run = await runWorkflow(FACTORY_PLAN_WORKFLOW, { agent: cleanStub299(), args: { issue: 42, context: ".factory/out/context.json", loaded } });
+      // every roster role is dispatched — the same dispatch as a normal turn
+      expect(dispatch299(run.calls), label).toEqual(dispatch299(baseline.calls));
+      const dispatchedTypes = new Set(run.calls.map((c) => c.opts.agentType));
+      for (const r of loaded.roster) expect(dispatchedTypes.has(r.agentType), `${label}: ${r.name}`).toBe(true);
+      const writer = writerOf299(run.calls);
+      expect(writer.prompt, label).toContain("REPAIR TURN (KTB-51)");
+      for (const reason of R1_REPAIR_REASONS) expect(writer.prompt, label).toContain(reason);
+      expect(writer.prompt, label).toContain("`plan_repair_previous` in `.factory/out/context.json`");
+      // ...and, since that key may be absent (the `null` case above), the writer is never told it IS there: it is told
+      // what to do in both cases, so a repair without a carried plan does not chase a missing key
+      expect(writer.prompt, label).not.toContain("The rejected plan is `plan_repair_previous`");
+      expect(writer.prompt, label).toContain("If `plan_repair_previous` in `.factory/out/context.json` is present, that is the rejected plan — start from it");
+      expect(writer.prompt, label).toContain("If it is absent, the rejected plan was not carried");
+      // repair_of names the slot the rejected plan is carried in (the best identifier the payload has); run-stage records
+      // it as the agent's claim and never resolves or classifies on it (planRepairCostLine)
+      expect(run.result.repair_of, label).toBe(POINTER);
+      // the real verifier lets this repair reach factory:planned (no roster refusal, no reason at all)
+      expect(verify299(run, loaded).reasons, label).toEqual([]);
+
+      // a second switch in the payload changes nothing
+      const switched = await runWorkflow(FACTORY_PLAN_WORKFLOW, {
+        agent: cleanStub299(),
+        args: { issue: 42, context: ".factory/out/context.json", loaded: { ...loaded, plan_repair_synthesis_only: true } },
+      });
+      expect(dispatch299(switched.calls), `${label}: switch`).toEqual(dispatch299(run.calls));
+      expect(switched.result, `${label}: switch`).toEqual(run.result);
+    }
+    // empty / all-blank plan_repair → today's turn: no repair directive, no pointer, no repair_of
+    for (const blank of [[], ["", "   "]]) {
+      const loaded = await realPlanLoaded299(mode, { planRepair: blank });
+      const run = await runWorkflow(FACTORY_PLAN_WORKFLOW, { agent: cleanStub299(), args: { issue: 42, context: ".factory/out/context.json", loaded } });
+      expect(dispatch299(run.calls), `${mode} blank`).toEqual(dispatch299(baseline.calls));
+      expect(writerOf299(run.calls).prompt).not.toContain("REPAIR TURN");
+      expect(writerOf299(run.calls).prompt).not.toContain("plan_repair_previous");
+      expect("repair_of" in run.result, `${mode} blank`).toBe(false);
+      expect(run.result).toEqual(baseline.result);
+    }
+  }
+});
+
+// --- #244: the review handoff carries R1 and R2 verdicts per role; `loaded.review_r2` skip switch (P-9, M-2) ---
+
+const rolesVerdicts = (round) => Object.fromEntries(round.verdicts.map((v) => [v.role, v.verdict]));
+
+test("test_244_review_handoff_carries_r1_and_r2_verdicts", async () => {
+  // case 1: an R1 reject → full R2. correctness revises its reject away (reject→approve), architecture
+  // revises an approve into a reject (approve→reject), spec-conformance maintains, qa dies twice in R1.
+  const stub = async (prompt, opts) => {
+    const label = opts.label;
+    if (label.startsWith("R1:")) {
+      const role = label.slice(3);
+      if (role === "qa") return null;
+      return role === "correctness" ? rejectV(role, "cf1") : approveV(role);
+    }
+    if (label === "R2:correctness") return { verdict: "revise", must_fix: [], should_fix: [], verified: ["cf1 was a misread"], on_others: [] };
+    if (label === "R2:architecture") return { verdict: "revise", must_fix: [finding("arch2")], should_fix: [], verified: [], on_others: [] };
+    if (label.startsWith("R2:")) return { verdict: "maintain", must_fix: [], should_fix: [], verified: [], on_others: [] };
+    return null;
+  };
+  const { result } = await runWorkflow(FACTORY_REVIEW_WORKFLOW, {
+    agent: stub,
+    args: { issue: 42, context: ".factory/out/context.json", loaded: reviewLoaderFix() },
+  });
+
+  expect(result.rounds).toEqual([
+    {
+      round: 1,
+      verdicts: [
+        { role: "correctness", verdict: "reject" },
+        { role: "architecture", verdict: "approve" },
+        { role: "spec-conformance", verdict: "approve" },
+      ],
+    },
+    {
+      round: 2,
+      verdicts: [
+        { role: "correctness", verdict: "approve" },
+        { role: "architecture", verdict: "reject" },
+        { role: "spec-conformance", verdict: "approve" },
+      ],
+    },
+  ]);
+  // a role that gave no R1 verdict is absent, never invented
+  for (const round of result.rounds) expect(round.verdicts.map((v) => v.role)).not.toContain("qa");
+  // round 2 is the handoff's own final verdicts, role by role
+  expect(rolesVerdicts(result.rounds[1])).toEqual(Object.fromEntries(result.verdicts.map((v) => [v.role, v.verdict])));
+  expect(validate("review.v1", result).ok).toBe(true);
+
+  // case 2: unanimous R1 approve → exactly one round
+  const approveStub = async (prompt, opts) => {
+    const label = opts.label;
+    if (label.startsWith("R1:")) return approveV(label.slice(3));
+    if (label.startsWith("R2-light:")) return { missed: [] };
+    return null;
+  };
+  const { result: unanimous } = await runWorkflow(FACTORY_REVIEW_WORKFLOW, {
+    agent: approveStub,
+    args: { issue: 42, context: ".factory/out/context.json", loaded: reviewLoaderFix() },
+  });
+  expect(unanimous.rounds).toEqual([
+    {
+      round: 1,
+      verdicts: [
+        { role: "correctness", verdict: "approve" },
+        { role: "architecture", verdict: "approve" },
+        { role: "spec-conformance", verdict: "approve" },
+        { role: "qa", verdict: "approve" },
+      ],
+    },
+  ]);
+  expect(validate("review.v1", unanimous).ok).toBe(true);
+
+  // the F7 comment no longer says the R1 verdicts are dropped from the handoff
+  const src = readFileSync(FACTORY_REVIEW_WORKFLOW, "utf8");
+  expect(src).not.toContain("`r1`은 싣지 않는다");
+});
+
+test("test_244_review_r2_skip_switch_defaults_to_full", async () => {
+  const rejectStub = async (prompt, opts) => {
+    const label = opts.label;
+    if (label.startsWith("R1:")) {
+      const role = label.slice(3);
+      return role === "correctness" ? rejectV(role, "cf1") : approveV(role);
+    }
+    if (label === "R2:architecture") return { verdict: "revise", must_fix: [finding("arch2")], should_fix: [], verified: [], on_others: [] };
+    if (label.startsWith("R2:")) return { verdict: "maintain", must_fix: [], should_fix: [], verified: [], on_others: [] };
+    return null;
+  };
+  const run = (loaded, agent = rejectStub) =>
+    runWorkflow(FACTORY_REVIEW_WORKFLOW, { agent, args: { issue: 42, context: ".factory/out/context.json", loaded } });
+
+  // default (field absent), explicit "full", and anything that is not exactly "skip": the full R2 runs for every reviewer, as today
+  for (const loaded of [reviewLoaderFix(), reviewLoaderFix({ review_r2: "full" }), reviewLoaderFix({ review_r2: "Skip" })]) {
+    const { result, calls } = await run(loaded);
+    expect(withLabel(calls, "R2:")).toHaveLength(4);
+    expect(result.rounds).toHaveLength(2);
+    expect(result.verdicts.find((v) => v.role === "architecture").verdict).toBe("reject"); // the R2 revise landed
+    expect(result.summary).toContain("Full round 2");
+    expect(validate("review.v1", result).ok).toBe(true);
+  }
+
+  // "skip": an R1 reject goes straight to rework on the R1 verdicts — no R2 agent at all
+  const { result, calls } = await run(reviewLoaderFix({ review_r2: "skip" }));
+  expect(calls.filter((c) => labelOf(c).startsWith("R2"))).toHaveLength(0);
+  expect(withLabel(calls, "R1:")).toHaveLength(4);
+  const byRole = Object.fromEntries(result.verdicts.map((v) => [v.role, v]));
+  expect(byRole.correctness.verdict).toBe("reject");
+  expect(byRole.correctness.must_fix).toEqual([finding("cf1")]);
+  expect(byRole.architecture.verdict).toBe("approve"); // R1's, not a revise nobody was asked for
+  expect(result.rounds).toEqual([
+    {
+      round: 1,
+      verdicts: [
+        { role: "correctness", verdict: "reject" },
+        { role: "architecture", verdict: "approve" },
+        { role: "spec-conformance", verdict: "approve" },
+        { role: "qa", verdict: "approve" },
+      ],
+    },
+  ]);
+  expect(result.summary).not.toContain("Full round 2");
+  expect(result.summary).toContain("1 reject");
+  expect(validate("review.v1", result).ok).toBe(true);
+
+  // "skip" leaves the unanimous-approve light R2 alone
+  const approveStub = async (prompt, opts) => {
+    const label = opts.label;
+    if (label.startsWith("R1:")) return approveV(label.slice(3));
+    if (label.startsWith("R2-light:")) return { missed: [] };
+    return null;
+  };
+  const { calls: lightCalls } = await run(reviewLoaderFix({ review_r2: "skip" }), approveStub);
+  expect(withLabel(lightCalls, "R2-light:")).toHaveLength(4);
+});
+
+test("test_244_rounds_r1_reflects_upheld_disputes", async () => {
+  const disputed = [{ id: "cf1", status: "disputed", reason: "out of scope per the plan's non_goals" }];
+  const loaded = reviewLoaderFix({ disputed, must_fix: [finding("cf1")] });
+  const stub = async (prompt, opts) => {
+    const label = opts.label;
+    if (label.startsWith("dispute:")) return { rulings: [{ id: "cf1", ruling: "uphold", reason: "non_goals says nothing about the parser" }] };
+    // every R1 approves with an empty must_fix — correctness's upheld cf1 is put back by the workflow
+    if (label.startsWith("R1:")) return approveV(label.slice(3));
+    if (label.startsWith("R2:")) return { verdict: "maintain", must_fix: [], should_fix: [], verified: [], on_others: [] };
+    return null;
+  };
+  const { result, calls } = await runWorkflow(FACTORY_REVIEW_WORKFLOW, {
+    agent: stub,
+    args: { issue: 42, context: ".factory/out/context.json", loaded },
+  });
+
+  expect(withLabel(calls, "R2:")).toHaveLength(4); // the re-attached item made R1 a reject → full R2
+  expect(result.rounds).toHaveLength(2);
+  expect(rolesVerdicts(result.rounds[0]).correctness).toBe("reject");
+  expect(rolesVerdicts(result.rounds[1]).correctness).toBe("reject"); // maintain → no invented flip
+  for (const role of ["architecture", "spec-conformance", "qa"]) {
+    expect(rolesVerdicts(result.rounds[0])[role]).toBe("approve");
+    expect(rolesVerdicts(result.rounds[1])[role]).toBe("approve");
+  }
+  expect(validate("review.v1", result).ok).toBe(true);
+});
+
+// cf1 (rework #244): the consumer already on main (#239, run-stage.js) reads the R1 record as `r1_verdicts`, not
+// `rounds` (DECISIONS.md cross-PR contract). Feed the workflow's REAL handoff to the real `reviewR1Line` — a shape-only
+// test passed while every run record still said "(not carried by this workflow)".
+import { reviewR1Line as reviewR1Line244, REVIEW_R1_NOT_CARRIED as REVIEW_R1_NOT_CARRIED244 } from "../bin/run-stage.js";
+test("test_244_review_handoff_feeds_run_stage_r1_line", async () => {
+  // R1: correctness rejects; full R2: correctness revises to approve (one flip), the others hold.
+  const stub = async (prompt, opts) => {
+    const label = opts.label;
+    if (label.startsWith("R1:")) {
+      const role = label.slice(3);
+      return role === "correctness" ? rejectV(role, "cf1") : approveV(role);
+    }
+    if (label === "R2:correctness") return { verdict: "revise", must_fix: [], should_fix: [], verified: ["cf1 was a misread"], on_others: [] };
+    if (label.startsWith("R2:")) return { verdict: "maintain", must_fix: [], should_fix: [], verified: [], on_others: [] };
+    return null;
+  };
+  const { result } = await runWorkflow(FACTORY_REVIEW_WORKFLOW, {
+    agent: stub,
+    args: { issue: 42, context: ".factory/out/context.json", loaded: reviewLoaderFix() },
+  });
+  const line = reviewR1Line244(result.r1_verdicts, result.verdicts);
+  expect(line).not.toBe(REVIEW_R1_NOT_CARRIED244);
+  expect(line).toMatch(/correctness=reject/);
+  expect(line).toMatch(/ r2_flipped=1$/);
+  expect(validate("review.v1", result).ok).toBe(true);
+
+  // unanimous approve (light R2): R1 is still carried, nothing flipped
+  const approveStub = async (prompt, opts) => {
+    if (opts.label.startsWith("R1:")) return approveV(opts.label.slice(3));
+    if (opts.label.startsWith("R2-light:")) return { missed: [] };
+    return null;
+  };
+  const { result: unanimous } = await runWorkflow(FACTORY_REVIEW_WORKFLOW, {
+    agent: approveStub,
+    args: { issue: 42, context: ".factory/out/context.json", loaded: reviewLoaderFix() },
+  });
+  expect(reviewR1Line244(unanimous.r1_verdicts, unanimous.verdicts)).toMatch(/ r2_flipped=0$/);
+});
+
+/*
+ * --- #288 — the workflow reads `.factory/out/loaded.json` itself when the dispatcher passed no `args.loaded` ---
+ * #239's third-round dispatch ended twice in one turn (runs 38194052457, 38194076065): the dispatcher called Workflow without
+ * reading the file, every workflow returned `context payload missing`, and the sweeper's retry could not help (same model, same
+ * mistake). Each test runs the shipped template through the vm harness. The reader is the one agent whose label is `load:reader`;
+ * every other agent call is a role/builder/reviewer spawn.
+ */
+import { dispatcherPayloadErrorOf as dispatcherPayloadErrorOf288 } from "../bin/run-stage.js";
+import { buildContext as buildContext288 } from "../lib/context.js";
+import { renderHandoff as renderHandoff288 } from "../lib/handoff.js";
+
+const isReader288 = (c) => c.opts.label === "load:reader";
+const roleCalls288 = (calls) => calls.filter((c) => !isReader288(c));
+const triageLoaded288 = (over = {}) => ({ issue: 42, stage: "triage", tier: "standard", roster: [{ name: "triage", agentType: "factory-triage", model: "sonnet" }], orchestration: "workflow", ...over });
+const reviewStub288 = async (prompt, opts) => {
+  const label = opts.label || "";
+  if (label.startsWith("R1:")) return approveV(label.slice(3));
+  if (label.startsWith("R2-light:")) return { missed: [] };
+  return null;
+};
+const implStub288 = async (prompt, opts) => {
+  if (opts.agentType === "factory-builder") return buildFix();
+  if (opts.agentType === "factory-verifier") return verdictFix();
+  return null;
+};
+const triageStub288 = async (prompt, opts) => (opts.agentType === "factory-triage"
+  ? { disposition: "ready", tier: "standard", reason: "done_when is concrete", summary: "add CSV export" } : null);
+/** One row per stage: the template, how its dispatcher names the issue, a payload, the role stub, and the role spawns it must make. */
+const STAGES288 = [
+  { stage: "triage", file: FACTORY_TRIAGE_WORKFLOW, args: { issue: 42, context: ".factory/out/context.json" }, payload: triageLoaded288, stub: triageStub288, roles: (calls) => calls.filter((c) => c.opts.agentType === "factory-triage").length },
+  { stage: "plan", file: FACTORY_PLAN_WORKFLOW, args: { issue: 42, context: ".factory/out/context.json" }, payload: planLoaderFix, stub: planStub(), roles: (calls) => labelled(calls, "R1:").length },
+  { stage: "implement", file: FACTORY_IMPLEMENT_WORKFLOW, args: { raw: "42 false", context: ".factory/out/context.json" }, payload: implLoaderFix, stub: implStub288, roles: (calls) => calls.filter((c) => c.opts.agentType === "factory-builder").length },
+  { stage: "review", file: FACTORY_REVIEW_WORKFLOW, args: { issue: 42 }, payload: reviewLoaderFix, stub: reviewStub288, roles: (calls) => labelled(calls, "R1:").length },
+];
+/** The reader answers with the file's text in its one string field; `replies` is consumed per call (the last one repeats). */
+const withReader288 = (stub, ...replies) => {
+  let n = 0;
+  return async (prompt, opts) => {
+    if (opts.label !== "load:reader") return stub(prompt, opts);
+    const r = replies[Math.min(n, replies.length - 1)];
+    n += 1;
+    return typeof r === "function" ? r() : r;
+  };
+};
+const pretty288 = (o) => JSON.stringify(o, null, 2);   // the shape context.js writes to disk
+
+test("test_workflow_self_loads_payload_when_args_loaded_is_missing", async () => {
+  for (const s of STAGES288) {
+    const payload = s.payload();
+    const text = pretty288(payload);
+
+    // baseline: the dispatcher passed the payload as an object — no reader, loaded_source "args"
+    const viaArgs = await runWorkflow(s.file, { agent: withReader288(s.stub, { loaded_json: text }), args: { ...s.args, loaded: payload } });
+    expect(viaArgs.calls.filter(isReader288), s.stage).toHaveLength(0);
+    expect(viaArgs.result.error, s.stage).toBeUndefined();
+    expect(viaArgs.result.loaded_source, s.stage).toBe("args");
+    expect(s.roles(viaArgs.calls), `${s.stage}: role agents ran on the args path`).toBeGreaterThan(0);
+
+    // #170 string form — still the args path
+    const viaString = await runWorkflow(s.file, { agent: withReader288(s.stub, { loaded_json: text }), args: { ...s.args, loaded: JSON.stringify(payload) } });
+    expect(viaString.calls.filter(isReader288), s.stage).toHaveLength(0);
+    expect(viaString.result.loaded_source, s.stage).toBe("args");
+    expect(roleCalls288(viaString.calls).map((c) => c.opts.label || c.opts.agentType), s.stage).toEqual(roleCalls288(viaArgs.calls).map((c) => c.opts.label || c.opts.agentType));
+
+    // no args.loaded: the reader is called once, the same role agents run, the artifact says where the payload came from
+    const self = await runWorkflow(s.file, { agent: withReader288(s.stub, { loaded_json: text }), args: { ...s.args } });
+    const readers = self.calls.filter(isReader288);
+    expect(readers, s.stage).toHaveLength(1);
+    expect(readers[0].prompt, s.stage).toContain(".factory/out/loaded.json");
+    const schema = readers[0].opts.schema;
+    expect(Object.keys(schema.properties), `${s.stage}: one opaque field`).toHaveLength(1);
+    expect(Object.values(schema.properties)[0].type, s.stage).toBe("string");
+    for (const name of Object.keys(payload)) expect(JSON.stringify(schema), `${s.stage}: reader schema names no payload key (${name})`).not.toContain(`"${name}"`);
+    expect(self.result.error, s.stage).toBeUndefined();
+    expect(self.result.issue, s.stage).toBe(42);
+    expect(self.result.loaded_source, s.stage).toBe("file");
+    expect(self.result.loaded_json_length, s.stage).toBe(JSON.stringify(JSON.parse(text)).length);
+    expect(roleCalls288(self.calls).map((c) => c.opts.label || c.opts.agentType), `${s.stage}: same role spawns as the args path`)
+      .toEqual(roleCalls288(viaArgs.calls).map((c) => c.opts.label || c.opts.agentType));
+
+    // a reader that answers null once is re-spawned by once(): two reader calls, then the stage proceeds
+    const retried = await runWorkflow(s.file, { agent: withReader288(s.stub, null, { loaded_json: text }), args: { ...s.args } });
+    expect(retried.calls.filter(isReader288), s.stage).toHaveLength(2);
+    expect(retried.result.loaded_source, s.stage).toBe("file");
+    expect(s.roles(retried.calls), s.stage).toBeGreaterThan(0);
+  }
+});
+
+test("test_workflow_self_loaded_payload_must_match_the_issue", async () => {
+  const MISSING = (issue) => ({ issue, error: "context payload missing", orchestration: "workflow", guarantee: "structural" });
+  for (const s of STAGES288) {
+    const run = (stub, args = s.args) => runWorkflow(s.file, { agent: stub, args: { ...args } });
+    const asOut = (result) => ({ out: { is_error: false, result: JSON.stringify(result) } });
+
+    // (a) the reader fails: null twice, unparseable text, throws twice — today's exact object, no role agent
+    for (const [why, stub] of [
+      ["null", withReader288(s.stub, null)],
+      ["unparseable", withReader288(s.stub, { loaded_json: "{\"issue\": 42, \"stage\":" })],
+      ["throws", withReader288(s.stub, () => { throw new Error("reader died"); })],
+    ]) {
+      const { result, calls } = await run(stub);
+      expect(result, `${s.stage} ${why}`).toEqual(MISSING(42));
+      expect(roleCalls288(calls), `${s.stage} ${why}`).toEqual([]);
+      expect(dispatcherPayloadErrorOf288(asOut(result)), `${s.stage} ${why}`).toBe("context payload missing");
+    }
+
+    // (b) the file belongs to another issue
+    const other = await run(withReader288(s.stub, { loaded_json: pretty288(s.payload({ issue: 99 })) }));
+    expect(other.result.error, s.stage).toMatch(/^context issue mismatch/);
+    expect(other.result.issue, s.stage).toBe(42);
+    expect(roleCalls288(other.calls), s.stage).toEqual([]);
+    expect(dispatcherPayloadErrorOf288(asOut(other.result)), s.stage).toBe(other.result.error);
+
+    // (c) the file is this issue's but another stage's (a stale loaded.json from the previous stage)
+    const wrongStage = s.stage === "review" ? "implement" : "review";
+    const stale = await run(withReader288(s.stub, { loaded_json: pretty288(s.payload({ stage: wrongStage })) }));
+    expect(stale.result.error, s.stage).toMatch(/^context issue mismatch/);
+    expect(roleCalls288(stale.calls), s.stage).toEqual([]);
+    expect(dispatcherPayloadErrorOf288(asOut(stale.result)), s.stage).toBe(stale.result.error);
+
+    // (d) neither raw nor issue: the expected issue is never taken from the file it is checking — fail closed, nothing spawned
+    const blind = await run(withReader288(s.stub, { loaded_json: pretty288(s.payload()) }), { context: ".factory/out/context.json" });
+    expect(blind.result.error, s.stage).toBe("context payload missing");
+    expect(blind.result.issue, s.stage).not.toBe(42);
+    expect(blind.calls, s.stage).toEqual([]);
+    expect(dispatcherPayloadErrorOf288(asOut(blind.result)), s.stage).toBe("context payload missing");
+  }
+});
+
+/** A real repo root whose CHARTER/roles give every stage a roster; implement's history is a rework round with must_fix + a dispute. */
+async function realLoaded288(stage) {
+  const r = mkdtempSync(join(tmpdir(), `wf288${stage}-`));
+  mkdirSync238(join(r, ".factory"), { recursive: true }); mkdirSync238(join(r, "docs/factory"), { recursive: true });
+  writeFileSync(join(r, ".factory/harness.toml"), `schema = 1\n[harness]\nmaturity = "M0"\n[factory]\norchestration = "workflow"\n[commands]\nunit = "npm test"\n[gates]\nrequired = ["unit"]\nfast = ["unit"]\nfull = ["unit"]\ndeep = ["unit"]\n`);
+  writeFileSync(join(r, "docs/factory/CHARTER.md"), `---\nschema: factory.charter.v1\nstatus: ready\ntier_default: standard\nroster:\n  standard: [correctness, qa]\nplan_roles:\n  default: [architect, skeptic]\nplan_rounds: { docs: 2, default: 3 }\nplan:\n  mode: debate\n---\n`);
+  writeFileSync(join(r, ".factory/roles.toml"), `[triage]\nagent = ".claude/agents/factory-triage.md"\nmodel = "sonnet"\n[review.correctness]\nagent = ".claude/agents/reviewer-correctness.md"\nmodel = "opus"\n[review.qa]\nagent = ".claude/agents/reviewer-qa.md"\nmodel = "sonnet"\n[plan.architect]\nagent = ".claude/agents/plan-architect.md"\nmodel = "opus"\n[plan.skeptic]\nagent = ".claude/agents/plan-skeptic.md"\nmodel = "opus"\n[plan.synthesizer]\nagent = ".claude/agents/plan-synthesizer.md"\nmodel = "opus"\n[implement.builder]\nagent = ".claude/agents/factory-builder.md"\nmodel = "opus"\n[implement.verifier]\nagent = ".claude/agents/factory-verifier.md"\nmodel = "opus"\ncold_read = true\n`);
+  const issue = 42, pr = 41, H = "d".repeat(40);
+  const mustFix = [{ id: "cf1", where: "src/a.js:1", claim: "CLAIM-ONE-288", evidence: "EV-ONE" }, { id: "cf2", where: "src/b.js:2", claim: "CLAIM-TWO-288", evidence: "EV-TWO" }];
+  const doneWhen = [{ id: "dw1", text: "t", level: "unit", check: { kind: "test", ref: "test_42_a" }, covers: ["cf1", "cf2"] }];
+  const comments = [
+    { body: renderHandoff288({ stage: "plan", issue, summary: "s", data: { schema: "factory.plan.v1", issue, done_when: doneWhen } }), author: "factory-bot", createdAt: "2026-10-01T00:00:00Z" },
+    { body: renderHandoff288({ stage: "implement", issue, summary: "s", data: { schema: "factory.implement.v1", issue, pr, head_sha: H } }), author: "factory-bot", createdAt: "2026-10-01T00:00:01Z" },
+    { body: renderHandoff288({ stage: "review", issue, summary: "s", data: { schema: "factory.review.v1", issue, pr, head_sha: H, round: 1, orchestration: "workflow", decision: "rework", verdicts: [{ role: "correctness", verdict: "reject", confidence: "high", must_fix: mustFix, should_fix: [], verified: [] }] } }), author: "factory-bot", createdAt: "2026-10-01T00:00:02Z" },
+  ];
+  const response = { schema: "factory.rework-response.v1", issue, responses: [{ id: "cf1", status: "fixed", commit: "abc" }, { id: "cf2", status: "disputed", reason: "DISPUTE-REASON-288" }] };
+  const gh = {
+    issue: async () => ({ number: issue, title: "T", body: "", labels: ["factory:in-progress"] }),
+    comments: async (n) => (n === pr ? [{ id: 9, body: "```json\n" + JSON.stringify(response) + "\n```", createdAt: "2026-10-02T00:00:00Z" }] : comments.slice()),
+  };
+  await buildContext288({ root: r, gh, issue, stage, setupDirty: stage === "implement" ? { entries: [{ path: "src/generated-288.txt", code: " M" }] } : null });
+  return readFileSync(join(r, ".factory/out/loaded.json"), "utf8");
+}
+
+test("test_288_self_loaded_payload_is_equivalent_to_dispatcher_payload", async () => {
+  for (const s of STAGES288) {
+    const text = await realLoaded288(s.stage);
+    const loaded = JSON.parse(text);
+    expect(loaded.stage, s.stage).toBe(s.stage);
+    // the fixture is a rework round: the producer really put must_fix and disputed (and, for implement, setup_dirty) into the file
+    expect(loaded.must_fix.length, s.stage).toBeGreaterThan(0);
+    expect(loaded.disputed.length, s.stage).toBeGreaterThan(0);
+    if (s.stage === "implement") expect(loaded.setup_dirty, s.stage).toEqual(["src/generated-288.txt"]);
+
+    const viaArgs = await runWorkflow(s.file, { agent: withReader288(s.stub, { loaded_json: text }), args: { ...s.args, loaded } });
+    const viaFile = await runWorkflow(s.file, { agent: withReader288(s.stub, { loaded_json: text }), args: { ...s.args } });
+    expect(viaFile.calls.filter(isReader288), s.stage).toHaveLength(1);
+    expect(viaFile.result.loaded_source, s.stage).toBe("file");
+    const downstream = (calls) => roleCalls288(calls).map((c) => ({ prompt: c.prompt, opts: c.opts }));
+    expect(downstream(viaArgs.calls).length, s.stage).toBeGreaterThan(0);
+    expect(downstream(viaFile.calls), `${s.stage}: every non-reader agent call is identical across the two paths`).toEqual(downstream(viaArgs.calls));
+
+    if (s.stage === "implement") {
+      const builder = viaFile.calls.find((c) => c.opts.agentType === "factory-builder");
+      for (const m of loaded.must_fix) expect(builder.prompt, m.id).toContain(m.id);
+      for (const m of loaded.must_fix) expect(builder.prompt, m.claim).toContain(m.claim);
+      for (const d of loaded.disputed) expect(builder.prompt, d.reason).toContain(d.reason);
+      for (const p of loaded.setup_dirty) expect(builder.prompt, p).toContain(p);
+    }
+    if (s.stage === "plan") {
+      expect(labelled(viaFile.calls, "R1:").map((c) => roleOf(c.opts)).sort()).toEqual(loaded.roster.map((x) => x.name).sort());
+    }
+  }
 });

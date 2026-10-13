@@ -50,6 +50,9 @@ const CONTRACT_ITEM = {
     rubric: { type: 'string' },
     level: { type: 'string', enum: ['unit', 'integration', 'e2e'] },
     covers: { type: 'array', items: { type: 'string' } },
+    // #243 (P-6) — which of the ISSUE's `## done_when` items this plan item answers (`test_…` id or `issue-dw<n>`).
+    // Declared so the structured output keeps it: verify-stage (#232) counts it as issue coverage.
+    covers_issue: { type: 'array', items: { type: 'string' } },
   },
 };
 
@@ -113,6 +116,16 @@ const PLAN_V1 = {
     },
     non_goals: { type: 'array', items: { type: 'string' } },
     open_risks: { type: 'array', items: { type: 'string' } },
+    // #243 (P-13) — a sign-off objection that survived the second vote, surfaced at the top of the handoff. The workflow
+    // writes it (from the same objection object as the `signoff-<role>` dissent_log line); optional, absent when clean.
+    signoff_objections: {
+      type: 'array',
+      items: {
+        type: 'object',
+        required: ['role', 'text'],
+        properties: { id: { type: 'string' }, role: { type: 'string' }, text: { type: 'string' } },
+      },
+    },
   },
 };
 
@@ -215,6 +228,9 @@ function boundToMaturity(p) {
   return { ...p, done_when: bounded, dissent_log: [...superseded, ...notes] };
 }
 
+// #288 — the stage a self-loaded .factory/out/loaded.json must name (a stale file from the previous stage fails closed).
+const PAYLOAD_STAGE = 'plan';
+
 phase('Load');
 
 // 감사 M5 (2026-09-14) — `factory-loader`는 사라졌다. 그 에이전트가 한 일은 `context.json`과
@@ -229,6 +245,48 @@ phase('Load');
 // 파싱이 안 되면 그대로 두어 아래 fail-closed가 이름 있는 에러를 낸다.
 const parseIfString = (v) => { if (typeof v !== 'string') return v; try { return JSON.parse(v); } catch { return v; } };
 args = parseIfString(args) ?? {};
+// #288 (2026-10-12, #239 runs 38194052457·38194076065) — 디스패처가 `args.loaded`를 아예 넘기지 않은 채 Workflow를 불렀다(1턴·1.4초).
+// 그 페이로드의 원본은 러너가 이미 쓴 `.factory/out/loaded.json`이다 — 그래서 `args.loaded`가 없을 때만 리더 에이전트 하나가 그 파일을
+// 읽어 온다(디스패처가 넘긴 경우는 오늘과 같다: 리더 0회, LLM 호출 0회 — M5). 리더의 스키마는 불투명한 문자열 필드 하나뿐이다:
+// 페이로드의 키를 스키마에 적으면 구조화 출력이 이름 없는 키(must_fix·disputed·rework_pins·setup_dirty)를 떨굴 수 있다(#111).
+// 기대하는 이슈 번호는 디스패처의 `raw`/`issue`에서만 온다 — 검사 대상인 파일에서 가져오지 않는다. 둘 다 없거나, 리더가 죽거나
+// 파싱되지 않는 글을 주면 아무 것도 넣지 않아 아래의 오늘 그 fail-closed(`context payload missing`)가 그대로 나간다. 파일의 issue나
+// stage가 다르면 오늘의 `context issue mismatch` 접두로 닫는다 — run-stage의 dispatcherPayloadErrorOf가 둘 다 blocked/undecidable로 읽는다.
+// 리더의 "Read만"은 프롬프트의 지시일 뿐 강제된 도구 제한이 아니다(DECISIONS ADR-044). `loaded_json_length`는 run-stage가 같은 파일로
+// 다시 재어 맞춰 본다(잘림·필드 유실 탐지).
+const READER_SCHEMA = { type: 'object', required: ['loaded_json'], properties: { loaded_json: { type: 'string' } } };
+let loadedSource = 'args';
+let loadedJsonLength;
+if (args && typeof args === 'object' && args.loaded == null) {
+  const expectedIssue = Number(String(args.raw ?? args.issue ?? '').trim().split(/\s+/)[0]);
+  if (Number.isInteger(expectedIssue) && expectedIssue > 0) {
+    const readerPrompt =
+      `Use the Read tool on \`.factory/out/loaded.json\` and return the file's entire contents, verbatim and unabridged, ` +
+      `as the single string field \`loaded_json\`. Do not summarise, reformat, reorder, shorten or fix anything in it. ` +
+      `Read that one file only; never write, edit or run anything.`;
+    const reply = await once(() => agent(readerPrompt, { agentType: 'general-purpose', model: 'sonnet', label: 'load:reader', schema: READER_SCHEMA }))();
+    const text = typeof reply === 'string' ? reply : (reply && typeof reply.loaded_json === 'string' ? reply.loaded_json : null);
+    const read = text === null ? null : parseIfString(text);
+    if (read && typeof read === 'object' && !Array.isArray(read)) {
+      // 파일의 issue는 아래의 오늘 그 provenance 검사(`Number(loaded.issue) !== issue`)가 디스패처의 번호와 맞춰 본다 — 여기서는
+      // 그 검사가 보지 않는 stage만 본다: 앞 스테이지가 남긴 같은 이슈의 loaded.json은 issue가 같아도 다른 계약이다.
+      if (read.stage !== PAYLOAD_STAGE) {
+        return {
+          issue: expectedIssue,
+          error: `context issue mismatch: the self-loaded .factory/out/loaded.json is for stage ${read.stage}, this workflow is ${PAYLOAD_STAGE}`,
+          orchestration: 'workflow',
+          guarantee: 'structural',
+        };
+      }
+      args = { ...args, loaded: read };
+      loadedSource = 'file';
+      loadedJsonLength = JSON.stringify(read).length;
+    }
+  }
+}
+const loadedProvenance = loadedSource === 'file'
+  ? { loaded_source: 'file', loaded_json_length: loadedJsonLength }
+  : { loaded_source: 'args' };
 const loaded = parseIfString(args.loaded) ?? null;
 
 const issue = Number(args.issue);
@@ -302,6 +360,14 @@ const planRules =
   `self-runnable check, reviewer-judged only) and the one-line bar a reviewer applies (\`rubric\`). ` +
   `An item with neither a check nor a rubric is rejected as an incomplete acceptance contract.`;
 
+// #243 (P-6, E-7) — the issue's own done_when is the source; the plan may add to it, never drop from it. verify-stage
+// (#232) rejects a plan that leaves an issue item uncovered. Told to whoever WRITES the plan (planner, synthesizer,
+// sign-off revision) — the skeptic only adds.
+const issueCoverRule =
+  `Cover every item under the issue body's \`## done_when\`: mark each plan item that answers one with ` +
+  `\`covers_issue: [<the issue item's test_… id, or issue-dw<n> for the n-th issue item that has no test id>]\`. ` +
+  `Adding items beyond the issue's is allowed (within the cap); omitting one is rejected by the validator.`;
+
 // Task 9 (Structure H, KTB-51) — the one-shot repair turn. When the deterministic validator rejected
 // the previous handoff, run-stage re-dispatches this workflow once with `loaded.plan_repair` set to
 // the exact reasons. The planner fixes precisely those (not a fresh re-plan) — this is the single
@@ -311,8 +377,63 @@ const repairDirective = planRepair.length
   ? `\n\nREPAIR TURN (KTB-51): your previous plan handoff was rejected by the deterministic validator ` +
     `for exactly these reasons:\n${planRepair.map((r) => `  - ${r}`).join('\n')}\n` +
     `Fix precisely these and keep everything the validator did not object to. This is the one repair ` +
-    `turn — a handoff that still breaks a rule goes to a human.`
+    `turn — a handoff that still breaks a rule goes to a human.\n` +
+    // #243 (P-14) — the rejected plan itself is not in the workflow's payload (loaded.json) and the workflow cannot read
+    // files; the writer reads it from its own context file and repairs THAT plan rather than writing a new one.
+    // #299 — run-stage carries it only when it is carryable (run-stage.js:1202-1203 → context.js:386 writes the key only
+    // for a plain object), and loaded.json never says which case this is — so the writer is told both cases, never that
+    // the key IS there.
+    `If \`plan_repair_previous\` in \`${args.context}\` is present, that is the rejected plan — start from it, and keep ` +
+    `every dissent_log entry it carries unless a reason above names it (signoff_objections are written by the ` +
+    `workflow from this turn's sign-off, never carried). ` +
+    `If it is absent, the rejected plan was not carried: fix the reasons above in the plan you write, and do not ` +
+    `invent what the rejected plan said.`
   : '';
+// #243 (P-14) — what the handoff says it repairs. Nothing in the payload carries a head for the rejected plan, so this
+// names the slot it is carried in (absent when run-stage could not carry it — the writer is told so above); run-stage
+// records it as the agent's claim and never resolves or classifies on it (planRepairCostLine).
+const repairOf = planRepair.length ? `plan_repair_previous in ${args.context}` : null;
+const withRepairOf = (o) => (repairOf ? { ...o, repair_of: repairOf } : o);
+// #299 (skeptic) — `signoff_objections` has ONE author: the debate sign-off below. A writer answers in PLAN_V1, which
+// declares the field, but whatever it puts there (a role that never voted, a stale objection carried from a rejected
+// plan) is dropped before the handoff — verifyStage posts the field unchanged, so a writer-made entry would read to the
+// operator as real dissent.
+const withoutWriterObjections = (p) => { const { signoff_objections: _writer, ...rest } = p || {}; return rest; };
+// cf1 — the posted text keeps the engine's cap (verify-stage.js SIGNOFF_TEXT_MAX), the first 120 characters verbatim.
+const SIGNOFF_TEXT_MAX = 120;
+// #299 — a non-empty `plan_repair` is the ONLY repair trigger; there is no second switch. The repair turn still
+// dispatches the whole roster (single: planner + skeptic; debate: R1, R2, synthesis, sign-off): run-stage resets
+// agents.jsonl before it and verify-stage requires every roster role completed, so a writer-only turn would be
+// `roster role not completed` → needs-human. Pinned by test_299_plan_repair_turn_reaches_planned_without_second_switch.
+
+// #243 (P-15, M-9) — the single-mode merge never pushes done_when past `max_done_when`. The planner's items are never cut
+// (a planner over the cap is the validator's to reject); skeptic items take only the free slots. An item that is the
+// only cover of a medium-or-higher (or severity-less) skeptic dissent goes first — cutting it would orphan that risk —
+// then the rest in order; the kept items stay in the skeptic's order. A cut item is logged `low` under its own id;
+// the dissent it covered is never touched, so an orphaned risk keeps its severity and the validator names it.
+// Same ranks as factory/lib/verify-stage.js SEVERITY_RANK — copied, not imported: a workflow script cannot import repo modules.
+const SEVERITY_RANK = { low: 0, medium: 1, high: 2, critical: 3 };
+function capSkepticItems(plannerItems, skepticItems, dissent) {
+  const free = Math.max(0, maxDoneWhen - plannerItems.length);
+  const plannerCovers = new Set();
+  for (const d of plannerItems) if (d && Array.isArray(d.covers)) for (const c of d.covers) plannerCovers.add(String(c).trim().toLowerCase());
+  const risky = new Set(dissent
+    .filter((d) => d && typeof d.id === 'string' && d.id && !(SEVERITY_RANK[d.severity] < SEVERITY_RANK.medium))
+    .map((d) => d.id.trim().toLowerCase())
+    .filter((id) => !plannerCovers.has(id)));
+  const protects = (d) => Array.isArray(d.covers) && d.covers.some((c) => risky.has(String(c).trim().toLowerCase()));
+  const order = [...skepticItems.filter(protects), ...skepticItems.filter((d) => !protects(d))];
+  const keep = new Set(order.slice(0, free));
+  const kept = skepticItems.filter((d) => keep.has(d));
+  const notes = skepticItems.filter((d) => !keep.has(d)).map((d) => ({
+    id: `cap-${d.id}`,
+    severity: 'low',
+    role: 'workflow',
+    objection: `skeptic done_when ${d.id} not merged: max_done_when ${maxDoneWhen} reached — ${d.text || ''}`.trim(),
+    resolution: `cut at the single-mode merge; the planner's ${plannerItems.length} item(s) are never truncated`,
+  }));
+  return { kept, notes };
+}
 
 if (mode === 'single') {
   // One opus planner writes the whole plan; one skeptic gets one pass at it. No cross-examination,
@@ -333,7 +454,7 @@ if (mode === 'single') {
         `more. non_goals names what this issue will not do, so review cannot widen it later. ` +
         `open_risks is what you saw and are not gating on; dissent_log is where a risk you are ` +
         `knowingly not resolving goes, each entry with an \`id\`, the \`role\` that would raise it and ` +
-        `a \`severity\`.\n\n${planRules}${repairDirective}`,
+        `a \`severity\`.\n\n${planRules}\n${issueCoverRule}${repairDirective}`,
         { agentType: planner.agentType, model: planner.model, label: `plan:${planner.name}`, schema: PLAN_V1 },
       ))())
     : null;
@@ -367,12 +488,15 @@ if (mode === 'single') {
       const risks = Array.isArray(plan.open_risks) ? [...plan.open_risks] : [];
       const newRisks = (Array.isArray(add.risks) ? add.risks : []).filter((r) => r && !risks.includes(r));
       const newDissent = (Array.isArray(add.dissent) ? add.dissent : []).filter(Boolean);
-      added = { done_when: newDw.length, risks: newRisks.length, dissent: newDissent.length };
+      const plannerDw = plan.done_when || [];
+      const mergedDissent = [...(Array.isArray(plan.dissent_log) ? plan.dissent_log : []), ...newDissent];
+      const { kept, notes } = capSkepticItems(plannerDw, newDw, mergedDissent);
+      added = { done_when: kept.length, risks: newRisks.length, dissent: newDissent.length };
       plan = boundToMaturity({
         ...plan,
-        done_when: [...(plan.done_when || []), ...newDw],
+        done_when: [...plannerDw, ...kept],
         open_risks: [...risks, ...newRisks],
-        dissent_log: [...(Array.isArray(plan.dissent_log) ? plan.dissent_log : []), ...newDissent],
+        dissent_log: [...mergedDissent, ...notes],
       });
     }
   } else {
@@ -381,18 +505,19 @@ if (mode === 'single') {
 
   phase('Sign-off');
 
-  return {
-    ...(plan || {}),
+  return withRepairOf({
+    ...withoutWriterObjections(plan),
     issue,
     tier,
     roles: rosterNames,
     rounds,
+    ...loadedProvenance,
     orchestration: 'workflow',
     guarantee: 'structural',
     // Same digest slot as the debate, different shape: there was no room, so there is nothing to
     // summarise except who wrote the plan and how much the one challenge actually added.
     debate: { mode: 'single', planner: planner ? planner.name : null, skeptic: sk ? sk.name : null, skeptic_added: added },
-  };
+  });
 }
 
 phase('Positions');
@@ -457,7 +582,7 @@ let plan = r1.length > 0
       `names what this issue will not do, so review cannot widen it later. Every objection from round 2 ` +
       `that you did not resolve goes into dissent_log verbatim with the role that raised it (with an ` +
       `\`id\` and a \`severity\`) — deleting an objection is forging consensus, not reaching it.\n\n` +
-      `${planRules}${repairDirective}`,
+      `${planRules}\n${issueCoverRule}${repairDirective}`,
       { agentType: 'plan-synthesizer', model: 'opus', schema: PLAN_V1 },
     ))())
   : null;
@@ -465,6 +590,7 @@ let plan = r1.length > 0
 phase('Sign-off');
 
 let votes = [];
+let signoffObjections = null;   // set only by the second failed sign-off — the field's one author (see withoutWriterObjections)
 if (plan) {
   for (let attempt = 0; attempt < 2; attempt++) {
     votes = (await parallel(active.map((r) => () =>
@@ -489,21 +615,29 @@ if (plan) {
     if (attempt === 1) {
       const log = Array.isArray(plan.dissent_log) ? plan.dissent_log : [];
       const superseded = log.filter((d) => !objections.some((o) => d && d.role === o.role && d.objection === o.reason));
+      // #243 (P-13) — the same objection objects feed both the dissent_log line and the top-level signoff_objections
+      // entry, so the two can never say different things (same role, same id; the posted text is the first 120
+      // characters of the dissent_log line's objection, as the engine's own sweep would post it).
+      signoffObjections = objections.map((o) => ({ id: `signoff-${o.role}`, role: o.role, text: String(o.reason ?? '').slice(0, SIGNOFF_TEXT_MAX) }));
       plan = {
         ...plan,
         dissent_log: [
           ...superseded,
           // 1.4.43: a surviving sign-off objection is injected by the WORKFLOW, after synthesis — like the
           // maturity note (L39) it needs an id and a severity or the validator names it by position and
-          // nothing can ever cover it. It is a real objection, so it is `medium`: the validator requires a
-          // done_when to cover `signoff-<role>` (the repair turn can, because the id is deterministic) or the
-          // plan goes to a human — which is what an un-gated objection from a signing role deserves.
+          // nothing can ever cover it. #243 (P-13, M-7): it is `low` — the issue (#299) lands this downgrade as
+          // contracted and test_243_* pin it. Since #239 the validator exempts an exact `signoff-<role>` at any
+          // severity, so medium would not force a repair turn either; the trade-off of `low` is that the engine's
+          // sweep (normalizePlanHandoff) skips it, so no `plan: unresolved sign-off objection` run-record line is
+          // written for it — test_243_* pin both `low` and the workflow-side field, so neither can change here
+          // without an engine change (#299 non_goals). The objection is surfaced as the top-level
+          // `signoff_objections` (signoffObjections above), which verifyStage posts unchanged in the handoff.
           ...objections.map((o) => ({
             id: `signoff-${o.role}`,
-            severity: 'medium',
+            severity: 'low',
             role: o.role,
             objection: o.reason,
-            resolution: 'unresolved — proceeding',
+            resolution: 'unresolved — proceeding; surfaced in signoff_objections',
           })),
         ],
       };
@@ -515,19 +649,22 @@ if (plan) {
       `Issue #${issue} (tier ${tier}). The plan you produced:\n${JSON.stringify(plan, null, 2)}\n\n` +
       `Objections raised at sign-off:\n${JSON.stringify(objections, null, 2)}\n\n` +
       `Revise the plan to answer each objection, or — where you will not change the plan — keep the ` +
-      `objection in dissent_log with the reason you are overriding it. This is your only revision.`,
+      `objection in dissent_log with the reason you are overriding it. This is your only revision.\n\n` +
+      issueCoverRule,
       { agentType: 'plan-synthesizer', model: 'opus', schema: PLAN_V1 },
     ))();
     if (revised) plan = boundToMaturity(revised);
   }
 }
 
-return {
-  ...(plan || {}),
+return withRepairOf({
+  ...withoutWriterObjections(plan),
+  ...(signoffObjections ? { signoff_objections: signoffObjections } : {}),
   issue,
   tier,
   roles: rosterNames,
   rounds,
+  ...loadedProvenance,
   orchestration: 'workflow',
   guarantee: 'structural',
   // 토론 전문은 싣지 않는다(F7). 이 객체는 이슈 코멘트의 ```json 블록으로 그대로 나가고, 그 코멘트는 다음
@@ -540,4 +677,4 @@ return {
     r2_objections: r2.reduce((n, x) => n + (Array.isArray(x.objections) ? x.objections.length : 0), 0),
     votes,
   },
-};
+});

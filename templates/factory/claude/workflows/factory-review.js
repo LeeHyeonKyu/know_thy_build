@@ -120,6 +120,9 @@ function once(fn) {
   };
 }
 
+// #288 — the stage a self-loaded .factory/out/loaded.json must name (a stale file from the previous stage fails closed).
+const PAYLOAD_STAGE = 'review';
+
 phase('Load');
 
 // 감사 M5 (2026-09-14) — `factory-loader`는 사라졌다. 그 에이전트가 한 일은 `context.json`과
@@ -134,6 +137,48 @@ phase('Load');
 // 파싱이 안 되면 그대로 두어 아래 fail-closed가 이름 있는 에러를 낸다.
 const parseIfString = (v) => { if (typeof v !== 'string') return v; try { return JSON.parse(v); } catch { return v; } };
 args = parseIfString(args) ?? {};
+// #288 (2026-10-12, #239 runs 38194052457·38194076065) — 디스패처가 `args.loaded`를 아예 넘기지 않은 채 Workflow를 불렀다(1턴·1.4초).
+// 그 페이로드의 원본은 러너가 이미 쓴 `.factory/out/loaded.json`이다 — 그래서 `args.loaded`가 없을 때만 리더 에이전트 하나가 그 파일을
+// 읽어 온다(디스패처가 넘긴 경우는 오늘과 같다: 리더 0회, LLM 호출 0회 — M5). 리더의 스키마는 불투명한 문자열 필드 하나뿐이다:
+// 페이로드의 키를 스키마에 적으면 구조화 출력이 이름 없는 키(must_fix·disputed·rework_pins·setup_dirty)를 떨굴 수 있다(#111).
+// 기대하는 이슈 번호는 디스패처의 `raw`/`issue`에서만 온다 — 검사 대상인 파일에서 가져오지 않는다. 둘 다 없거나, 리더가 죽거나
+// 파싱되지 않는 글을 주면 아무 것도 넣지 않아 아래의 오늘 그 fail-closed(`context payload missing`)가 그대로 나간다. 파일의 issue나
+// stage가 다르면 오늘의 `context issue mismatch` 접두로 닫는다 — run-stage의 dispatcherPayloadErrorOf가 둘 다 blocked/undecidable로 읽는다.
+// 리더의 "Read만"은 프롬프트의 지시일 뿐 강제된 도구 제한이 아니다(DECISIONS ADR-044). `loaded_json_length`는 run-stage가 같은 파일로
+// 다시 재어 맞춰 본다(잘림·필드 유실 탐지).
+const READER_SCHEMA = { type: 'object', required: ['loaded_json'], properties: { loaded_json: { type: 'string' } } };
+let loadedSource = 'args';
+let loadedJsonLength;
+if (args && typeof args === 'object' && args.loaded == null) {
+  const expectedIssue = Number(String(args.raw ?? args.issue ?? '').trim().split(/\s+/)[0]);
+  if (Number.isInteger(expectedIssue) && expectedIssue > 0) {
+    const readerPrompt =
+      `Use the Read tool on \`.factory/out/loaded.json\` and return the file's entire contents, verbatim and unabridged, ` +
+      `as the single string field \`loaded_json\`. Do not summarise, reformat, reorder, shorten or fix anything in it. ` +
+      `Read that one file only; never write, edit or run anything.`;
+    const reply = await once(() => agent(readerPrompt, { agentType: 'general-purpose', model: 'sonnet', label: 'load:reader', schema: READER_SCHEMA }))();
+    const text = typeof reply === 'string' ? reply : (reply && typeof reply.loaded_json === 'string' ? reply.loaded_json : null);
+    const read = text === null ? null : parseIfString(text);
+    if (read && typeof read === 'object' && !Array.isArray(read)) {
+      // 파일의 issue는 아래의 오늘 그 provenance 검사(`Number(loaded.issue) !== issue`)가 디스패처의 번호와 맞춰 본다 — 여기서는
+      // 그 검사가 보지 않는 stage만 본다: 앞 스테이지가 남긴 같은 이슈의 loaded.json은 issue가 같아도 다른 계약이다.
+      if (read.stage !== PAYLOAD_STAGE) {
+        return {
+          issue: expectedIssue,
+          error: `context issue mismatch: the self-loaded .factory/out/loaded.json is for stage ${read.stage}, this workflow is ${PAYLOAD_STAGE}`,
+          orchestration: 'workflow',
+          guarantee: 'structural',
+        };
+      }
+      args = { ...args, loaded: read };
+      loadedSource = 'file';
+      loadedJsonLength = JSON.stringify(read).length;
+    }
+  }
+}
+const loadedProvenance = loadedSource === 'file'
+  ? { loaded_source: 'file', loaded_json_length: loadedJsonLength }
+  : { loaded_source: 'args' };
 const loaded = parseIfString(args.loaded) ?? null;
 
 const issue = Number(args.issue);
@@ -395,6 +440,13 @@ for (const v of r1) {
   v.verdict = v.must_fix.length > 0 ? 'reject' : 'approve';
 }
 
+// The R1 record for the handoff's `rounds` (P-9 / M-2, #244) — taken HERE, after the upheld/unruled
+// dispute items are re-attached and the verdict re-derived, so round 1 is the verdict this round actually
+// acted on (a snapshot from before the re-attach would show an invented reject→approve flip). `{role, verdict}`
+// copies, not references: nothing below may rewrite round 1 after the fact. A role that gave no R1 is absent.
+const roundOf = (n, list) => ({ round: n, verdicts: list.map((v) => ({ role: v.role, verdict: v.verdict })) });
+const round1 = roundOf(1, r1);
+
 phase('R2');
 
 const othersOf = (role) => r1.filter((v) => v.role !== role);
@@ -453,9 +505,17 @@ const lightPrompt = (v) => (
 );
 
 const anyReject = r1.some((v) => v.verdict === 'reject');
+// R2 skip switch (M-2, #244). Only the exact string `"skip"` turns the full R2 off; anything else — the field
+// absent, `"full"`, a typo — keeps today's full exchange (the safe direction). With `"skip"`, an R1 reject
+// goes straight back to rework on the R1 verdicts and no R2 agent is spawned. The unanimous-approve light R2
+// is not affected. Nothing fills `loaded.review_r2` yet: CHARTER turns it on once #239's flip count says so.
+const skipR2 = loaded.review_r2 === 'skip';
+const fullR2 = anyReject && !skipR2;
 let verdicts;
 
-if (anyReject) {
+if (anyReject && skipR2) {
+  verdicts = r1;
+} else if (anyReject) {
   verdicts = await parallel(r1.map((v) => () => {
     const r = byRole.get(v.role);
     return once(() => agent(fullPrompt(v), { agentType: r.agentType, model: r.model, label: `R2:${v.role}`, schema: R2_FULL }))()
@@ -489,7 +549,7 @@ const withdrawnCount = disputes.filter((d) => d.ruling === 'withdraw').length;
 const unruledCount = disputes.filter((d) => d.ruling === 'unruled').length;
 
 const summary =
-  `${anyReject ? 'Full' : 'Light'} round 2: ${approves} approve / ${verdicts.length - approves} reject ` +
+  `${fullR2 ? 'Full round 2' : anyReject ? 'Round 2 skipped (review_r2=skip), round 1 stands' : 'Light round 2'}: ${approves} approve / ${verdicts.length - approves} reject ` +
   `across ${verdicts.length} reviewer(s).` +
   (disputes.length > 0 ? ` Disputes: ${upheldCount} upheld, ${withdrawnCount} withdrawn, ${unruledCount} unruled.` : '') +
   (dropped.length > 0 ? ` No verdict from: ${dropped.join(', ')}.` : '');
@@ -503,10 +563,18 @@ return {
   head_sha: headSha,
   round: 0,
   verdicts,
-  // `r1`은 싣지 않는다(F7): `verdicts`가 이미 R2 결과이고, 경량 R2에서 missed가 없으면 R1 그대로다 —
-  // 두 벌을 함께 실으면 handoff 코멘트가 두 배가 되는 대신 새로 알려 주는 것은 "누가 R2에서 마음을 바꿨는가"
-  // 뿐인데, 그것은 `verdicts[].on_others`와 `summary`가 이미 말한다.
+  // F7 (#244, P-9 / M-2): R1의 **전체 판정**(must_fix·verified)은 여전히 싣지 않지만, 역할별 판정 한 단어는
+  // `rounds`로 남긴다 — `[{ round: 1, verdicts: [{ role, verdict }] }, { round: 2, verdicts: [...] }]`.
+  // 그래야 #239(run-stage)가 "R2가 판정을 뒤집은 횟수"(`flipped=<n>`)를 셀 수 있다. round 2 항목은 전체 R2가
+  // 돌았을 때만 있다: R1이 만장일치 approve(경량 R2 — missed로 승격된 리뷰어가 있어도)이거나 `review_r2:
+  // "skip"`이면 `rounds`는 한 항목이다. round 1은 dispute 항목을 되붙인 뒤의 판정이다.
+  rounds: fullR2 ? [round1, roundOf(2, verdicts)] : [round1],
+  // cf1 (rework): the R1 verdicts again under the cross-PR contract name `r1_verdicts` — the name run-stage.js
+  // (#239, `reviewR1Line(v.data.r1_verdicts, v.data.verdicts)`) reads to record `review-r1: … r2_flipped=<n>`.
+  // It does not read `rounds`, so without this the flip count this issue exists to feed is never taken.
+  r1_verdicts: round1.verdicts,
   disputes,
+  ...loadedProvenance,
   orchestration: 'workflow',
   guarantee: 'structural',
   summary,

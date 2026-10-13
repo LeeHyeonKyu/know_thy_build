@@ -5,8 +5,10 @@
 // 여기(L1)가 판정한다**(P4-R4 — 에이전트가 "채택"이라 해도 근거를 세지 못하면 채택하지 않는다).
 //
 // 세 가지 불변식:
-//  1. **retro는 절대 라벨을 옮기지 않고 코드를 고치지 않는다.** 산출은 lessons/역할 예시·관점의 다크
+//  1. **retro는 코드를 고치지 않고, 기존 이슈의 라벨을 옮기지 않는다.** 산출은 lessons/역할 예시·관점의 다크
 //     append PR(자체 머지), 사람이 머지하는 제안 PR, 이슈 생성, `quarantine.toml`·`_retro.md` 갱신뿐이다.
+//     #230 — 예외는 하나, **자기가 방금 만든 성숙도 승격 이슈**의 `backlog → factory:queue` 한 걸음이고, 그것은 다른 모든 큐
+//     전이와 같은 문(`transition()` — 리허설 + 큐 진입 심사)으로만 간다(`makeRetroCreateIssue`).
 //  2. **retro 실패는 공장을 멈추지 않는다.** 전체 분석이 죽거나 스키마를 어기면 `_retro.md`에
 //     `last_full_failed`를 남기고 exit 0으로 물러난다 — `merges_since`를 리셋하지 않으므로 다음 머지가
 //     다시 시도한다. 집행 단계도 각각 격리돼서, 한 단계의 실패가 나머지 단계를 막지 않는다.
@@ -29,7 +31,7 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { run } from "../lib/exec.js";
 import { makeGh, resolveFactoryLogins } from "../lib/gh.js";
-import { loadCharter, loadHarness, loadRoles, upstreamRepoOf, orchestrationFor } from "../lib/config.js";
+import { loadCharter, loadHarness, loadRoles, upstreamRepoOf } from "../lib/config.js";
 import { routeMergedIssues } from "../lib/feedback/route.js";
 import { announceFailure } from "../lib/gha.js";
 import { loadInstallManifest, INSTALL_MANIFEST_PATH } from "../lib/feedback/install-manifest.js";
@@ -48,10 +50,14 @@ import {
 } from "../lib/retro/quarantine-ops.js";
 import { applyRoleAdditions as applyRoleAdditionsText } from "../lib/retro/role-additions.js";
 import { nextN, parseRetroState, renderRetroState, shouldRunFull } from "../lib/retro/state.js";
-import { stageMaxTurns, syncRunRecords, directAgentRole, directAgentClaudeArgs, directRoleSpec } from "./run-stage.js";
+import { stageMaxTurns, syncRunRecords } from "./run-stage.js";
 import { makeRecordsUploadGuard } from "../lib/breaker.js";
 import { hitApiError, apiErrorReason } from "../lib/verify-stage.js";
 import { HARNESS_LABEL } from "../lib/label-catalog.js";
+import { transition } from "../lib/transition.js";
+import { makeRehearsalChecker } from "../lib/rehearsal.js";
+import { makeQueueAdmission } from "../lib/admission.js";
+import { createBacklogIssueAndQueue } from "../lib/harness-request.js";
 export { HARNESS_LABEL };   // 재수출 — run-stage.js와 이 값이 같은 소스에서 왔다는 것을 테스트가 import equality로 확인한다
 
 const QUEUE_LABEL = "factory:queue";
@@ -144,7 +150,7 @@ const gapBody = (gap, agentReason) => [
   `- 목표 성숙도: ${gap?.target ?? "(승격 아님 — 하네스 보완)"}`,
   ...(agentReason ? ["", `retro 분석가의 설명: ${agentReason}`] : []),
   "",
-  "이 이슈는 retro가 만들었고 라벨을 옮기지 않습니다 — 큐에 들어간 뒤 정상적인 스테이지가 처리합니다.",
+  "이 이슈는 retro가 만들었습니다 — `backlog`로 태어나 다른 큐 전이와 같은 문(리허설 + 큐 진입 심사)을 지나 큐로 가고, 큐에 들어간 뒤 정상적인 스테이지가 처리합니다(#230).",
 ].join("\n");
 
 const round2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
@@ -841,11 +847,19 @@ export async function runRetro({ deps, force = false, now } = {}) {
       const title = gapTitle(gap);
       if (openTitles.has(title)) { applied.push({ step: "harness", title, skipped: "duplicate" }); continue; }
       const agentReason = (out.harness || []).find((x) => x?.target === gap?.target)?.reason;
+      /**
+       * #230 (E-3) — `labels`의 `factory:queue`는 **목적지 요청**이지 태어날 때의 라벨이 아니다. 이 요청을 GitHub에 옮기는 dep
+       * (main의 `makeRetroCreateIssue`)는 큐 라벨로 이슈를 만들지 않는다: `backlog`로 만들고 `transition()`으로 옮긴다. 요청의 모양은
+       * 기존 테스트(retro-bin.test.js ⓹ "성숙도 이슈")가 고정한다(tests_are_load_bearing) — 문은 그 아래 dep 한 자리에 있다.
+       * 큐에 못 들어갔으면(거부·문이 던짐) dep이 `{ issue, queued:false, queue_reason }`를 돌려주고, 여기서 기록 한 줄을 남긴다.
+       */
       const r = await step(`harness:${gap?.rule}`, () => d.createIssue({ title, body: gapBody(gap, agentReason), labels: [QUEUE_LABEL, HARNESS_LABEL] }));
       if (!r.ok) continue;
       openTitles.add(title);                                          // 같은 실행에서 같은 제목을 두 번 만들지 않는다
       harnessIssues += 1;
-      applied.push({ step: "harness", title, issue: r.value ?? null });
+      const made = r.value && typeof r.value === "object" ? r.value : { issue: r.value };
+      if (made.queued === false) record(`retro: harness issue #${made.issue} stays in backlog — not queued: ${made.queue_reason}`);
+      applied.push({ step: "harness", title, issue: made.issue ?? null, ...(made.queued === false ? { queued: false, queue_reason: made.queue_reason } : {}) });
     }
 
     // (e) flaky 격리 등록(§5.2.5-⑤, P4-R3) — 등록은 `quarantine.toml` 저장 + 이슈 코멘트까지 한 단계다.
@@ -981,73 +995,10 @@ export async function collectIssues({ gh, since }) {
  * `[factory].max_turns` 공통값, `[factory].max_turns_by_stage.retro`가 있으면 그것이 이긴다,
  * 둘 다 없으면 기본 12 — 를 그대로 재사용한다. 순수 함수라 하네스만 바꿔가며 테스트할 수 있다.
  */
-export function retroClaudeArgs({ harness, charter, ciSettingsPath, orchestration = "workflow", agentMd = null, model = null }) {
-  // #237 — `orchestration = "agent"`면 디스패처 없이 분석가 세션을 직접 띄운다(run-stage의 `directAgentClaudeArgs` 그대로).
-  // `model`은 roles.toml `[retro.analyst].model` — 없을 때만 md frontmatter가 정한다. 워크플로 경로와 같은 출처가 아니다:
-  // `.claude/workflows/factory-retro.js`는 factory-retro/opus를 하드코딩하고 roles.toml을 읽지 않는다(ADR-039 결정 2).
-  if (orchestration === "agent") {
-    const role = directAgentRole(agentMd, { model });
-    return directAgentClaudeArgs({ prompt: directRetroPrompt(), systemPrompt: role.systemPrompt, model: role.model, tools: role.tools, maxTurns: stageMaxTurns(harness, "retro"), settingsPath: ciSettingsPath, charter });
-  }
+export function retroClaudeArgs({ harness, charter, ciSettingsPath }) {
   const args = ["-p", "/factory-retro", "--permission-mode", "dontAsk", "--max-turns", String(stageMaxTurns(harness, "retro")), "--output-format", "json", "--settings", ciSettingsPath];
   if (charter?.budget?.usd_per_stage) args.push("--max-budget-usd", String(charter.budget.usd_per_stage));
   return args;
-}
-
-/** L1이 분석 직전에 쓰는 후보 파일(워크플로는 이 경로를 인자로, 직접 세션은 프롬프트로 받는다). */
-export const RETRO_CANDIDATES_PATH = ".factory/out/retro-candidates.json";
-
-/**
- * #237 — 직접 분석가 세션의 사용자 프롬프트. 규칙 본문은 시스템 프롬프트(`.claude/agents/factory-retro.md`의 Lens·You must not)에
- * 이미 있으므로, 여기에는 **역할 md에 없고 `.claude/workflows/factory-retro.js`가 주입하던 것**만 싣는다: 읽는 순서와 후보
- * 파일 경로, `period`를 그대로 베낄 것, `harness` 항목은 `maturity_gaps`와 일대일, 역할별 상한, 출력은 JSON 하나.
- * 워크플로 파일은 보호 경로라 import할 수 없다 — 그 프롬프트를 고치면 이것도 고친다(plan open_risks "prompt drift").
- */
-export function directRetroPrompt({ candidates = RETRO_CANDIDATES_PATH } = {}) {
-  return `You are the factory's retro analyst. Read, in this order: \`${candidates}\` (written by the retro job just now — \`period\`, `
-    + `the accumulated \`candidates\` with the \`runs\` each came from, the deterministic \`stats\`, the \`history\` of previous retros, `
-    + `and \`maturity_gaps\`, the harness gaps already detected); \`docs/factory/runs/*.md\` for the issues those candidates cite; `
-    + `\`.factory/lessons/*.md\` (each header's \`max\` is that role's cap — propose at most the headroom left); \`.claude/agents/*.md\` `
-    + `(Examples 8 good / 8 bad, Perspectives 6 per role); \`docs/factory/CHARTER.md\`.\n\n`
-    + `Copy \`period.from\` and \`period.to\` from \`${candidates}\` into your answer exactly as they appear — do not compute a date. `
-    + `\`harness\` entries must match the \`maturity_gaps\` targets one-for-one (anything else is dropped). Every \`evidence_runs\` entry `
-    + `is an issue you actually read; an item whose \`evidence_runs\` would be empty is left out, and empty arrays are a real answer.\n\n`
-    + `Return exactly the factory.retro.v1 fields (period, lessons, examples, perspectives, harness, proposals, summary). Your final `
-    + `message is parsed by a machine: emit ONLY that one JSON object — no prose, no code fence. Do not edit any file.`;
-}
-
-/**
- * #237 — main()의 분석가 dep 두 개(`claudeP`·`transcript`)를 한 곳에서 만든다(테스트가 이 생산자를 그대로 돈다). 경로는
- * `orchestrationFor(harness, "retro")`가 정한다. 직접 경로의 실패는 오늘과 같은 자리로 간다: 역할 md를 못 읽으면 던지고
- * (`runRetro`의 `step("claude-p")`가 잡아 `last_full_failed`), 빈·오류·스키마 불일치 봉투는 `runRetro`가 그대로 판정한다.
- * 직접 경로의 `transcript`는 빈 문자열이다: 트랜스크립트 구제는 디스패처의 재타이핑을 위한 것이고, 직접 세션의
- * tool_result는 분석가가 **읽은** 파일이지 답이 아니다 — 죽은 분석가가 읽은 파일 덕에 "성공"하면 안 된다.
- */
-export function makeRetroAnalyst({ root, harness, charter, roles = null, run: runner = run, home = homedir(), readFile = (p) => readFileSync(p, "utf8"), readTranscriptText = null }) {
-  const orchestration = orchestrationFor(harness, "retro");
-  // 역할 md·모델은 roles.toml `[retro.analyst]`에서 온다(`directRoleSpec`) — 이 직접 경로에서만. `workflow` 모드의 분석가는
-  // `.claude/workflows/factory-retro.js`가 하드코딩한 factory-retro/opus라 roles.toml을 바꿔도 따라가지 않는다(ADR-039 결정 2).
-  let r = roles;
-  if (!r) { try { r = loadRoles(root); } catch { r = {}; } }
-  const spec = directRoleSpec(r, "retro");
-  const outDir = join(root, ".factory/out");
-  return {
-    orchestration,
-    claudeP: async ({ period, candidates, stats, history, maturity_gaps }) => {
-      mkdirSync(outDir, { recursive: true });
-      writeFileSync(join(root, RETRO_CANDIDATES_PATH), `${JSON.stringify({ period, candidates, stats, history, maturity_gaps }, null, 2)}\n`);
-      const agentMd = orchestration === "agent" ? readFile(join(root, spec.md)) : null;
-      const args = retroClaudeArgs({ harness, charter, ciSettingsPath: join(root, ".factory/ci-settings.json"), orchestration, agentMd, model: spec.model });
-      const r = await runner("claude", args, { cwd: root, env: { CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS: "0", CLAUDE_PROJECT_DIR: root } });
-      writeFileSync(join(outDir, "retro.json"), r.stdout);
-      try { return JSON.parse(r.stdout); } catch { return { is_error: true, result: r.stdout + r.stderr }; }
-    },
-    transcript: (envelope) => {
-      if (orchestration === "agent") return "";
-      if (readTranscriptText) return readTranscriptText(envelope) || "";
-      return readTranscript({ root, home, sessionId: envelope?.session_id, readFile: (p) => (existsSync(p) ? readFileSync(p, "utf8") : null) }) || "";
-    },
-  };
 }
 
 /**
@@ -1138,7 +1089,38 @@ export function roleFileMap(roles) {
   return map;
 }
 
-/** CLI 진입: 실제 의존성 조립 */
+/**
+ * #230 (허점 원장 E-3) — retro의 `createIssue` dep. **retro는 큐 라벨을 단 이슈를 만들지 않는다**: 요청이 `factory:queue`를 목적지로
+ * 들면 이슈를 `backlog`로(요청의 라벨 순서 그대로 `factory:queue` 자리에 `backlog`) 만들고, 큐로 가는 한 걸음은 flaky 수확(gates.js)·
+ * 하네스 요청(harness-request.js)과 같은 문 — 리허설(`makeRehearsalChecker`) **과** 큐 진입 심사(`makeQueueAdmission`)를 실은
+ * `transition()` — 이 만든다. 검사기는 이 함수가 직접 조립한다(배선을 빠뜨린 retro가 조용히 문을 여는 길이 없게; `skipRehearsal`은 쓰지 않는다).
+ *   - 큐에 들어가면 `{ issue, queued: true }`.
+ *   - 거부되거나 문이 던지면 이슈는 `backlog`에 남고, 이슈에 사유와 다음 걸음을 적은 코멘트(`createBacklogIssueAndQueue` → `notQueuedComment`, 하네스 이슈의
+ *     `factory-harness-not-queued` 모양)를 달고 `{ issue, queued: false, queue_reason }`을 돌려준다 — 던지지 않는다(이슈는 이미 있다).
+ *     수용한 위험(ADR-025의 잠금): 리허설이 낡으면 승격 이슈도 사람의 `factory rehearse` + `:next`까지 backlog에 선다.
+ * 큐를 목적지로 들지 않은 요청(flaky 재작성 이슈 등)은 그대로 만든다.
+ */
+// #247 dw5 — `queueTail`은 그 꼬리 자체다(기본값이 유일한 구현 `createBacklogIssueAndQueue`). 주입은 테스트가 "같은 함수를 부른다"를
+// 관측하기 위한 것이다 — 사본을 끼울 자리가 아니다(test_247_retro_promotion_uses_the_single_backlog_queue_tail).
+// #249 (dw4) — 여기의 `makeQueueAdmission`은 run-stage의 심사기와 **다른 프로세스**(retro 워크플로)의 유일한 심사기다: run-stage main()의
+// 클로저는 retro 프로세스에 없으므로 나눠 받을 수 없고, 이것이 dw4 루브릭("retro's checker resolves factory logins")이 확인하라는, retro가 자기 env로 푸는 factory login을 실은 심사기다. 규칙은 둘 다
+// lib/admission.js 한 곳에서 온다. 9f6dc7a 브랜치 그대로다(test_230_retro_promotion_issue_is_born_backlog_and_transitioned가 이것을 부른다).
+export function makeRetroCreateIssue({ gh, root, charter, harness, env, queueTail = createBacklogIssueAndQueue }) {
+  const rehearsal = makeRehearsalChecker({ gh, root, branch: () => harness?.project?.default_branch || "main" });
+  const admission = makeQueueAdmission({ gh, charter, factoryLogins: () => resolveFactoryLogins({ gh, env }) });
+  return async ({ title, body, labels = [] }) => {
+    if (!labels.includes(QUEUE_LABEL)) return gh.createIssue({ title, body, labels });
+    // 리뷰 arch1 — 만들기 → 문 → 거부 코멘트의 꼬리는 하네스 요청과 **같은 함수**다(사본을 두지 않는다).
+    return queueTail({
+      gh, title, body, labels: labels.map((l) => (l === QUEUE_LABEL ? "backlog" : l)),
+      reason: `retro maturity promotion: ${title}`,
+      transitionIssue: ({ issue, to, reason }) => transition({ gh, issue, to, reason, rehearsal, admission }),
+      parkedFeature: false,
+    });
+  };
+}
+
+/** CLI 진입: 실제 의존성 조립(`retroMainDeps`) 뒤 `runRetro`. */
 async function main() {
   const argv = process.argv.slice(2);
   const force = argv.includes("--force");
@@ -1146,18 +1128,31 @@ async function main() {
   const repo = process.env.FACTORY_REPO || JSON.parse((await run("gh", ["repo", "view", "--json", "nameWithOwner"])).stdout).nameWithOwner;
   const runnerId = process.env.FACTORY_RUNNER_ID || `local/${hostname()}`;
   const gh = makeGh({ run, repo });
+  const now = new Date().toISOString();
+  // `process.env`는 **워크플로 진입점인 여기** 한 줄에만 산다(1.4.0 핫픽스) — 조립은 그것을 `env`로 받는다.
+  const assembled = retroMainDeps({ root, repo, runnerId, gh, env: process.env, now });
+  if (assembled.dormant) { console.error(assembled.dormant); process.exit(0); }
+  process.exit(await runRetro({ deps: assembled.deps, force, now }));
+}
 
-  // 잠드는 건 정상이지만 "왜"는 반드시 말한다. retro는 라벨을 옮기지 않으므로 잠들어도 아무것도 막지 않는다.
+/**
+ * main()의 설정 적재 + 의존성 조립(#230에서 main 밖으로 꺼냈다 — 테스트가 프로덕션 조립을 그대로 부르게; self-critique f4).
+ * CHARTER·harness·roles를 `root`에서 main과 같은 방식으로 읽고, 잠들 이유가 있으면 `{ dormant: <말> }`, 아니면 `{ deps }`.
+ */
+// #249 (dw4) — 이것은 retro.js main()의 조립이다. dw3(심사기 하나)·non_goal이 금하는 것은 run-stage.js main()의 exported assembler이고, 그쪽 main()은
+// 여전히 자기 안에서 `deps`를 조립한다. 9f6dc7a 브랜치 그대로다(retro-bin.test.js test_230이 이 이름으로 프로덕션 조립을 부른다).
+export function retroMainDeps({ root, repo, runnerId, gh, env, now }) {
+  // 잠드는 건 정상이지만 "왜"는 반드시 말한다. retro는 기존 이슈의 라벨을 옮기지 않으므로 잠들어도 아무것도 막지 않는다.
   let charter, harness, roles;
   try { charter = loadCharter(root); harness = loadHarness(root); }
-  catch (e) { console.error(`factory: retro dormant — ${e.message}`); process.exit(0); }
-  if (charter.status !== "ready") { console.error(`factory: CHARTER status is ${charter.status} — retro dormant`); process.exit(0); }
+  catch (e) { return { dormant: `factory: retro dormant — ${e.message}` }; }
+  if (charter.status !== "ready") return { dormant: `factory: CHARTER status is ${charter.status} — retro dormant` };
   try { roles = loadRoles(root); }
-  catch (e) { console.error(`factory: .factory/roles.toml unreadable — ${e.message}`); process.exit(0); }
+  catch (e) { return { dormant: `factory: .factory/roles.toml unreadable — ${e.message}` }; }
 
   const retro = charter.retro?.every_merges || {};
-  const now = new Date().toISOString();
   const runsDir = join(root, "docs/factory/runs");
+  const outDir = join(root, ".factory/out");
   const statePath = join(runsDir, STATE_FILE);
   const readText = (p) => (existsSync(p) ? readFileSync(p, "utf8") : "");
   const defaultBranch = harness.project?.default_branch ?? "main";
@@ -1212,11 +1207,20 @@ async function main() {
      * 파싱에 실패해도 원본 stdout은 `.factory/out/retro.json`에 남는다 — 사후 감사의 1차 증거다.
      */
     ciSettingsPresent: async () => existsSync(join(root, ".factory/ci-settings.json")),
+    claudeP: async ({ period, candidates, stats, history, maturity_gaps }) => {
+      mkdirSync(outDir, { recursive: true });
+      writeFileSync(join(outDir, "retro-candidates.json"), `${JSON.stringify({ period, candidates, stats, history, maturity_gaps }, null, 2)}\n`);
+      const args = retroClaudeArgs({ harness, charter, ciSettingsPath: join(root, ".factory/ci-settings.json") });
+      const r = await run("claude", args, { cwd: root, env: { CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS: "0", CLAUDE_PROJECT_DIR: root } });
+      writeFileSync(join(outDir, "retro.json"), r.stdout);
+      try { return JSON.parse(r.stdout); } catch { return { is_error: true, result: r.stdout + r.stderr }; }
+    },
     /**
-     * #237 — `claudeP`(후보 파일을 쓰고 `claude -p`를 부른다)와 `transcript`(이 회차의 세션 트랜스크립트, KTB-7 — run-stage와 같은
-     * `readTranscript` 계산)는 `makeRetroAnalyst` 한 생산자에서 온다. `orchestration = "agent"`면 분석가를 직접 띄우고 트랜스크립트는 쓰지 않는다.
+     * 이 회차의 세션 트랜스크립트 전문(KTB-7). `run-stage.js`와 **같은 계산**을 쓴다
+     * (`lib/stage-artifact.js`의 `readTranscript`) — 스테이지마다 다른 경로 규칙을 갖고 있으면
+     * "트랜스크립트가 1순위 출처"라는 계약이 한쪽만 고쳐지는 순간 갈라진다.
      */
-    ...(({ claudeP, transcript }) => ({ claudeP, transcript }))(makeRetroAnalyst({ root, harness, charter, roles, run })),
+    transcript: (envelope) => readTranscript({ root, home: homedir(), sessionId: envelope?.session_id, readFile: (p) => (existsSync(p) ? readFileSync(p, "utf8") : null) }) || "",
     applyLessons: ({ role, adopted, today, minEvidence, citations }) => {
       const rel = fileOf.get(role)?.lessons;
       const text = rel ? readText(join(root, rel)) : "";
@@ -1241,7 +1245,8 @@ async function main() {
       } catch (e) { console.error(`factory: retro could not read package.json — ${e?.message || e}`); }
       return detectMaturityGaps({ files, harness, manifestDeps });
     },
-    createIssue: (issue) => gh.createIssue(issue),
+    // #230 — 성숙도 승격 이슈는 backlog로 태어나 리허설 + 심사를 실은 transition()으로 큐에 간다. 그 밖의 이슈는 그대로 만든다.
+    createIssue: makeRetroCreateIssue({ gh, root, charter, harness, env }),
     /** 등록은 세 가지가 한 단계다: 판정 → `quarantine.toml` 저장 → 그 flaky 이슈에 마커 코멘트. */
     registerQuarantine: async ({ issues, commentsByIssue, now: at }) => {
       const { q, registered } = registerFromFlakyIssues({ issues, commentsByIssue, quarantine: loadQuarantine(root), now: at, K: charter.limits?.K });
@@ -1263,8 +1268,7 @@ async function main() {
      * 피드백 루프 Task 3 — 이번 창에 머지된 이슈의 증거를 분류해 주인에게 보낸다(spec §7).
      * `upstream`이 없으면 교차 저장소 호출은 **한 번도** 나가지 않는다(로컬 코멘트만).
      */
-    // `process.env`는 **워크플로 진입점인 여기** 한 줄에만 산다(1.4.0 핫픽스).
-    routeFeedback: (args) => routeFeedbackArm({ ...args, gh, repo, root, harness, env: process.env }),
+    routeFeedback: (args) => routeFeedbackArm({ ...args, gh, repo, root, harness, env }),
     /** 열린 제안 PR — 같은 창의 제안을 두 번 열지 않기 위한 dedup 재료(본문 마커 또는 제목). */
     listProposalPrs: () => gh.prList({ label: PROPOSAL_LABEL, state: "open" }),
     publishProposal: ({ files, title, body, date }) => openProposalPr({ run, gh, cwd: root, defaultBranch, files, title, body, date, log: (m) => console.log(m) }),
@@ -1274,8 +1278,7 @@ async function main() {
     sync: ({ expectBlob } = {}) => retroRecordsSync({ run, root, runnerId, expectBlob }),
     nBounds: { min: retro.min ?? 1, max: retro.max ?? Infinity },
   };
-
-  process.exit(await runRetro({ deps, force, now }));
+  return { deps };
 }
 
 /**

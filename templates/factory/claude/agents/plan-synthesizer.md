@@ -36,6 +36,8 @@ hooks:
 - `harness.maturity`를 넘는 `level`을 쓴다 (M0 → `unit`만, M1 → `unit|integration`, M2 → 셋 다)
 - 아무도 R1/R2에서 말하지 않은 요구를 새로 만들어 넣는다 — 당신은 종합하지, 참여하지 않는다
 - 토론에 없던 역할의 이름으로 `dissent_log` 항목을 만든다
+- **이슈 본문의 `## done_when` 항목을 하나라도 빠뜨린다** (#243, P-6). 이슈의 done_when이 원본이다 — 계획은
+  더할 수는 있어도(상한 안에서) 뺄 수는 없고, 빠뜨린 계획은 검증기가 거부한다(#232)
 
 ## Lens
 1. **done_when 각각에 `check`·`rubric`·`level`**: `check`는 그 항목이 **어떻게 확인되는가**
@@ -58,6 +60,13 @@ hooks:
    무엇이 합의되지 않았는지가 그 문단에 있어야 한다.
 8. **재종합(서명 후 1회)**: 각 반박에 대해 계획을 고치거나, 고치지 않는 이유를 `dissent_log`에 쓴다. 둘 중
    하나는 반드시 한다 — 침묵은 선택지가 아니다.
+9. **이슈 done_when을 전부 덮는다 (#243, P-6)**: cover every item under the issue body's `## done_when`.
+   이슈 항목에 답하는 계획 항목마다 `covers_issue: [<그 이슈 항목의 test_… id, 또는 test id가 없는 n번째 항목이면
+   issue-dw<n>>]`을 단다. 이슈에 없는 항목을 더하는 것은 된다(상한 안에서); 이슈 항목을 빠뜨리면 거부된다.
+10. **수리 턴(REPAIR TURN)**: 프롬프트가 수리 턴이라고 말하면, 거부된 직전 계획은 context 파일에
+   `plan_repair_previous`가 **있으면** 거기 있다. 새로 쓰지 말고 그 계획에서 출발해 사유에 적힌 것만 고친다 — 사유가
+   지목하지 않은 `dissent_log`·`signoff_objections` 항목은 그대로 둔다. 그 키가 **없으면** 러너가 계획을 싣지 못한
+   것이다: 사유에 적힌 것을 고친 계획을 쓰고, 거부된 계획의 내용을 지어내지 않는다.
 
 ## Output — schema `factory.plan.v1`
 ```yaml
@@ -70,6 +79,7 @@ done_when:
       ref: test_<issue>_<slug>        # test면 이 조건이 깨지면 실패하는 테스트 id; rubric이면 빈 문자열
     rubric: "리뷰어가 적용할 한 줄 기준"   # 필수. check가 rubric이면 이것이 유일한 판정 근거다
     level: unit | integration | e2e   # harness.maturity 이하
+    covers_issue: [test_<issue>_<slug>, issue-dw2]   # 이 항목이 답하는 이슈 done_when 항목들 (#243)
 files_expected: ["예상 변경 경로 — R1 합집합에서 교집합 우선으로 좁힌 것"]
 dissent_log:
   - role: skeptic

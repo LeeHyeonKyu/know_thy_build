@@ -41,6 +41,7 @@ function fakeRun(overrides = []) {
     calls.push({ cmd, args, opts });
     const line = [cmd, ...args].join(" ");
     for (const o of overrides) if (o.match(line)) return { code: o.code ?? 1, stdout: o.stdout ?? "", stderr: o.stderr ?? "" };
+    if (line === "git --version") return { code: 0, stdout: "git version 2.43.0\n", stderr: "" };   // #279: a modern runner git
     return { code: 0, stdout: "", stderr: "" };
   };
   run.calls = calls;
@@ -103,7 +104,7 @@ test("runRehearsal: every stage-shaped step runs on the runner, in order, and a 
   const run = fakeRun();
   const { steps } = await rehearse({ run });
   expect(steps.map((s) => s.name)).toEqual([
-    "lint", "unit", "test_files", "test_one", "lint_file", "qa-evidence", "clean-check", "prove-test", "gh-auth", "gh-labels", "gh-push",
+    "lint", "unit", "test_files", "test_one", "lint_file", "qa-evidence", "clean-check", "prove-test", "gh-auth", "gh-labels", "gh-push", "git-version",
   ]);
   expect(steps.every((s) => s.status === "GREEN")).toBe(true);
   expect(rehearsalOk(steps)).toBe(true);
@@ -112,7 +113,9 @@ test("runRehearsal: every stage-shaped step runs on the runner, in order, and a 
   expect(cmds).toMatch(/npx vitest run 'factory\/test\/labels\.test\.js'/);
   expect(cmds).toMatch(/-t 'labels: the graph refuses a skip'/);
   expect(cmds).toMatch(/node factory\/bin\/lint\.js --file 'factory\/lib\/labels\.js'/);
-  expect(cmds).toMatch(/gh api user/);
+  // ADR-038: 설치 토큰은 `gh api user`를 부를 수 없다(403) — 저장소 메타데이터 읽기로 토큰·접근을 묻는다
+  expect(cmds).toMatch(/gh api repos\/\{owner\}\/\{repo\} --jq \.full_name/);
+  expect(cmds).not.toMatch(/gh api user/);
   expect(cmds).toMatch(/gh label list/);
   expect(cmds).toMatch(/factory\/rehearsal-9001/);
   // 모든 명령에는 상한이 있다 — 러너에서 무한히 도는 게이트는 리허설이 아니라 새 사고다.
@@ -723,4 +726,65 @@ test("timedCommand: without coreutils the step still runs and says the cap is no
   expect(r2.stdout).toContain("ok");
   expect(r2.stderr).toContain("FAKE-TIMEOUT -k 10 7");
   expect(r2.stderr).not.toContain(NO_TIMEOUT_BINARY);
+});
+
+// ── #279 — git-version probe (ADR-038 fix, PR #278: GIT_CONFIG_COUNT needs git >= 2.31) ─────────────
+const gitSays = (stdout, code = 0) => fakeRun([{ match: (l) => l === "git --version", code, stdout }]);
+const gitStep = (steps) => steps.find((s) => s.name === "git-version");
+
+test("test_279_git_version_probe_is_red_below_2_31_and_names_the_reason", async () => {
+  // Below 2.31 git silently ignores GIT_CONFIG_COUNT/KEY_n/VALUE_n — the merge job's post-window auth vanishes.
+  // 2.4.0 is the lexical trap ("2.4" > "2.31" as strings); 2.30.9 is the boundary.
+  for (const v of ["git version 2.25.1", "git version 2.30.9", "git version 2.4.0"]) {
+    const run = gitSays(`${v}\n`);
+    const { steps, ok } = await rehearse({ run });
+    const g = gitStep(steps);
+    expect(g?.status, v).toBe("RED");
+    expect(g.detail, v).toContain("GIT_CONFIG_COUNT");
+    expect(g.detail, v).toMatch(/ADR-038/);
+    expect(g.detail, v).toContain(v.replace("git version ", ""));   // the row names the version it saw
+    expect(ok, v).toBe(false);
+    // A RED here never stops the rehearsal — every other step still ran and is GREEN.
+    expect(steps.filter((s) => s.name !== "git-version").every((s) => s.status === "GREEN"), v).toBe(true);
+    expect(steps.map((s) => s.name), v).toContain("gh-push");
+    // The probe asks the git the engine spawns (no shell, no login profile), in the repo's cwd.
+    expect(run.calls.some((c) => c.cmd === "git" && c.args.join(" ") === "--version" && c.opts?.cwd === "/repo"), v).toBe(true);
+  }
+  // 2.31 and newer — including numeric 2.100 (a float compare reads it as 2.1) and vendor suffixes — is GREEN.
+  for (const v of ["git version 2.31.0", "git version 2.100.0", "git version 2.39.3 (Apple Git-146)", "git version 2.43.0.windows.1", "git version 3.0.0"]) {
+    const { steps, ok } = await rehearse({ run: gitSays(`${v}\n`) });
+    expect(gitStep(steps)?.status, v).toBe("GREEN");
+    expect(ok, v).toBe(true);
+  }
+  // Unparseable output and a failing command are RED with a reason — never a silent GREEN.
+  for (const [out, code] of [["", 0], ["not a git\n", 0], ["git version two\n", 0], ["", 127]]) {
+    const { steps } = await rehearse({ run: gitSays(out, code) });
+    const g = gitStep(steps);
+    expect(g?.status, JSON.stringify([out, code])).toBe("RED");
+    expect(g.detail.length, JSON.stringify([out, code])).toBeGreaterThan(0);
+    expect(g.detail).toContain("GIT_CONFIG_COUNT");
+  }
+  // An injected `run` that rejects on the probe is RED too, and the rehearsal still finishes.
+  const base = fakeRun();
+  const throwing = async (cmd, args = [], opts = {}) => {
+    if (cmd === "git" && args.join(" ") === "--version") throw new Error("spawn git ENOENT");
+    return base(cmd, args, opts);
+  };
+  const { steps: tSteps } = await rehearse({ run: throwing });
+  expect(gitStep(tSteps)?.status).toBe("RED");
+  expect(gitStep(tSteps).detail).toMatch(/ENOENT/);
+  expect(tSteps.map((s) => s.name)).toContain("gh-push");
+});
+
+test("test_279_rehearse_table_lists_the_git_version_step", async () => {
+  const modern = await rehearse({ run: gitSays("git version 2.43.0\n") });
+  expect(modern.ok).toBe(true);
+  const table = renderRehearsalTable(modern.steps);
+  expect(table).toMatch(/^\| git-version \| GREEN \| /m);
+  expect(rehearsalReport({ steps: modern.steps }).steps.map((s) => s.name)).toContain("git-version");
+
+  const old = await rehearse({ run: gitSays("git version 2.25.1\n") });
+  const oldTable = renderRehearsalTable(old.steps);
+  const row = oldTable.split("\n").find((l) => l.startsWith("| git-version |"));
+  expect(row).toMatch(/^\| git-version \| RED \| .*GIT_CONFIG_COUNT/);
 });

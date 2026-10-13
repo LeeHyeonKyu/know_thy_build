@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { checkHarness, checkCommands, checkSetupDirtiesTree, checkQaEvidenceProbe, runSetupProbe } from "../lib/doctor/harness.js";
 import { checkFiles, checkFilesTracked, checkCharter, checkRoles, checkAgents, checkSkills, checkSettings, checkHooks, checkWorkflows, checkGitHub, checkFactoryIdentity, checkFactoryUpstream, checkProtectedParity, checkRehearsal } from "../lib/doctor/factory.js";
 import { checkRehearsalCurrent } from "../lib/rehearsal.js";
+import { checkPlatform } from "../lib/doctor/platform.js";
 import { loadHarness, loadHarnessRaw, loadRoles, loadCharter } from "../lib/config.js";
 import { makeGh, resolveRepo } from "../lib/gh.js";
 import { LABELS } from "../lib/label-catalog.js";
@@ -221,6 +222,9 @@ export async function doctorCommand({ root, pkgRoot, argv = [], io, run, gh, dep
           // KTB-44 / ADR-025 — 기록된 리허설이 지금의 하네스에 대한 것인가. 이 판정만이 "큐가 열려
           // 있는가"를 doctor에서 말한다(transition.js가 같은 해시로 `→ factory:queue`를 막는다).
           checks.push(...(await checkRehearsalFn({ gh: client, root, readFile, harness })));
+          // #234 (gap P-8) — private + 호스팅 러너(포함 분이 떨어지면 sweeper까지 함께 멈춘다)와 Free 플랜 private(두 배우
+          // 모드 강등). gh가 해석된 이 가드 안에만 선다: `--offline`·repo 미해석에서는 플랫폼 API를 한 번도 부르지 않는다.
+          checks.push(...(await (deps.checkPlatform || checkPlatform)({ gh: client, repo: theRepo })));
         } else {
           checks.push(checkRehearsalCurrent({ skipped: "repo unresolved" }));
         }
