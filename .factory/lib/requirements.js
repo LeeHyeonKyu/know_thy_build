@@ -1,6 +1,7 @@
 import { latestHandoff } from "./handoff.js";
 import { validate } from "./schemas.js";
 import { verifyReviewQuorum } from "./review-quorum.js";
+import { relandBindingMatches } from "./verify-stage.js";
 
 const fail = (reason) => ({ ok: false, reason });
 const pass = { ok: true };
@@ -143,6 +144,16 @@ const RULES = {
   },
   "factory:planned"(ctx) {
     const { h, err } = need(ctx, "plan", "plan.v1"); if (err) return err;
+    /*
+     * #293 — a re-land fast-path plan (roles=[], rounds=0, `reland` marker) passes the plan stage's own transition only with the
+     * binding the runner holds in THIS transition (`ctx.reland`, set by run-stage's fast path through buildCtxExtra). Without it the
+     * marker is a claim and is refused — it never falls through to a weaker check. Where no roster is compared at all (the
+     * self-gate retry implement → planned, which only needs a plan), nothing changes.
+     */
+    if (ctx.roster && h.data.reland !== undefined && h.data.reland !== null) {
+      if (!relandBindingMatches(h.data.reland, ctx.reland)) return fail("plan carries a re-land fast-path marker the runner did not bind in this transition (#293) — its roles/rounds are not exempt");
+      return pass;
+    }
     if (ctx.roster && !sameSet(h.data.roles, ctx.roster)) return fail(`plan roles [${h.data.roles}] != roster [${ctx.roster}]`);
     if (ctx.expectedRounds != null && h.data.rounds !== ctx.expectedRounds) return fail(`plan rounds ${h.data.rounds} != expected ${ctx.expectedRounds}`);
     return pass;
