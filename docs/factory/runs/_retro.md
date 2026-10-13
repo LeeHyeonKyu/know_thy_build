@@ -1,45 +1,44 @@
 # Retro State
 
-- last retro: 2026-10-13T08:22:38.552Z
+- last retro: 2026-10-13T09:08:51.154Z
 - merges since last retro: 0
-- current N: 1
+- current N: 2
 
 ## History (last 5)
 
 | at | yield | n_before | n_after | needs_human_since |
 | --- | --- | --- | --- | --- |
-| 2026-10-12T10:20:44.131Z | 0 | 1 | 2 | 0 |
 | 2026-10-12T12:10:57.026Z | 0 | 2 | 1 | 2 |
 | 2026-10-12T14:19:32.174Z | 0 | 1 | 1 | 2 |
 | 2026-10-12T15:05:51.211Z | 0 | 1 | 2 | 0 |
 | 2026-10-13T08:22:38.552Z | 1 | 2 | 1 | 2 |
+| 2026-10-13T09:08:51.154Z | 0 | 1 | 2 | 0 |
 
 ## Stats
 
 | metric | this window | cumulative |
 | --- | --- | --- |
-| merged | 2 | 36 |
-| review rounds avg | 1 | 1.53 |
-| rounds/issue (plan/impl/review) | 1 / 1 / 1 | 1.22 / 1.94 / 1.53 |
-| escaped defects | 0 | 31 |
-| revert rate | 0.00 (0/2) | 0.00 (0/36) |
-| needs-human | 2 | 100 |
-| rejects by role | 없음 | spec-conformance 12, qa 5, correctness 17, architecture 7, security 5 |
-| reviewer overlap | 없음 | 0.50 (25/50, runs 76) |
+| merged | 1 | 37 |
+| review rounds avg | 2 | 1.54 |
+| rounds/issue (plan/impl/review) | 2 / 4 / 2 | 1.24 / 2 / 1.54 |
+| escaped defects | 2 (#237×2) | 33 |
+| revert rate | 0.00 (0/1) | 0.00 (0/37) |
+| needs-human | 0 | 100 |
+| rejects by role | correctness 1 | spec-conformance 12, qa 5, correctness 18, architecture 7, security 5 |
+| reviewer overlap | 1.00 (1/1, runs 4) | 0.51 (26/51, runs 80) |
 | unique findings by role | 없음 | spec-conformance 5, qa 5, correctness 7, architecture 4, security 4 |
-| qa na ratio | 0.32 (6/19 claims, na-heavy 1/3 approvals) | 0.23 (85/370 claims, na-heavy 12/55 approvals) |
-| cost (usd) | 97.69 | 1604.42 |
-| tokens | input 1741196 / output 152271 | input 39801113 / output 3273852 |
-| retro cost (usd) | 1.57 | 25.05 |
-| retro tokens | input 4 / output 2782 | input 74 / output 55982 |
-| full retros | — | 20 |
+| qa na ratio | 0.00 (0/7 claims, na-heavy 0/1 approvals) | 0.23 (85/377 claims, na-heavy 12/56 approvals) |
+| cost (usd) | 6.81 | 1611.23 |
+| tokens | input 136293 / output 11198 | input 39937406 / output 3285050 |
+| retro cost (usd) | 0.86 | 25.91 |
+| retro tokens | input 4 / output 1625 | input 78 / output 57607 |
+| full retros | — | 21 |
 
 ### Rounds per issue (this window)
 
 | issue | plan | implement | review | escaped |
 | --- | --- | --- | --- | --- |
-| #293 | 1 | 1 | 1 | 0 |
-| #288 | 1 | 1 | 1 | 0 |
+| #237 | 2 | 4 | 2 | 2 |
 
 ### Phase-2 gate baseline (this session)
 
@@ -53,11 +52,11 @@
 ```json
 {
   "cursor": {
-    "last_retro_at": "2026-10-13T08:22:38.552Z",
+    "last_retro_at": "2026-10-13T09:08:51.154Z",
     "last_record_offsets": {}
   },
   "merges_since": 0,
-  "n": 1,
+  "n": 2,
   "history": [
     {
       "at": "2026-09-14T14:00:58.920Z",
@@ -1176,6 +1175,54 @@
       ],
       "n_before": 2,
       "n_after": 1
+    },
+    {
+      "at": "2026-10-13T09:08:51.154Z",
+      "yield": 0,
+      "needs_human_since": 0,
+      "applied": [
+        {
+          "step": "feedback-route",
+          "issues": [
+            237
+          ],
+          "actions": [
+            {
+              "kind": "warning",
+              "step": "feedback-route",
+              "login": "LeeHyeonKyu",
+              "current": "ktb-factory[bot]",
+              "reason": "current factory identity: ktb-factory[bot] (machine user/app, FACTORY_BOT_LOGIN); older runs in this window ran under a shared identity (LeeHyeonKyu) — their human decisions are unverifiable, nothing to register"
+            },
+            {
+              "kind": "product",
+              "step": "feedback-route",
+              "issue": 237,
+              "count": 1
+            }
+          ]
+        },
+        {
+          "step": "lessons:factory-builder",
+          "added": [
+            "L-2026-10-13-01"
+          ],
+          "rejected": [],
+          "evicted": [],
+          "cited": []
+        },
+        {
+          "step": "publish-lessons",
+          "pr": 224,
+          "merged": false,
+          "reason": "gh pr merge failed (1): X Pull request LeeHyeonKyu/know_thy_build#224 is not mergeable: the base branch policy prohibits the merge.\nTo have the pull request merged after all the requirements have been met, add the `--auto` flag.\nTo use administrator privileges to immediately merge the pull request, add the `--admin` flag.",
+          "files": [
+            ".factory/lessons/factory-builder.md"
+          ]
+        }
+      ],
+      "n_before": 1,
+      "n_after": 2
     }
   ],
   "candidates": {
@@ -3015,75 +3062,76 @@
     ]
   },
   "stats": {
-    "merged": 2,
-    "review_rounds_avg": 1,
-    "plan_rounds_avg": 1,
-    "implement_rounds_avg": 1,
+    "merged": 1,
+    "review_rounds_avg": 2,
+    "plan_rounds_avg": 2,
+    "implement_rounds_avg": 4,
     "rounds_per_issue": [
       {
-        "issue": 293,
-        "plan": 1,
-        "implement": 1,
-        "review": 1
-      },
-      {
-        "issue": 288,
-        "plan": 1,
-        "implement": 1,
-        "review": 1
+        "issue": 237,
+        "plan": 2,
+        "implement": 4,
+        "review": 2
       }
     ],
-    "escaped_defects": 0,
-    "escaped_defects_detail": [],
+    "escaped_defects": 2,
+    "escaped_defects_detail": [
+      {
+        "issue": 237,
+        "count": 2
+      }
+    ],
     "reverts": 0,
     "reverted_issues": [],
     "revert_rate": 0,
-    "rejects_by_role": {},
-    "review_runs": 2,
-    "findings_total": 0,
-    "overlapping_findings": 0,
+    "rejects_by_role": {
+      "correctness": 1
+    },
+    "review_runs": 4,
+    "findings_total": 1,
+    "overlapping_findings": 1,
     "unique_findings_by_role": {},
-    "overlap_ratio": 0,
-    "needs_human": 2,
-    "qa_approvals": 3,
-    "qa_claims_total": 13,
-    "qa_na_total": 6,
-    "qa_na_ratio": 0.32,
-    "qa_na_heavy_approvals": 1,
+    "overlap_ratio": 1,
+    "needs_human": 0,
+    "qa_approvals": 1,
+    "qa_claims_total": 7,
+    "qa_na_total": 0,
+    "qa_na_ratio": 0,
+    "qa_na_heavy_approvals": 0,
     "usage": {
-      "cost_usd": 97.687342,
+      "cost_usd": 6.812948,
       "tokens": {
-        "input": 1741196,
-        "output": 152271
+        "input": 136293,
+        "output": 11198
       }
     },
     "retro_usage": {
-      "cost_usd": 1.567803,
+      "cost_usd": 0.861088,
       "tokens": {
         "input": 4,
-        "output": 2782
+        "output": 1625
       }
     }
   },
   "stats_total": {
-    "merged": 36,
-    "review_rounds_avg": 1.53,
-    "plan_rounds_avg": 1.22,
-    "implement_rounds_avg": 1.94,
-    "escaped_defects": 31,
+    "merged": 37,
+    "review_rounds_avg": 1.54,
+    "plan_rounds_avg": 1.24,
+    "implement_rounds_avg": 2,
+    "escaped_defects": 33,
     "reverts": 0,
     "reverted_issues": [],
     "revert_rate": 0,
     "rejects_by_role": {
       "spec-conformance": 12,
       "qa": 5,
-      "correctness": 17,
+      "correctness": 18,
       "architecture": 7,
       "security": 5
     },
-    "review_runs": 76,
-    "findings_total": 50,
-    "overlapping_findings": 25,
+    "review_runs": 80,
+    "findings_total": 51,
+    "overlapping_findings": 26,
     "unique_findings_by_role": {
       "spec-conformance": 5,
       "qa": 5,
@@ -3091,28 +3139,28 @@
       "architecture": 4,
       "security": 4
     },
-    "overlap_ratio": 0.5,
+    "overlap_ratio": 0.51,
     "needs_human": 100,
-    "qa_approvals": 55,
-    "qa_claims_total": 285,
+    "qa_approvals": 56,
+    "qa_claims_total": 292,
     "qa_na_total": 85,
     "qa_na_ratio": 0.23,
     "qa_na_heavy_approvals": 12,
     "usage": {
-      "cost_usd": 1604.41748,
+      "cost_usd": 1611.230428,
       "tokens": {
-        "input": 39801113,
-        "output": 3273852
+        "input": 39937406,
+        "output": 3285050
       }
     },
     "retro_usage": {
-      "cost_usd": 25.048941,
+      "cost_usd": 25.910029,
       "tokens": {
-        "input": 74,
-        "output": 55982
+        "input": 78,
+        "output": 57607
       }
     },
-    "retros": 20
+    "retros": 21
   },
   "deferred_proposals": [],
   "deletion_candidates": []
