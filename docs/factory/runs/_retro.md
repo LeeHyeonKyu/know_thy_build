@@ -18,27 +18,21 @@
 
 | metric | this window | cumulative |
 | --- | --- | --- |
-| merged | 1 | 34 |
-| review rounds avg | 2 | 1.56 |
-| rounds/issue (plan/impl/review) | 1 / 2 / 2 | 1.23 / 2 / 1.56 |
-| escaped defects | 1 (#299×1) | 31 |
-| revert rate | 0.00 (0/1) | 0.00 (0/34) |
-| needs-human | 0 | 98 |
-| rejects by role | correctness 1 | spec-conformance 12, qa 5, correctness 17, architecture 7, security 5 |
-| reviewer overlap | 1.00 (1/1, runs 2) | 0.50 (25/50, runs 74) |
+| merged | 0 | 34 |
+| review rounds avg | 0 | 1.56 |
+| rounds/issue (plan/impl/review) | 0 / 0 / 0 | 1.23 / 2 / 1.56 |
+| escaped defects | 0 | 31 |
+| revert rate | 없음 | 0.00 (0/34) |
+| needs-human | 2 | 98 |
+| rejects by role | 없음 | spec-conformance 12, qa 5, correctness 17, architecture 7, security 5 |
+| reviewer overlap | 없음 | 0.50 (25/50, runs 74) |
 | unique findings by role | 없음 | spec-conformance 5, qa 5, correctness 7, architecture 4, security 4 |
-| qa na ratio | 0.00 (0/7 claims, na-heavy 0/1 approvals) | 0.23 (79/351 claims, na-heavy 11/52 approvals) |
-| cost (usd) | 9.73 | 1506.73 |
-| tokens | input 391431 / output 34941 | input 38059917 / output 3121581 |
-| retro cost (usd) | 1.75 | 23.48 |
-| retro tokens | input 4 / output 2347 | input 70 / output 53200 |
+| qa na ratio | 0.17 (1/6 claims, na-heavy 0/1 approvals) | 0.23 (79/351 claims, na-heavy 11/52 approvals) |
+| cost (usd) | 72.23 | 1506.73 |
+| tokens | input 1208002 / output 105216 | input 38059917 / output 3121581 |
+| retro cost (usd) | 0.00 | 23.48 |
+| retro tokens | input 0 / output 0 | input 70 / output 53200 |
 | full retros | — | 19 |
-
-### Rounds per issue (this window)
-
-| issue | plan | implement | review | escaped |
-| --- | --- | --- | --- | --- |
-| #299 | 1 | 2 | 2 | 1 |
 
 ### Phase-2 gate baseline (this session)
 
@@ -2175,6 +2169,110 @@
           299
         ],
         "source": "must_fix"
+      },
+      {
+        "role": "security",
+        "text": "An agent session running on a CI runner can reach the new wait-free merge, which skips the owner's veto window for self-change (engine) PRs. Two things together allow it. First, the only thing that separates an 'operator' from a runner is whether `GITHUB_ACTIONS` is truthy in the env, and any process on the runner can clear or blank that variable. Second, the operator door never checks that the actor is a human, non-factory account. The code comment says the runner can never reach a wait-free merge by any spelling ('러너는 어떤 철자로도 기다림 없는 머지에 닿지 못한다'), and that is false.",
+        "runs": [
+          236
+        ],
+        "source": "must_fix"
+      },
+      {
+        "role": "spec-conformance",
+        "text": "dw4 is not met as written. The contract says a plain `factory run merge <issue>` runs the merge stage locally off a runner and that the refusal text no longer says merge runs only in CI or to use `--remote`. The diff keeps the old refusal for the plain call and opens the local merge only behind a new `--operator` flag. That flag is not in the contract. The code comment itself calls this a disputed contract deviation. The issue body also asks to change run.js's 'merge는 로컬 금지' to 'allowed locally from an operator session only'.",
+        "runs": [
+          236
+        ],
+        "source": "must_fix"
+      },
+      {
+        "role": "qa",
+        "text": "dw4 says that off a runner, plain `factory run merge <issue>` runs the merge stage locally, and that the refusal text no longer says merge runs only in CI or points to --remote. As built, the plain command still refuses with 'merge runs only in CI ... use --remote'. Local merge only opens with an extra `--operator` flag that the contract never mentions. The code comment admits this deviation and calls it disputed. A contract deviation the builder declared is not an approval, so the spec owner has to decide it. The tests behind dw4 pass only because they pin the new spelling.",
+        "runs": [
+          236
+        ],
+        "source": "must_fix"
+      },
+      {
+        "role": "correctness",
+        "text": "With the production wiring, a local operator merge can never succeed. Before verifyReview runs, the merge stage re-runs the gates and posts `factory/gates` using the process's own gh token. On a local merge that token is the operator's, by design: makeOperatorMergeDeps refuses outright when the actor is a factory account. H1b then reads the newest `factory/gates` status and requires a factory login as its creator. The newest one is the operator's, so verifyReview refuses with 'factory/gates ... was posted by @<operator>, which is not a factory account'. This happens on every local merge, including in repos where Actions works and CI already posted factory-authored review/gates. dw4 ('the PR is merged and the issue gets the merged label') is therefore false in production. The tests cannot see this because their commitStatuses fakes are static: they never return the status the run itself just posted.",
+        "runs": [
+          236
+        ],
+        "source": "must_fix"
+      },
+      {
+        "role": "spec-conformance",
+        "text": "dw4 promises that the PR is merged and the issue gets the merged label through main's wiring. The dw4 test does not measure that, because its commitStatuses fake is a constant (FACTORY_STATUSES_236) and never returns the factory/gates status that the run itself posts at merge-stage.js:861 via reportStatus (gh.setStatus). Code read: the merge stage posts factory/gates before verifyReview, and verifyFactoryStatuses (:83-101) takes posted[0], the newest status. On a local merge the poster is the operator, and makeOperatorMergeDeps refuses factory actors. So the newest factory/gates creator is a non-factory login and H1b refuses, which makes the dw4 outcome unreachable in production. The test and the done_when text diverge.",
+        "runs": [
+          236
+        ],
+        "source": "must_fix"
+      },
+      {
+        "role": "qa",
+        "text": "dw4 (the local merge actually merges) is not shown to work in production wiring. I re-read the path after round 1. The merge stage re-posts factory/gates through the process's own gh token before verifyReview. Locally that token belongs to the operator, and makeOperatorMergeDeps refuses factory actors. verifyFactoryStatuses then takes the newest factory/gates status, which would be the operator's, and refuses it as not a factory account. My round-1 dw4 check only exercised the refusal paths. The tests use static commitStatuses fakes that never feed back the status the run just posted.",
+        "runs": [
+          236
+        ],
+        "source": "must_fix"
+      },
+      {
+        "role": "security",
+        "text": "In operator mode, a local merge ignores a `factory:veto` label that the owner has already put on the tracking issue. Today the only place that label is honoured is the veto-window poll. The diff skips that whole call (`if (operator) record(...) else { vetoWindow(...) }`), so the label check disappears along with the wait. The operator session is an agent holding the owner's token (CLAUDE.md, ADR-039). ADR-044 point 3 justifies the change by saying the owner keeps `revert·factory:veto·breaker reset`, but after this diff that veto no longer stops a local merge of a self-change PR. That is a new way past an existing control on a load-bearing path. dw3's rubric says \"only the wait disappears\". A check for a label that is already on the issue is not the wait.",
+        "runs": [
+          236
+        ],
+        "source": "must_fix"
+      },
+      {
+        "role": "security",
+        "text": "This diff adds a new door: a local merge that skips the veto window. The code that decides whether that door opens is not in DOOR_FILES, so the door can open itself. An operator session can write a PR that only touches merge-stage.js or run-stage.js, for example making localIntegrityVerdict return no reasons or widening isOperatorMerge. The hook-enforced operator door will then merge it. After that, the widened veto-skipping path is live for every later merge. In round 1 I filed this as should_fix sec-s1. I am promoting it because my mitigation, 'factory review still applies', is false for this route.",
+        "runs": [
+          236
+        ],
+        "source": "must_fix"
+      },
+      {
+        "role": "architecture",
+        "text": "The check 'is this a CI runner?' now exists in three places, and they already disagree. cli/run.js:72 and cli/integrity.js:35 test only `env.GITHUB_ACTIONS !== undefined`. run-stage.js:4382-4384 (`RUNNER_MARKERS` + `isOperatorMerge`) also tests GITHUB_RUN_ID, RUNNER_TEMP, FACTORY_TWO_ACTOR and FACTORY_RUNNER_ID=gha-*. The integrity.js comment says it uses the same rule as run.js and isOperatorMerge, which is false at this head. When skeptic r4 widened the run-stage copy, the integrity copy was not changed. integrity.js is the entry point that produces a status the door trusts, so its narrower check is the only one that applies there.",
+        "runs": [
+          236
+        ],
+        "source": "must_fix"
+      },
+      {
+        "role": "architecture",
+        "text": "The code that decides whether a local merge may skip the veto wait is not on the DOOR_FILES list. Only the status producer, factory/cli/integrity.js, was added, and the reason given for adding it is that the door trusts it. By that reasoning, the code that consumes the status and makes the decision is the door itself and must be listed too. As things stand, a PR that touches only merge-stage.js and weakens localIntegrityVerdict, or touches only run-stage.js and widens isOperatorMerge, is not a door-file PR. Under CHARTER operator_merge_judge: true, the operator door can merge it, and the weakened local door then applies to every later merge.",
+        "runs": [
+          236
+        ],
+        "source": "must_fix"
+      },
+      {
+        "role": "correctness",
+        "text": "The README line this diff adds says the local merge takes the factory account from the issue's runner-written heartbeat comments (`runner: gha-<id>`) or from `FACTORY_BOT_LOGIN`. The code never reads heartbeats here. Off a runner, the factory account comes only from `FACTORY_BOT_LOGIN`. An operator who follows the README and relies on a runner heartbeat will have every local merge refused at H1b and at the door. ADR-044 §2 in the same diff gives the correct rule, so the two documents now contradict each other, and the next plan could cite the wrong one.",
+        "runs": [
+          236
+        ],
+        "source": "must_fix"
+      },
+      {
+        "role": "architecture",
+        "text": "The README's description of how `factory run merge` resolves the factory account contradicts the code and ADR-044 in this same diff. That leaves two versions of a security-relevant config contract (lens 8). The README version is the one the code deliberately removed in rework r5, so anyone who later treats the README as the spec will reopen the hole.",
+        "runs": [
+          236
+        ],
+        "source": "must_fix"
+      },
+      {
+        "role": "spec-conformance",
+        "text": "dw1 promises failure on a protected-path fixture, but the test pins success for a protected-only fixture and the CLI posts success. The test does not measure the dw1 sentence, and the plan itself was not amended.",
+        "runs": [
+          236
+        ],
+        "source": "must_fix"
       }
     ],
     "examples": [
@@ -2564,6 +2662,15 @@
           236
         ],
         "source": "dissent"
+      },
+      {
+        "role": "skeptic",
+        "kind": "good",
+        "text": "If the two lengths differ on the self-loaded path, the stage fails into needs-human with a named reason. It does not run as if nothing happened, and it does not go to the blocked-retry path. A length mismatch must not reuse a string that isPayloadFailClosed accepts, or it will be retried instead of escalated.",
+        "runs": [
+          288
+        ],
+        "source": "dissent"
       }
     ],
     "flaky": [],
@@ -2827,58 +2934,47 @@
         "issue": 199,
         "reason": "blocked (gates undecided) — needs human",
         "at": "2026-10-12T13:05:59Z"
+      },
+      {
+        "issue": 288,
+        "reason": "existing tests modified or deleted — human merge required: factory/test/workflows.test.js (see PR #302)",
+        "at": "2026-10-12T16:10:58Z"
+      },
+      {
+        "issue": 236,
+        "reason": "lifetime cost $61.54 over 145 run(s) exceeds [budget].usd_per_issue $60 — a person raises the budget (`:proposal`), splits the issue, or closes it (wont-do); the counter spans re-queues and human retries on purpose",
+        "at": "2026-10-12T18:56:22Z"
       }
     ]
   },
   "stats": {
-    "merged": 1,
-    "review_rounds_avg": 2,
-    "plan_rounds_avg": 1,
-    "implement_rounds_avg": 2,
-    "rounds_per_issue": [
-      {
-        "issue": 299,
-        "plan": 1,
-        "implement": 2,
-        "review": 2
-      }
-    ],
-    "escaped_defects": 1,
-    "escaped_defects_detail": [
-      {
-        "issue": 299,
-        "count": 1
-      }
-    ],
+    "merged": 0,
+    "review_rounds_avg": 0,
+    "plan_rounds_avg": 0,
+    "implement_rounds_avg": 0,
+    "rounds_per_issue": [],
+    "escaped_defects": 0,
+    "escaped_defects_detail": [],
     "reverts": 0,
     "reverted_issues": [],
-    "revert_rate": 0,
-    "rejects_by_role": {
-      "correctness": 1
-    },
-    "review_runs": 2,
-    "findings_total": 1,
-    "overlapping_findings": 1,
+    "revert_rate": null,
+    "rejects_by_role": {},
+    "review_runs": 0,
+    "findings_total": 0,
+    "overlapping_findings": 0,
     "unique_findings_by_role": {},
-    "overlap_ratio": 1,
-    "needs_human": 0,
+    "overlap_ratio": 0,
+    "needs_human": 2,
     "qa_approvals": 1,
-    "qa_claims_total": 7,
-    "qa_na_total": 0,
-    "qa_na_ratio": 0,
+    "qa_claims_total": 5,
+    "qa_na_total": 1,
+    "qa_na_ratio": 0.17,
     "qa_na_heavy_approvals": 0,
     "usage": {
-      "cost_usd": 9.727036,
+      "cost_usd": 72.228348,
       "tokens": {
-        "input": 391431,
-        "output": 34941
-      }
-    },
-    "retro_usage": {
-      "cost_usd": 1.754796,
-      "tokens": {
-        "input": 4,
-        "output": 2347
+        "input": 1208002,
+        "output": 105216
       }
     }
   },
