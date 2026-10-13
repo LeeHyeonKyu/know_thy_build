@@ -4963,7 +4963,10 @@ JSON이었다(#207의 절단과 다르다). 같은 입력에 같은 모델은 �
    (`test_237_triage_runs_the_agent_directly_when_orchestration_is_agent`, `test_237_retro_runs_the_analyst_directly_when_orchestration_is_agent`).
 3. 직접 triage의 프롬프트는 워크플로가 주입하던 판정 재료(CHARTER `triage.default`, 러너가 계산한 `explicit_submission`)를 그대로
    싣고, 컨텍스트(메모리의 페이로드든 세션이 읽을 디스크의 `context.json`·`loaded.json`이든)가 이 런의 이슈 것이 아니면 세션을 띄우지
-   않고 fail closed한다 — 그때 `triage.json`·`triage.envelope.json`은 거부 봉투로 덮여 지난 런의 판정이 이 런의 출력으로 남지 않는다(`test_237_direct_triage_prompt_carries_charter_default_and_submission`).
+   않고 fail closed한다 — 그때 `triage.json`·`triage.envelope.json`은 거부 봉투로 덮여 지난 런의 판정이 이 런의 출력으로 남지 않는다. 그 거부는
+   워크플로의 issue-mismatch fail-closed 반환과 **같은 종료 상태**로 간다: `blocked`/`undecidable`, 사유 `dispatcher payload: context issue mismatch…`
+   (#207의 자리, sweeper가 재시도한다) — 같은 낡은 입력이 모드에 따라 다른 라벨에 서지 않는다. 역할 md가 없는 거부는 산출물 실패(needs-human) 그대로다
+   (`test_237_direct_triage_prompt_carries_charter_default_and_submission`).
 4. 직접 triage 핸드오프의 `issue`·`orchestration: "agent"`·`guarantee`는 **러너가 찍는다** — 에이전트 답이 다른 값을 주장해도
    덮는다. 직접 모드의 **`guarantee` 값은 `verified`**다: 워크플로의 구조(스크립트가 역할을 띄우고 반환값을 스키마로 받는다)가 없고,
    판정은 러너의 사후 검증(`triage.v1` 스키마 검증 + NEVER_AUTOMATE 재확인)이 한다 — §4.2.4가 예고한 그 교환이다. run 기록에는
@@ -4972,7 +4975,9 @@ JSON이었다(#207의 절단과 다르다). 같은 입력에 같은 모델은 �
    `stage did not finish` → blocked(`test_237_direct_agent_failure_lands_on_the_same_invalid_artifact_path`). retro의 빈 결과·오류 봉투·
    `retro.v1` 불일치는 `retro: full analysis failed` + `last_full_failed`이고 `merges_since`·커서는 그대로다 — 0건 회고로 읽히지 않는다(dw6 테스트).
    직접 세션에서는 **세션 트랜스크립트를 산출물 후보로 쓰지 않는다**: 트랜스크립트 구제(KTB-7/17)는 디스패처의 재타이핑을 위한 것이고,
-   직접 세션의 tool_result는 에이전트가 읽은 파일(지난 런의 `triage.json` 등)이지 답이 아니다(같은 두 테스트가 대비로 고정한다).
+   직접 세션의 tool_result는 에이전트가 읽은 파일(지난 런의 `triage.json` 등)이지 답이 아니다(같은 두 테스트가 대비로 고정한다). 같은 이유로 runStage는 직접 런에서 ADR-044의 디스패처 페이로드 분류기
+   (`dispatcherPayloadErrorOf`·#288 자기 적재 길이 대조와 그 트랜스크립트를 읽는 dep)를 부르지 않는다 — 러너 자신의 거부 봉투(`refused_payload`)만 본다.
+   워크플로 모드의 길이 대조는 그대로다(dw5 테스트가 두 모드를 함께 고정한다).
    진단 CLI `bin/verify-stage.js`도 같은 규칙을 따른다 — 직접 세션이면 `--transcript`를 줘도 트랜스크립트를 캐지 않아 CI와 같은 답을 낸다
    (`test_237_verify_cli_agrees_with_run_stage_on_a_failed_direct_triage`).
 

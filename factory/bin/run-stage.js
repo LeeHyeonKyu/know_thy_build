@@ -223,6 +223,17 @@ export function stampDirectArtifact({ out, issue }) {
   return ex.ok ? { ...out, result: JSON.stringify({ ...ex.data, ...stamp }) } : out;
 }
 
+/** 러너가 세션을 띄우기 전에 거부한 직접 런의 봉투 subtype(CLI가 내는 값이 아니다 — 세션이 없었다). */
+export const DIRECT_REFUSED = "factory_refused";
+/**
+ * 직접 런의 "디스패처 페이로드" 판정 — 워크플로 분류기(`dispatcherPayloadErrorOf`·`payloadSourceOf`)의 직접 경로 대응물이다.
+ * 직접 세션에는 디스패처도 워크플로 반환도 없으므로 에이전트의 답이나 트랜스크립트에서 아무것도 분류하지 않는다(그 tool_result는
+ * 에이전트가 **읽은** 지난 런의 파일일 수 있다). 유일한 입력은 러너 자신의 거부 봉투(`refused_payload` — 이 런의 컨텍스트가 다른
+ * 이슈의 것이었다)뿐이고, 그것은 워크플로의 issue-mismatch fail-closed와 같은 자리로 간다.
+ */
+export const directPayloadErrorOf = (out) =>
+  (out?.subtype === DIRECT_REFUSED && typeof out.refused_payload === "string" && out.refused_payload ? out.refused_payload : null);
+
 /** 운영자가 어느 경로가 돌았는지 읽는 run 기록 한 줄(`usage:` 줄은 그대로 둔다 — 비용 장부가 그 모양을 파싱한다). */
 export const directAgentLine = ({ stage, out }) =>
   `orchestration=agent (direct ${stage} session, no dispatcher) num_turns: ${out?.num_turns ?? "n/a"} cost_usd: ${out?.total_cost_usd ?? "n/a"} terminal_reason: ${out?.terminal_reason ?? "n/a"}`;
@@ -230,9 +241,11 @@ export const directAgentLine = ({ stage, out }) =>
 /**
  * main()의 `claudeP` dep — 테스트가 이 생산자를 그대로 돈다(#174 `makeTransitionDep` 선례). 워크플로 경로는 예전 그대로다
  * (`stageClaudeArgs`/`stageClaudeEnv`, 같은 파일 기록). 직접 경로는:
- *   ① 컨텍스트가 이 런의 이슈 것인지 먼저 본다 — 아니면(지난 런의 `context.json`) **세션을 띄우지 않고** 오류 봉투를 돌려준다.
- *      verify가 그것을 `stage artifact missing or invalid`로 떨어뜨려 needs-human에 세운다(워크플로의 issue-mismatch와 같은 fail closed).
- *   ② 역할 md를 못 읽거나 비었어도 같은 자리로 간다(역할 없는 세션을 띄우지 않는다).
+ *   ① 컨텍스트가 이 런의 이슈 것인지 먼저 본다 — 아니면(지난 런의 `context.json`) **세션을 띄우지 않고** 거부 봉투를 돌려준다.
+ *      그 봉투는 `refused_payload`에 사유를 싣고, runStage가 그것을 워크플로의 issue-mismatch fail-closed 반환과 **같은 자리**
+ *      (`blockOnPayload` → blocked/undecidable, `dispatcher payload: context issue mismatch…`)로 보낸다 — 같은 낡은 입력이 모드에
+ *      따라 다른 종료 상태에 서지 않게(dw3).
+ *   ② 역할 md를 못 읽거나 비었으면 세션을 띄우지 않고 산출물 실패(`stage artifact missing or invalid` → needs-human)로 간다.
  *   ③ 봉투가 정상이면 러너의 도장을 찍는다(`stampDirectArtifact`).
  */
 export function makeStageClaudeP({ root, stage, issue, run: runner = run, getHarness, getCharter, getRoles = () => loadRoles(root), readFile = (p) => readFileSync(p, "utf8"), record = () => {} }) {
@@ -242,9 +255,9 @@ export function makeStageClaudeP({ root, stage, issue, run: runner = run, getHar
    * 파일(다른 이슈의 유효한 판정일 수도 있다)이 이 런의 needs-human 옆에 그대로 남아, 사람과 `bin/verify-stage.js`가
    * 그것을 이 런의 출력으로 읽는다.
    */
-  const refuse = (reason) => {
+  const refuse = (reason, { payload = false } = {}) => {
     try { record(`direct agent: refused before spawning — ${reason}`); } catch { /* 기록 실패가 거부를 막지 않는다 */ }
-    const out = { is_error: true, subtype: "factory_refused", result: reason, num_turns: 0 };
+    const out = { is_error: true, subtype: DIRECT_REFUSED, result: reason, num_turns: 0, ...(payload ? { refused_payload: reason } : {}) };
     try { mkdirSync(outDir, { recursive: true }); for (const f of [`${stage}.json`, `${stage}.envelope.json`]) writeFileSync(join(outDir, f), JSON.stringify(out)); } catch { /* 기록 실패가 거부를 막지 않는다 */ }
     return out;
   };
@@ -268,9 +281,9 @@ export function makeStageClaudeP({ root, stage, issue, run: runner = run, getHar
     const direct = isDirectAgentRun({ stage, orchestration: ctx?.orchestration });
     let args;
     if (direct) {
-      if (Number(ctx?.loaded?.issue) !== Number(issue)) return refuse(`context issue mismatch: the context payload says ${ctx?.loaded?.issue}, this run is for ${issue}`);
+      if (Number(ctx?.loaded?.issue) !== Number(issue)) return refuse(`context issue mismatch: the context payload says ${ctx?.loaded?.issue}, this run is for ${issue}`, { payload: true });
       const stale = staleOnDisk();
-      if (stale) return refuse(stale);
+      if (stale) return refuse(stale, { payload: true });
       let roles = {};
       try { roles = getRoles() || {}; } catch { roles = {}; }   // roles.toml이 없으면 기본 md와 roster/frontmatter의 모델로 간다
       const spec = directRoleSpec(roles, stage);
@@ -1266,10 +1279,14 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runAt
      * 없다 — K·R·예산 면제는 ADR-036 개정 이슈의 몫이다(plan non_goals).
      */
     let payloadErrorMemo;
+    // #237 — 직접 런(`orchestration = "agent"`의 triage)은 워크플로 분류기와 그 dep(트랜스크립트를 읽는다)을 부르지 않는다:
+    // 러너 자신의 거부(`directPayloadErrorOf`)만 같은 자리로 보낸다. 자기 적재(#288) 검사도 워크플로 반환에만 있다.
+    const directRun = isDirectAgentRun({ stage, orchestration: ctx?.orchestration });
     let payloadCtx = ctx;                                             // 디스패처가 옮겨 쓴 loaded.json을 쓴 ctx — plan 리페어 턴이면 그 턴의 것
     const payloadError = async () => {
       if (payloadErrorMemo === undefined) {
         payloadErrorMemo = hitMaxTurns(out) || hitApiError(out) ? null
+          : directRun ? directPayloadErrorOf(out)
           : ((d.dispatcherPayloadError ? await d.dispatcherPayloadError(out) : dispatcherPayloadErrorOf({ out })) ?? null);
       }
       return payloadErrorMemo;
@@ -1294,6 +1311,7 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runAt
      * 빠뜨릴 수 있다. 반환: 세웠으면 종료 코드, 아니면 null.
      */
     const selfLoadedBlock = async (o) => {
+      if (directRun) return null;
       const selfLoaded = d.payloadSource ? await d.payloadSource(o) : payloadSourceOf({ out: o });
       if (selfLoaded?.source !== "file") return null;
       record([SELF_LOADED_LINE]);

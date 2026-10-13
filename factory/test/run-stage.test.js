@@ -6606,6 +6606,7 @@ test("test_200_scope_check_fails_open_visibly_on_git_read_error", async () => {
  * `makeStageVerifyDep` — the exact deps main() builds) with a fake `run`, so the argv, the stamp and the failure path
  * are the ones a real run takes.
  */
+import { payloadSourceOf as payloadSourceOf237 } from "../bin/run-stage.js";
 const REPO_237 = join(dirname(fileURLToPath(import.meta.url)), "../..");
 const TRIAGE_MD_237 = ".claude/agents/factory-triage.md";
 function directRoot237() {
@@ -6683,7 +6684,7 @@ test("test_237_triage_runs_the_agent_directly_when_orchestration_is_agent", asyn
 });
 
 /** One whole triage run through runStage with the production claudeP/verify wiring; only `run` and gh are fakes. */
-async function runTriage237({ mode, result, envOver = {}, loaded = null, transcript = "" }) {
+async function runTriage237({ mode, result, envOver = {}, loaded = null, transcript = "", extra = {} }) {
   const root = directRoot237();
   const lines = [], handoffs = [], transitions = [], tiers = [];
   const ctx = { issue: { number: 7, body: "[ready]" }, roster: [], orchestration: mode, limits: { K: 3 }, loaded: loaded ?? triageLoaded237({ orchestration: mode }) };
@@ -6696,9 +6697,10 @@ async function runTriage237({ mode, result, envOver = {}, loaded = null, transcr
     setTierLabel: async (t) => { tiers.push(t); },
     transition: async (t) => { transitions.push(t); return { ok: true, to: t.to }; },
     runRecord: (l) => lines.push(...l),
+    ...(typeof extra === "function" ? extra(root) : extra),
   });
   const code = await runStage({ stage: "triage", issue: 7, deps });
-  return { code, lines, handoffs, transitions, tiers, run };
+  return { code, lines, handoffs, transitions, tiers, run, root };
 }
 const VERDICT_237 = { disposition: "ready", tier: "standard", impact_paths: ["factory/bin/run-stage.js"], reason: "[ready] marker", summary: "s" };
 
@@ -6750,15 +6752,39 @@ test("test_237_direct_triage_prompt_carries_charter_default_and_submission", asy
   const unset = await promptFor(triageLoaded237({ triage: { never_automate: [] } }));
   expect(unset).toMatch(/charter default, which is `needs-info`/);
 
-  // a stale context (another issue) spawns nothing and fails closed — the wrong issue never gets labelled
+  // a stale context (another issue) spawns nothing and fails closed — the wrong issue never gets labelled — and it lands
+  // on the SAME terminal label and cause as the workflow's own stale-context refusal (#207: blocked/undecidable, a
+  // "dispatcher payload" reason the sweeper retries), not on a needs-human the workflow mode would never reach.
   const stale = await runTriage237({ mode: "agent", result: JSON.stringify(VERDICT_237), loaded: triageLoaded237({ issue: 8 }) });
+  // the workflow mode's answer to the same stale payload, produced by the REAL triage workflow (not a hand-typed shape)
+  const wfStale = (await runWorkflow(join(REPO_237, ".claude/workflows/factory-triage.js"), {
+    agent: async () => VERDICT_237, args: { issue: "7", context: ".factory/out/context.json", loaded: triageLoaded237({ issue: 8, orchestration: "workflow" }) },
+  })).result;
+  expect(wfStale.error).toMatch(/^context issue mismatch/);
+  const wStale = await runTriage237({ mode: "workflow", result: "Workflow finished.\n```json\n" + JSON.stringify(wfStale) + "\n```", loaded: triageLoaded237({ issue: 8, orchestration: "workflow" }) });
   expect(stale.run.calls).toHaveLength(0);
-  expect(stale.code).toBe(2);
-  expect(stale.transitions.map((t) => t.to)).toEqual(["factory:needs-human"]);
-  expect(stale.transitions[0].reason).toMatch(/^stage artifact missing or invalid: /);
-  expect(stale.handoffs).toEqual([]);
-  expect(stale.tiers).toEqual([]);
+  for (const [mode, r] of [["agent", stale], ["workflow", wStale]]) {
+    expect(r.code, mode).toBe(2);
+    expect(r.transitions.map((t) => [t.to, t.cause]), mode).toEqual([["factory:blocked", "undecidable"]]);
+    expect(r.transitions[0].reason, mode).toMatch(/^dispatcher payload: context issue mismatch: the context payload says 8, /);
+    expect(r.handoffs, mode).toEqual([]);
+    expect(r.tiers, mode).toEqual([]);
+  }
   expect(stale.lines.some((l) => /context issue mismatch/.test(l) && /8/.test(l) && /7/.test(l))).toBe(true);
+  // an on-disk stale context.json takes the same road through runStage (the session would have READ it)
+  const diskStale = await runTriage237({ mode: "agent", result: JSON.stringify(VERDICT_237), extra: (root) => {
+    mkdirSync(join(root, ".factory/out"), { recursive: true });
+    writeFileSync(join(root, ".factory/out/context.json"), JSON.stringify({ issue: { number: 8 }, orchestration: "agent" }));
+    return {};
+  } });
+  expect(diskStale.run.calls).toHaveLength(0);
+  expect(diskStale.transitions.map((t) => [t.to, t.cause])).toEqual([["factory:blocked", "undecidable"]]);
+  expect(diskStale.transitions[0].reason).toMatch(/^dispatcher payload: context issue mismatch: \.factory\/out\/context\.json is for issue 8/);
+  // a refusal that is NOT about whose context this is (no role md to run) stays an artifact failure, as before
+  const noRole = await runTriage237({ mode: "agent", result: JSON.stringify(VERDICT_237), extra: (root) => { rmSync238(join(root, TRIAGE_MD_237)); return {}; } });
+  expect(noRole.run.calls).toHaveLength(0);
+  expect(noRole.transitions.map((t) => t.to)).toEqual(["factory:needs-human"]);
+  expect(noRole.transitions[0].reason).toMatch(/^stage artifact missing or invalid: /);
 
   // the files the SESSION reads are what matters: an on-disk context.json/loaded.json left by another issue's run
   // spawns nothing either, even when the in-memory payload is this run's — and the previous run's triage artifact
@@ -6854,6 +6880,61 @@ test("test_237_direct_agent_failure_lands_on_the_same_invalid_artifact_path", as
   const err = await runTriage237({ mode: "agent", result: "boom", envOver: { is_error: true } });
   expect(err.transitions.map((t) => t.to)).toEqual(["factory:needs-human"]);
   expect(err.transitions[0].reason).toMatch(/^stage artifact missing or invalid: claude -p reported is_error/);
+
+  // ── the dispatcher-payload classifier (ADR-044 / #207 / #288) with the deps main() wires: transcript-reading,
+  // loaded.json-reading. A direct session's transcript can hold a workflow-shaped return it merely READ — an old
+  // fail-closed `context issue mismatch` and a self-loaded return with a wrong `loaded_json_length` (e.g. a previous
+  // run's triage.json). On the direct path runStage asks neither dep: the valid answer goes to ready, the malformed
+  // one to needs-human, never to a `dispatcher payload:` block.
+  const oldWorkflowReturns = [
+    { issue: 7, error: "context issue mismatch: the context payload says 3, dispatcher asked for 7", orchestration: "workflow", guarantee: "structural" },
+    { ...VERDICT_237, issue: 7, orchestration: "workflow", guarantee: "structural", loaded_source: "file", loaded_json_length: 1 },
+  ];
+  const readTranscript237 = [
+    JSON.stringify({ type: "assistant", message: { content: oldWorkflowReturns.map((_, i) => ({ type: "tool_use", name: "Read", id: `old${i}`, input: { file_path: `/r/.factory/out/old${i}.json` } })) } }),
+    JSON.stringify({ type: "user", message: { content: oldWorkflowReturns.map((o, i) => ({ type: "tool_result", tool_use_id: `old${i}`, content: JSON.stringify(o) })) } }),
+  ].join("\n");
+  const productionPayloadDeps = (asked, transcriptText = readTranscript237) => (root) => {
+    mkdirSync(join(root, ".factory/out"), { recursive: true });
+    writeFileSync(join(root, ".factory/out/loaded.json"), JSON.stringify(triageLoaded237()));
+    const src = makePayloadSourceDeps({ root, readFile: () => transcriptText });   // main(): makePayloadSourceDeps({ root })
+    return {
+      dispatcherPayloadError: async (out) => { asked.push("dispatcherPayloadError"); return dispatcherPayloadErrorOf({ out, transcriptText }); },
+      payloadSource: async (out) => { asked.push("payloadSource"); return src.payloadSource(out); },
+      loadedJsonText: src.loadedJsonText,
+    };
+  };
+  for (const [name, oldOne] of [["fail-closed", 0], ["self-loaded length mismatch", 1]]) {
+    // the classifier DOES fire on this transcript — shown first, so the direct-path result below is not vacuous
+    const one = [readTranscript237.split("\n")[0], JSON.stringify({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: `old${oldOne}`, content: JSON.stringify(oldWorkflowReturns[oldOne]) }] } })].join("\n");
+    if (oldOne === 0) expect(dispatcherPayloadErrorOf({ out: envelope237(""), transcriptText: one }), name).toMatch(/^context issue mismatch/);
+    else expect(payloadSourceOf237({ out: envelope237(""), transcriptText: one }), name).toEqual({ source: "file", length: 1 });
+  }
+  const asked = [];
+  const valid = await runTriage237({ mode: "agent", result: JSON.stringify(VERDICT_237), transcript: readTranscript237, extra: productionPayloadDeps(asked) });
+  expect(valid.code).toBe(0);
+  expect(valid.transitions.map((t) => t.to)).toEqual(["factory:ready"]);
+  expect(valid.handoffs[0]).toEqual(expect.objectContaining({ issue: 7, orchestration: "agent", guarantee: "verified" }));
+  expect(valid.lines.some((l) => /dispatcher payload|self-loaded/.test(l))).toBe(false);
+  const bad = await runTriage237({ mode: "agent", result: "", transcript: readTranscript237, extra: productionPayloadDeps(asked) });
+  expect(bad.transitions.map((t) => [t.to, t.cause ?? null])).toEqual([["factory:needs-human", null]]);
+  expect(bad.transitions[0].reason).toMatch(/^stage artifact missing or invalid: /);
+  expect(asked).toEqual([]);                                              // the direct path never consulted the transcript-reading deps
+
+  // …while in WORKFLOW mode the #288 self-load length check still blocks a mismatched return, exactly as before
+  // (a clean transcript here: the workflow path DOES mine it, so the old returns above would block it on their own)
+  const wAsked = [];
+  const selfLoaded = { ...VERDICT_237, issue: 7, orchestration: "workflow", guarantee: "structural", loaded_source: "file", loaded_json_length: 1 };
+  const wBad = await runTriage237({ mode: "workflow", result: "Workflow finished.\n```json\n" + JSON.stringify(selfLoaded) + "\n```", extra: productionPayloadDeps(wAsked, "") });
+  expect(wBad.code).toBe(2);
+  expect(wBad.transitions.map((t) => [t.to, t.cause])).toEqual([["factory:blocked", "undecidable"]]);
+  expect(wBad.transitions[0].reason).toMatch(/^dispatcher payload: self-loaded payload: length mismatch/);
+  expect(wBad.handoffs).toEqual([]);
+  expect(wAsked).toContain("payloadSource");
+  // and the faithful self-loaded workflow return still passes through to ready
+  const faithful = { ...selfLoaded, loaded_json_length: JSON.stringify(triageLoaded237()).length };
+  const wOk = await runTriage237({ mode: "workflow", result: "Workflow finished.\n```json\n" + JSON.stringify(faithful) + "\n```", extra: productionPayloadDeps([], "") });
+  expect(wOk.transitions.map((t) => t.to)).toEqual(["factory:ready"]);
 });
 
 /**
