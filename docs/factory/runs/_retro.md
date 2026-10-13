@@ -1,43 +1,44 @@
 # Retro State
 
-- last retro: 2026-10-12T15:05:51.211Z
-- merges since last retro: 1
-- current N: 2
+- last retro: 2026-10-13T08:22:38.552Z
+- merges since last retro: 0
+- current N: 1
 
 ## History (last 5)
 
 | at | yield | n_before | n_after | needs_human_since |
 | --- | --- | --- | --- | --- |
-| 2026-10-12T08:34:05.316Z | 0 | 2 | 1 | 2 |
 | 2026-10-12T10:20:44.131Z | 0 | 1 | 2 | 0 |
 | 2026-10-12T12:10:57.026Z | 0 | 2 | 1 | 2 |
 | 2026-10-12T14:19:32.174Z | 0 | 1 | 1 | 2 |
 | 2026-10-12T15:05:51.211Z | 0 | 1 | 2 | 0 |
+| 2026-10-13T08:22:38.552Z | 1 | 2 | 1 | 2 |
 
 ## Stats
 
 | metric | this window | cumulative |
 | --- | --- | --- |
-| merged | 1 | 34 |
-| review rounds avg | 1 | 1.56 |
-| rounds/issue (plan/impl/review) | 1 / 1 / 1 | 1.23 / 2 / 1.56 |
+| merged | 2 | 36 |
+| review rounds avg | 1 | 1.53 |
+| rounds/issue (plan/impl/review) | 1 / 1 / 1 | 1.22 / 1.94 / 1.53 |
 | escaped defects | 0 | 31 |
-| revert rate | 0.00 (0/1) | 0.00 (0/34) |
-| needs-human | 2 | 98 |
+| revert rate | 0.00 (0/2) | 0.00 (0/36) |
+| needs-human | 2 | 100 |
 | rejects by role | 없음 | spec-conformance 12, qa 5, correctness 17, architecture 7, security 5 |
-| reviewer overlap | 없음 | 0.50 (25/50, runs 74) |
+| reviewer overlap | 없음 | 0.50 (25/50, runs 76) |
 | unique findings by role | 없음 | spec-conformance 5, qa 5, correctness 7, architecture 4, security 4 |
-| qa na ratio | 0.17 (1/6 claims, na-heavy 0/1 approvals) | 0.23 (79/351 claims, na-heavy 11/52 approvals) |
-| cost (usd) | 72.23 | 1506.73 |
-| tokens | input 1208002 / output 105216 | input 38059917 / output 3121581 |
-| retro cost (usd) | 0.00 | 23.48 |
-| retro tokens | input 0 / output 0 | input 70 / output 53200 |
-| full retros | — | 19 |
+| qa na ratio | 0.32 (6/19 claims, na-heavy 1/3 approvals) | 0.23 (85/370 claims, na-heavy 12/55 approvals) |
+| cost (usd) | 97.69 | 1604.42 |
+| tokens | input 1741196 / output 152271 | input 39801113 / output 3273852 |
+| retro cost (usd) | 1.57 | 25.05 |
+| retro tokens | input 4 / output 2782 | input 74 / output 55982 |
+| full retros | — | 20 |
 
 ### Rounds per issue (this window)
 
 | issue | plan | implement | review | escaped |
 | --- | --- | --- | --- | --- |
+| #293 | 1 | 1 | 1 | 0 |
 | #288 | 1 | 1 | 1 | 0 |
 
 ### Phase-2 gate baseline (this session)
@@ -52,11 +53,11 @@
 ```json
 {
   "cursor": {
-    "last_retro_at": "2026-10-12T15:05:51.211Z",
+    "last_retro_at": "2026-10-13T08:22:38.552Z",
     "last_record_offsets": {}
   },
-  "merges_since": 1,
-  "n": 2,
+  "merges_since": 0,
+  "n": 1,
   "history": [
     {
       "at": "2026-09-14T14:00:58.920Z",
@@ -1124,6 +1125,57 @@
       ],
       "n_before": 1,
       "n_after": 2
+    },
+    {
+      "at": "2026-10-13T08:22:38.552Z",
+      "yield": 1,
+      "needs_human_since": 2,
+      "applied": [
+        {
+          "step": "feedback-route",
+          "issues": [
+            293,
+            288
+          ],
+          "actions": [
+            {
+              "kind": "warning",
+              "step": "feedback-route",
+              "login": "LeeHyeonKyu",
+              "current": "ktb-factory[bot]",
+              "reason": "current factory identity: ktb-factory[bot] (machine user/app, FACTORY_BOT_LOGIN); older runs in this window ran under a shared identity (LeeHyeonKyu) — their human decisions are unverifiable, nothing to register"
+            }
+          ]
+        },
+        {
+          "step": "lessons:plan-synthesizer",
+          "added": [
+            "L-2026-10-13-01"
+          ],
+          "rejected": [],
+          "evicted": [],
+          "cited": []
+        },
+        {
+          "step": "publish-lessons",
+          "pr": 224,
+          "merged": false,
+          "reason": "gh pr merge failed (1): X Pull request LeeHyeonKyu/know_thy_build#224 is not mergeable: the base branch policy prohibits the merge.\nTo have the pull request merged after all the requirements have been met, add the `--auto` flag.\nTo use administrator privileges to immediately merge the pull request, add the `--admin` flag.",
+          "files": [
+            ".factory/lessons/plan-synthesizer.md"
+          ]
+        },
+        {
+          "step": "publish-proposal",
+          "pr": 276,
+          "reason": null,
+          "proposals": [
+            "gate"
+          ]
+        }
+      ],
+      "n_before": 2,
+      "n_after": 1
     }
   ],
   "candidates": {
@@ -2677,6 +2729,15 @@
           288
         ],
         "source": "dissent"
+      },
+      {
+        "role": "operator",
+        "kind": "good",
+        "text": "The implement brief is in the #174 diff-only format ... no self-critique stage starts, and the head sha is pinned. (Product-advocate, R1 dw5, also asked that no self-critique round be started.)",
+        "runs": [
+          293
+        ],
+        "source": "dissent"
       }
     ],
     "flaky": [],
@@ -2954,11 +3015,17 @@
     ]
   },
   "stats": {
-    "merged": 1,
+    "merged": 2,
     "review_rounds_avg": 1,
     "plan_rounds_avg": 1,
     "implement_rounds_avg": 1,
     "rounds_per_issue": [
+      {
+        "issue": 293,
+        "plan": 1,
+        "implement": 1,
+        "review": 1
+      },
       {
         "issue": 288,
         "plan": 1,
@@ -2972,30 +3039,37 @@
     "reverted_issues": [],
     "revert_rate": 0,
     "rejects_by_role": {},
-    "review_runs": 1,
+    "review_runs": 2,
     "findings_total": 0,
     "overlapping_findings": 0,
     "unique_findings_by_role": {},
     "overlap_ratio": 0,
     "needs_human": 2,
-    "qa_approvals": 1,
-    "qa_claims_total": 5,
-    "qa_na_total": 1,
-    "qa_na_ratio": 0.17,
-    "qa_na_heavy_approvals": 0,
+    "qa_approvals": 3,
+    "qa_claims_total": 13,
+    "qa_na_total": 6,
+    "qa_na_ratio": 0.32,
+    "qa_na_heavy_approvals": 1,
     "usage": {
-      "cost_usd": 72.228348,
+      "cost_usd": 97.687342,
       "tokens": {
-        "input": 1208002,
-        "output": 105216
+        "input": 1741196,
+        "output": 152271
+      }
+    },
+    "retro_usage": {
+      "cost_usd": 1.567803,
+      "tokens": {
+        "input": 4,
+        "output": 2782
       }
     }
   },
   "stats_total": {
-    "merged": 34,
-    "review_rounds_avg": 1.56,
-    "plan_rounds_avg": 1.23,
-    "implement_rounds_avg": 2,
+    "merged": 36,
+    "review_rounds_avg": 1.53,
+    "plan_rounds_avg": 1.22,
+    "implement_rounds_avg": 1.94,
     "escaped_defects": 31,
     "reverts": 0,
     "reverted_issues": [],
@@ -3007,7 +3081,7 @@
       "architecture": 7,
       "security": 5
     },
-    "review_runs": 74,
+    "review_runs": 76,
     "findings_total": 50,
     "overlapping_findings": 25,
     "unique_findings_by_role": {
@@ -3018,27 +3092,27 @@
       "security": 4
     },
     "overlap_ratio": 0.5,
-    "needs_human": 98,
-    "qa_approvals": 52,
-    "qa_claims_total": 272,
-    "qa_na_total": 79,
+    "needs_human": 100,
+    "qa_approvals": 55,
+    "qa_claims_total": 285,
+    "qa_na_total": 85,
     "qa_na_ratio": 0.23,
-    "qa_na_heavy_approvals": 11,
+    "qa_na_heavy_approvals": 12,
     "usage": {
-      "cost_usd": 1506.730138,
+      "cost_usd": 1604.41748,
       "tokens": {
-        "input": 38059917,
-        "output": 3121581
+        "input": 39801113,
+        "output": 3273852
       }
     },
     "retro_usage": {
-      "cost_usd": 23.481138,
+      "cost_usd": 25.048941,
       "tokens": {
-        "input": 70,
-        "output": 53200
+        "input": 74,
+        "output": 55982
       }
     },
-    "retros": 19
+    "retros": 20
   },
   "deferred_proposals": [],
   "deletion_candidates": []
