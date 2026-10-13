@@ -25,7 +25,7 @@ import { makeQueueAdmission, entryRecheck, admissionRefusedReason, ADMISSION_COD
 import { mirrorStep, mirrorMatchesHead, inMirrorFamily, regenerateMirror, mirrorApplicable, mirrorApplicableAtRev, isUnionMergePath, MIRROR_FAMILIES } from "../lib/mirror.js";
 import { REHEARSAL_UNWIRED, ADMISSION_UNWIRED } from "../lib/transition.js";
 export { HARNESS_LABEL };   // 재수출 — retro.js와 이 값이 같은 소스에서 왔다는 것을 테스트가 import equality로 확인한다
-import { buildContext, resolveTier, contextManifestLines, isPlainObject, loadedJsonLine, scrubPlanRepairPrevious, checkHandoffPr } from "../lib/context.js";
+import { buildContext, resolveTier, contextManifestLines, isPlainObject, loadedJsonLine, scrubPlanRepairPrevious, checkHandoffPr, relandClaimOf, relandFastPathOf, relandRefusedLine } from "../lib/context.js";
 import { resolveReviewRoster } from "../lib/review-roster.js";
 import { startHeartbeat } from "../lib/heartbeat.js";
 import { readProgress, progressMarker } from "../lib/progress.js";
@@ -947,6 +947,36 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runAt
     const conflictOnly = stage === "implement" && ctx?.loaded?.conflict_only === true ? ctx.loaded : null;
     if (stage === "implement" && typeof ctx?.conflict_only_note === "string") record([ctx.conflict_only_note]);
     if (conflictOnly) record([`conflict-only: the approved head ${String(conflictOnly.approved_head).slice(0, 7)} met a base conflict in ${(conflictOnly.merge_conflicts || []).length} path(s) — the self-gate's conflict-scope decides whether this round is kept out of the lifetime cap and K (ADR-041)`]);
+    /**
+     * #293 — **re-land fast path.** Before any debate role is dispatched: if the issue's `## What` names an approved branch head
+     * (`relandClaimOf`), the runner judges its own facts (`d.relandFacts` → `relandFastPathOf`: the source issue's heartbeat-bound
+     * approve line for that head, the factory-posted GREEN `factory/gates` status, the PR head) and, when every one holds, posts
+     * the plan.v1 whose contract is the issue's own done_when — the fast-path record line FIRST, then the handoff, then the
+     * transition carrying the runner's binding (`reland`, the only thing `factory:planned` honours the marker with). Any refusal or
+     * unreadable input writes one reason line and falls through to today's debate, unchanged. No claude -p, no usage line.
+     * Review and merge are untouched; the tier is not lowered.
+     */
+    if (stage === "plan" && typeof d.relandFacts === "function") {
+      const body = ctx?.issue?.body ?? "";
+      const claim = relandClaimOf(body, { issue });
+      if (claim) {
+        let decision = claim.ok ? null : claim;
+        if (!decision) {
+          let facts = null;
+          try { facts = await d.relandFacts(claim); }
+          catch (e) { decision = { ok: false, reason: `the re-land facts could not be read — ${e?.message || e}` }; }
+          if (!decision) decision = relandFastPathOf({ issue: Number(issue), body, claim, facts, maxDoneWhen: ctx?.plan?.max_done_when ?? 6, tier: ctx?.tier_effective ?? ctx?.tier ?? "standard", orchestration: ctx?.orchestration ?? "workflow" });
+        }
+        if (!decision.ok) record([relandRefusedLine(decision.reason)]);
+        else {
+          record([decision.line]);
+          await d.writeHandoff({ stage, data: decision.handoff, gates: null });
+          const t = await d.transition({ to: "factory:planned", data: decision.handoff, reland: decision.binding });
+          record(["verify: ok (re-land fast path — no plan role ran)", ...(t.ok ? [`transition: ${t.to}`] : refusal(t))]);
+          return t.ok ? 0 : 2;
+        }
+      }
+    }
     const manifestNote = contextManifestLines(ctx, stamp);
     if (manifestNote.length) record(manifestNote);
     await d.resetAgentsLog?.();                                       // 지난 런의 agents.jsonl이 로스터 체크를 대신 만족시키지 못하게
@@ -2836,6 +2866,43 @@ export async function reworkScopeInput({ run, cwd, base, ctx, reviewRounds, test
  * 그래야 "러너가 verifyStage에 무엇을 넘기는가"(NEVER_AUTOMATE, `[load_bearing].paths`)를 테스트가 실제 배선으로 핀한다.
  * 게터인 이유 — charter·harness는 `charterReady` 뒤에, ctx는 `buildContext` 뒤에 생긴다.
  */
+/**
+ * Which run did issue `issue`'s review? The last review-stage heartbeat on that issue — a channel apart from the run record
+ * (ADR-022 decision 3: the heartbeat's first two lines are a fixed contract). The merge stage's `reviewRunId` dep and the #293
+ * re-land fast path (`makeRelandFactsDep`, for the SOURCE issue) read it through this one function.
+ */
+export function reviewRunIdOf(comments, issue) {
+  const beats = (Array.isArray(comments) ? comments : [])
+    .map((c) => parseHeartbeatComment(c?.body))
+    .filter((h) => h && h.issue === Number(issue) && h.stage === "review" && h.runner);
+  if (!beats.length) return { ok: false, reason: `no review-stage heartbeat on issue #${issue} — there is no independent record of which factory run produced this review` };
+  const runner = beats[beats.length - 1].runner;
+  const runId = runIdOfRunner(runner);
+  if (!runId) return { ok: false, reason: `the review heartbeat on issue #${issue} names no runner (got "${runner}")` };
+  return { ok: true, runId, runnerId: runner };
+}
+
+/**
+ * #293 — the re-land fast path's inputs, read and never judged here (`relandFastPathOf` judges). Every read is a runner/GitHub
+ * fact: the `factory/records` branch (`readRecordsDetailed` — `fetched:false` is "could not be read", never "no record"), the source
+ * issue's review heartbeat run (`reviewRunIdOf`, the merge stage's binding), the factory logins, the per-sha commit statuses, the source branch head.
+ * Each fact is `{ ok: true, … }` or `{ ok: false, reason }`; nothing throws. `env` is injected (`resolveFactoryLogins`' rule).
+ */
+export function makeRelandFactsDep({ gh, env, run: runner = run, root = process.cwd(), readRecords = () => readRecordsDetailed({ run: runner, cwd: root }) }) {
+  const read = async (fn) => { try { return await fn(); } catch (e) { return { ok: false, reason: String(e?.message || e) }; } };
+  return async ({ source, branch, sha }) => ({
+    records: await read(async () => {
+      const det = await readRecords();
+      if (!det?.fetched) return { ok: false, reason: "the branch could not be fetched" };
+      return { ok: true, text: det.records?.get(String(source)) ?? null };
+    }),
+    heartbeat: await read(async () => reviewRunIdOf(await gh.comments(source), source)),
+    logins: await read(async () => resolveFactoryLogins({ gh, env })),
+    statuses: await read(async () => ({ ok: true, list: await gh.commitStatuses(sha) })),
+    branchHead: await read(async () => ({ ok: true, sha: await gh.branchHeadSha(branch) })),
+  });
+}
+
 export function makeVerifyStageDep({ root, stage, getCtx, getCharter, getHarness, getEngine = () => false, qaEvidenceSummary = () => null }) {
   return ({ out, gates }) => {
     const ctx = getCtx();
@@ -3433,7 +3500,7 @@ export function nextState(stage, data, { maxRounds = null } = {}) {
  * 전이 요구조건에 커밋/PR을 실제로 묶는다. 게이트는 "무엇을 검사했는가"를 알아야만 물린다.
  * gh 호출이 실패하면 sha 없이(undefined) 돌려주고 record()로 흔적을 남긴다 — 런을 죽이지 않는다.
  */
-export async function buildCtxExtra({ gh, issue, to, data, ctx, record = () => {}, reviewRoster = null, maxRounds = null, qaEvidence = null, qaManifestRecorded = null, stage = null }) {
+export async function buildCtxExtra({ gh, issue, to, data, ctx, record = () => {}, reviewRoster = null, maxRounds = null, qaEvidence = null, qaManifestRecorded = null, stage = null, reland = null }) {
   // K(`charter.limits.K`)는 `factory:approved`로는 오지 않는다(ADR-020 KTB-29 r1 SF1) — 전이 요구조건은
   // approve를 라운드로 막지 않고, K는 `nextState`가 rework 판정에서만 쓴다.
   //
@@ -3461,6 +3528,8 @@ export async function buildCtxExtra({ gh, issue, to, data, ctx, record = () => {
     ctxExtra.rosterSize = roster?.length;
   }
   if (to === "factory:merged" && Number.isInteger(maxRounds)) ctxExtra.maxRounds = maxRounds;
+  // #293 — the runner's re-land binding, only on the plan stage's own fast-path transition (`factory:planned` honours the marker with it).
+  if (reland && stage === "plan" && to === "factory:planned") ctxExtra.reland = reland;
   try {
     if (to === "factory:awaiting-review") {
       ctxExtra.headSha = await gh.branchHeadSha(`claude/fq-${issue}`);
@@ -4636,6 +4705,8 @@ async function main() {
      * triage/plan은 애초에 diff를 판정 재료로 쓰지 않는다). 대신 그 사실을 런 레코드에 남긴다.
      */
     buildContext: makeBuildContextDep({ root, gh, issue, stage, run, mergeBase, recordLine, onBuilt: (c) => { ctxCache = c; } }),
+    // #293 — the re-land fast path's runner/GitHub facts (plan only; `process.env` lives at this entry point).
+    relandFacts: makeRelandFactsDep({ gh, env: process.env, run, root }),
     /** 지난 런의 SubagentStart/Stop 기록이 이번 런의 로스터 체크를 대신 만족시키면 안 된다. */
     resetAgentsLog: async () => { rmSync(join(root, ".factory/out/agents.jsonl"), { force: true }); },
     /** #238 — the plan repair turn's cost line reads the same file the roster check reads (`planRepairCostLine`). */
@@ -4911,14 +4982,8 @@ async function main() {
       let comments;
       try { comments = await gh.comments(issue); }
       catch (e) { return { ok: false, reason: `the issue's comments could not be read — ${e?.message || e}` }; }
-      const beats = (Array.isArray(comments) ? comments : [])
-        .map((c) => parseHeartbeatComment(c?.body))
-        .filter((h) => h && h.issue === Number(issue) && h.stage === "review" && h.runner);
-      if (!beats.length) return { ok: false, reason: `no review-stage heartbeat on issue #${issue} — there is no independent record of which factory run produced this review` };
-      const runner = beats[beats.length - 1].runner;
-      const runId = runIdOfRunner(runner);
-      if (!runId) return { ok: false, reason: `the review heartbeat on issue #${issue} names no runner (got "${runner}")` };
-      return { ok: true, runId, runnerId: runner };
+      // #293 — the judge is this module's `reviewRunIdOf` (the re-land fast path binds the source issue's line through the same function).
+      return reviewRunIdOf(comments, issue);
     },
     get maxRounds() { return charter?.limits?.K ?? null; },
     /** CHARTER `merge.human_gate` — 머지 전이 텍스트가 사람의 서명 유무를 소리 내어 말한다(감사 H6). */
@@ -4959,7 +5024,7 @@ async function main() {
     sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
     // #174 — the call into lib/transition.js (and its `by` forwarding) lives in `makeTransitionDep`, which tests drive; this
     // closure is only main's ctxExtra builder.
-    transition: makeTransitionDep({ gh, issue, stage, rehearsal, admission, buildExtra: async ({ to, data, mergeGatesResult, prerequisite = false, qaManifestRecorded = null }) => {
+    transition: makeTransitionDep({ gh, issue, stage, rehearsal, admission, buildExtra: async ({ to, data, mergeGatesResult, prerequisite = false, qaManifestRecorded = null, reland = null }) => {
       // 감사 H1c — merge 경로에는 ctx가 없다(script-only). `factory:merged` 규칙이 정족수·K를 실제로
       // 물 수 있도록 CHARTER에서 읽은 로스터와 K를 여기서 채운다(조회 실패는 fail closed로 남긴다:
       // roster가 없으면 규칙이 "roster size" 대신 개수 검사만 건너뛰는 것이 아니라, 아래
@@ -4978,7 +5043,7 @@ async function main() {
         try { const r = await deps.reviewRoster(); if (r?.ok) reviewRoster = r.roles; }
         catch (e) { recordLine(`merge: roster for the ${to} requirement unresolved — ${e?.message || e}`); }
       }
-      const ctxExtra = await buildCtxExtra({ gh, issue, to, data, ctx: ctxCache, record: recordLine, reviewRoster, maxRounds: charter?.limits?.K ?? null, qaEvidence: deps.qaEvidence, qaManifestRecorded, stage });
+      const ctxExtra = await buildCtxExtra({ gh, issue, to, data, ctx: ctxCache, record: recordLine, reviewRoster, maxRounds: charter?.limits?.K ?? null, qaEvidence: deps.qaEvidence, qaManifestRecorded, stage, reland });
       // 전이 경로에서만 게이트를 묻는다 — gatesChecked가 그 표식이다(선행 handoff 확인은 세우지 않는다).
       ctxExtra.gatesChecked = true;
       // blocked에서의 hop-back만 `prerequisite`를 세운다(KTB-24 fix) — "직전 스테이지의 산출물이
