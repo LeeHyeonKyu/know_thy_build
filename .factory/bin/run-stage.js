@@ -1091,6 +1091,27 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runAt
       record([...lines, `verify: ${reason} — not an agent artifact defect`, ...refusal(t), usage]);
       return 2;
     };
+    /**
+     * #288 — 워크플로가 페이로드를 스스로 읽었다(디스패처가 `args.loaded`를 넘기지 않았다). 한 줄을 남기고, 워크플로가 잰 길이를 같은
+     * 파일로 다시 재어 맞춰 본다: 다르거나 길이가 없으면 리더가 필드를 떨궜거나 잘랐을 수 있다 — rework 라운드라면 must_fix가 사라진
+     * 빌드가 된다. 그래서 게이트·verify 전에 blockOnPayload로 이름 있는 사유와 함께 세운다(종료 상태는 오늘의 blocked/undecidable 그대로).
+     * `is_error` 봉투에서도 돈다: 턴 한도(KTB-16/17)·API 오류(KTB-22)는 트랜스크립트에서 산출물을 복구해 게이트·verify로 가므로, 거기서
+     * 건너뛰면 잘린 자기 적재가 검사 없이 지나간다. plan 리페어 턴(KTB-51)의 반환도 같은 함수로 다시 잰다 — 그 턴의 디스패처도 페이로드를
+     * 빠뜨릴 수 있다. 반환: 세웠으면 종료 코드, 아니면 null.
+     */
+    const selfLoadedBlock = async (o) => {
+      const selfLoaded = d.payloadSource ? await d.payloadSource(o) : payloadSourceOf({ out: o });
+      if (selfLoaded?.source !== "file") return null;
+      record([SELF_LOADED_LINE]);
+      let fileText = null;
+      try { fileText = d.loadedJsonText ? await d.loadedJsonText() : null; } catch { fileText = null; }
+      const mismatch = selfLoadedPayloadMismatch({ reported: selfLoaded.length, fileText });
+      return mismatch ? blockOnPayload(mismatch, [`loaded: ${mismatch}`]) : null;
+    };
+    {
+      const blocked = await selfLoadedBlock(out);
+      if (blocked !== null) return blocked;
+    }
     let gates = null;
     if (!out?.is_error || hitMaxTurns(out) || hitApiError(out)) {
       try { gates = await d.gates(ctx); }                             // 게이트 없는 스테이지(triage/plan)는 null
@@ -1253,6 +1274,9 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runAt
               return 2;
             }
           }
+          // #288 — the repair turn's own return, measured against the loaded.json its buildContext just rewrote, before it is re-verified.
+          const repairBlocked = await selfLoadedBlock(out);
+          if (repairBlocked !== null) return repairBlocked;
           // plan has no gates (d.gates returns null for plan) — recompute the verdict on the repaired handoff.
           gates = null;
           if (!out?.is_error || hitMaxTurns(out) || hitApiError(out)) {
@@ -2369,12 +2393,57 @@ export function dispatcherPayloadErrorOf({ out, transcriptText = "" } = {}) {
   // 뽑혀 산출물 결함(needs-human)이 된다. 그러나 옛 fail-closed가 완료 알림으로 왔고 재시도의 반환이 더 뒤의 채널(전경 Workflow 결과·
   // 최종 메시지)로 왔다면 옛 fail-closed가 뽑혀 blocked/undecidable이 된다 — b881484를 그대로 옮긴 동작이다(plan non_goals: "Any design
   // beyond the b881484 port"; 교차 채널 순서는 이 이슈 밖이다).
-  const a = extractStageArtifact({
+  const a = workflowReturnOf({ out, transcriptText });
+  return a.ok && isWorkflowFailClosed(a.data) ? a.data.error : null;   // verbatim (b881484) — sanitising is #240, see §blockOnPayload
+}
+/** 위 채널 순서로 고른 첫 번째 워크플로 반환 — dispatcherPayloadErrorOf와 payloadSourceOf(#288)가 같은 후보를 본다. */
+function workflowReturnOf({ out, transcriptText = "" } = {}) {
+  return extractStageArtifact({
     envelopeResult: out?.result,
     transcriptText,
     validate: (o) => (o && o.orchestration === "workflow" && "issue" in o && o.guarantee === "structural" ? { ok: true, errors: [] } : { ok: false, errors: ["not a workflow return"] }),
   });
-  return a.ok && isWorkflowFailClosed(a.data) ? a.data.error : null;   // verbatim (b881484) — sanitising is #240, see §blockOnPayload
+}
+
+/**
+ * #288 — 디스패처가 `args.loaded`를 넘기지 않았을 때 네 워크플로는 `.factory/out/loaded.json`을 리더 에이전트로 스스로 읽고, 반환에
+ * `loaded_source: "file"`과 자기가 파싱한 페이로드의 `JSON.stringify(...).length`(`loaded_json_length`)를 싣는다. 넘겨받았으면
+ * `loaded_source: "args"`. 고른 워크플로 반환이 `"file"`일 때만 `{ source: "file", length }`를, 아니면 null을 돌려준다.
+ */
+export function payloadSourceOf({ out, transcriptText = "" } = {}) {
+  const a = workflowReturnOf({ out, transcriptText });
+  if (!a.ok || a.data?.loaded_source !== "file") return null;
+  return { source: "file", length: a.data.loaded_json_length };
+}
+/**
+ * #288 — main()의 두 dep(`payloadSource`·`loadedJsonText`)을 만드는 팩토리(production = what the test drives, #254 선례). 워크플로
+ * 반환은 dispatcherPayloadErrorOf와 같은 채널 순서로 트랜스크립트까지 찾고, 비교 대상은 러너가 쓴 `.factory/out/loaded.json`의 지금 내용이다.
+ * 한쪽이라도 빠지면 운영에서 자기 적재 런 전부가 "could not be re-read"로 서거나(파일), 트랜스크립트로만 온 반환이 검사를 건너뛴다.
+ */
+export function makePayloadSourceDeps({ root, home = homedir(), readFile = readFileOrNull }) {
+  const transcriptText = (out) => readTranscript({ root, home, sessionId: out?.session_id, readFile }) || "";
+  return {
+    payloadSource: (out) => payloadSourceOf({ out, transcriptText: transcriptText(out) }),
+    loadedJsonText: () => readFileSync(join(root, ".factory/out/loaded.json"), "utf8"),
+  };
+}
+/** #288 — run 기록의 한 줄: 스테이지는 성공했어도 디스패처는 여전히 페이로드를 건너뛰고 있다는 유일한 신호. */
+export const SELF_LOADED_LINE = "loaded: self-loaded by the workflow (dispatcher passed no payload)";
+/**
+ * #288 — 자기 적재한 페이로드가 러너가 쓴 파일과 같은 길이인가. 리더는 LLM의 복사다(#207의 절단, #111의 필드 유실) — 길이가 다르거나,
+ * 워크플로가 길이를 싣지 않았거나 숫자가 아니거나, 파일을 다시 읽지 못하면 이름 있는 사유(`self-loaded payload …`)를, 같으면 null을
+ * 돌려준다. 없는 길이·숫자 아닌 길이는 일치가 아니다. 같은 길이로 바꿔 쓴 값은 이 검사가 잡지 못한다(plan open_risks).
+ */
+export function selfLoadedPayloadMismatch({ reported, fileText }) {
+  if (typeof reported !== "number" || !Number.isFinite(reported)) {
+    return `self-loaded payload: the workflow reported no numeric loaded_json_length (${JSON.stringify(reported ?? null)})`;
+  }
+  const unreadable = `self-loaded payload: .factory/out/loaded.json could not be re-read to check the workflow's loaded_json_length ${reported}`;
+  if (typeof fileText !== "string") return unreadable;
+  let expected;
+  try { expected = JSON.stringify(JSON.parse(fileText)).length; } catch { return unreadable; }
+  return reported === expected ? null
+    : `self-loaded payload: length mismatch — the workflow parsed ${reported} chars, .factory/out/loaded.json is ${expected}`;
 }
 
 /**
@@ -4530,6 +4599,8 @@ async function main() {
     handoffHeadSha: (out) => (stage === "implement" ? implementHeadShaOf({ out, transcriptText: transcriptTextFor(root, out) }) : null),
     /** #207 — 워크플로의 fail-closed 반환(디스패처 전달 고장)을 트랜스크립트까지 훑어 찾는다(§dispatcherPayloadErrorOf). */
     dispatcherPayloadError: (out) => dispatcherPayloadErrorOf({ out, transcriptText: transcriptTextFor(root, out) }),
+    /** #288 — 워크플로가 loaded.json을 스스로 읽었는가(같은 채널 순서로 트랜스크립트까지), 그리고 러너가 쓴 그 파일의 지금 내용. */
+    ...makePayloadSourceDeps({ root }),
     /** KTB-43 — 핸드오프 뒤에 붙은 드리프트 전용 커밋을 떨어뜨린다(리스 없는 force는 없다). */
     dropPostHandoffDrift: async ({ handoffSha, baseline }) => makeDropPostHandoffDrift({ run, root, issue })({
       handoffSha, baseline,

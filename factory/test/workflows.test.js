@@ -219,7 +219,9 @@ test("factory-triage.js: a missing args.loaded fails the stage closed with a nam
     args: { issue: 11, context: ".factory/out/context.json", loaded: null },
   });
 
-  expect(calls).toEqual([]);
+  // #288 dw3 — rewritten (plan done_when dw3) to the 'reader fails' case: args.loaded is missing, so the workflow now tries the reader, once() re-spawns it, and nothing else ever runs.
+  expect(calls.filter((c) => c.opts.label !== "load:reader")).toEqual([]);
+  expect(calls.map((c) => c.opts.label)).toEqual(["load:reader", "load:reader"]);
   expect(phases).toEqual(["Load"]);
   expect(calls.filter((c) => c.opts.agentType === "factory-triage")).toHaveLength(0);
   expect(result).toEqual({ issue: 11, error: "context payload missing", orchestration: "workflow", guarantee: "structural" });
@@ -561,7 +563,9 @@ test("factory-plan.js: a missing args.loaded fails the stage closed — no debat
     args: { issue: 42, context: ".factory/out/context.json", loaded: null },
   });
 
-  expect(calls).toEqual([]);
+  // #288 dw3 — rewritten (plan done_when dw3) to the 'reader fails' case: args.loaded is missing, so the workflow now tries the reader, its answer has no loaded_json string (unparseable — a non-null answer is not re-spawned), and nothing else ever runs.
+  expect(calls.filter((c) => c.opts.label !== "load:reader")).toEqual([]);
+  expect(calls.map((c) => c.opts.label)).toEqual(["load:reader"]);
   expect(phases).toEqual(["Load"]);
   expect(result).toEqual({ issue: 42, error: "context payload missing", orchestration: "workflow", guarantee: "structural" });
   expect(validate("plan.v1", result).ok).toBe(false);
@@ -1475,7 +1479,9 @@ test("factory-implement.js: a missing args.loaded fails the stage closed — not
     args: { issue: 42, context: ".factory/out/context.json", loaded: null },
   });
 
-  expect(calls).toEqual([]);
+  // #288 dw3 — rewritten (plan done_when dw3) to the 'reader fails' case: args.loaded is missing, so the workflow now tries the reader, its answer has no loaded_json string (unparseable — a non-null answer is not re-spawned), and nothing else ever runs.
+  expect(calls.filter((c) => c.opts.label !== "load:reader")).toEqual([]);
+  expect(calls.map((c) => c.opts.label)).toEqual(["load:reader"]);
   expect(phases).toEqual(["Load"]);
   expect(result).toEqual({ issue: 42, error: "context payload missing", orchestration: "workflow", guarantee: "structural" });
   expect(validate("implement.v1", { ...result, gates: { status: "GREEN" } }).ok).toBe(false);
@@ -1880,7 +1886,9 @@ test("factory-review.js: a missing args.loaded fails the stage closed — no rev
     args: { issue: 42, context: ".factory/out/context.json", loaded: null },
   });
 
-  expect(calls).toEqual([]);
+  // #288 dw3 — rewritten (plan done_when dw3) to the 'reader fails' case: args.loaded is missing, so the workflow now tries the reader, its answer has no loaded_json string (unparseable — a non-null answer is not re-spawned), and nothing else ever runs.
+  expect(calls.filter((c) => c.opts.label !== "load:reader")).toEqual([]);
+  expect(calls.map((c) => c.opts.label)).toEqual(["load:reader"]);
   expect(phases).toEqual(["Load"]);
   expect(result).toEqual({ issue: 42, error: "context payload missing", orchestration: "workflow", guarantee: "structural" });
   expect(validate("review.v1", result).ok).toBe(false);
@@ -2126,7 +2134,9 @@ test("a missing args.loaded fails every stage closed — no role runs, and the e
   for (const file of WORKFLOW_FILES) {
     const stub = async () => null;
     const { result, calls, phases } = await runWorkflow(file, { agent: stub, args: { issue: 5, context: ".factory/out/context.json" } });
-    expect(calls, file).toEqual([]);
+    // #288 dw3 — rewritten (plan done_when dw3) to the 'reader fails' case: args.loaded is missing, so the workflow now tries the reader, once() re-spawns it, and nothing else ever runs.
+    expect(calls.filter((c) => c.opts.label !== "load:reader"), file).toEqual([]);
+    expect(calls.map((c) => c.opts.label), file).toEqual(["load:reader", "load:reader"]);
     expect(phases, file).toEqual(["Load"]);
     expect(result, file).toEqual({ issue: 5, error: "context payload missing", orchestration: "workflow", guarantee: "structural" });
   }
@@ -3171,4 +3181,188 @@ test("test_244_review_handoff_feeds_run_stage_r1_line", async () => {
     args: { issue: 42, context: ".factory/out/context.json", loaded: reviewLoaderFix() },
   });
   expect(reviewR1Line244(unanimous.r1_verdicts, unanimous.verdicts)).toMatch(/ r2_flipped=0$/);
+});
+
+/*
+ * --- #288 — the workflow reads `.factory/out/loaded.json` itself when the dispatcher passed no `args.loaded` ---
+ * #239's third-round dispatch ended twice in one turn (runs 38194052457, 38194076065): the dispatcher called Workflow without
+ * reading the file, every workflow returned `context payload missing`, and the sweeper's retry could not help (same model, same
+ * mistake). Each test runs the shipped template through the vm harness. The reader is the one agent whose label is `load:reader`;
+ * every other agent call is a role/builder/reviewer spawn.
+ */
+import { dispatcherPayloadErrorOf as dispatcherPayloadErrorOf288 } from "../bin/run-stage.js";
+import { buildContext as buildContext288 } from "../lib/context.js";
+import { renderHandoff as renderHandoff288 } from "../lib/handoff.js";
+
+const isReader288 = (c) => c.opts.label === "load:reader";
+const roleCalls288 = (calls) => calls.filter((c) => !isReader288(c));
+const triageLoaded288 = (over = {}) => ({ issue: 42, stage: "triage", tier: "standard", roster: [{ name: "triage", agentType: "factory-triage", model: "sonnet" }], orchestration: "workflow", ...over });
+const reviewStub288 = async (prompt, opts) => {
+  const label = opts.label || "";
+  if (label.startsWith("R1:")) return approveV(label.slice(3));
+  if (label.startsWith("R2-light:")) return { missed: [] };
+  return null;
+};
+const implStub288 = async (prompt, opts) => {
+  if (opts.agentType === "factory-builder") return buildFix();
+  if (opts.agentType === "factory-verifier") return verdictFix();
+  return null;
+};
+const triageStub288 = async (prompt, opts) => (opts.agentType === "factory-triage"
+  ? { disposition: "ready", tier: "standard", reason: "done_when is concrete", summary: "add CSV export" } : null);
+/** One row per stage: the template, how its dispatcher names the issue, a payload, the role stub, and the role spawns it must make. */
+const STAGES288 = [
+  { stage: "triage", file: FACTORY_TRIAGE_WORKFLOW, args: { issue: 42, context: ".factory/out/context.json" }, payload: triageLoaded288, stub: triageStub288, roles: (calls) => calls.filter((c) => c.opts.agentType === "factory-triage").length },
+  { stage: "plan", file: FACTORY_PLAN_WORKFLOW, args: { issue: 42, context: ".factory/out/context.json" }, payload: planLoaderFix, stub: planStub(), roles: (calls) => labelled(calls, "R1:").length },
+  { stage: "implement", file: FACTORY_IMPLEMENT_WORKFLOW, args: { raw: "42 false", context: ".factory/out/context.json" }, payload: implLoaderFix, stub: implStub288, roles: (calls) => calls.filter((c) => c.opts.agentType === "factory-builder").length },
+  { stage: "review", file: FACTORY_REVIEW_WORKFLOW, args: { issue: 42 }, payload: reviewLoaderFix, stub: reviewStub288, roles: (calls) => labelled(calls, "R1:").length },
+];
+/** The reader answers with the file's text in its one string field; `replies` is consumed per call (the last one repeats). */
+const withReader288 = (stub, ...replies) => {
+  let n = 0;
+  return async (prompt, opts) => {
+    if (opts.label !== "load:reader") return stub(prompt, opts);
+    const r = replies[Math.min(n, replies.length - 1)];
+    n += 1;
+    return typeof r === "function" ? r() : r;
+  };
+};
+const pretty288 = (o) => JSON.stringify(o, null, 2);   // the shape context.js writes to disk
+
+test("test_workflow_self_loads_payload_when_args_loaded_is_missing", async () => {
+  for (const s of STAGES288) {
+    const payload = s.payload();
+    const text = pretty288(payload);
+
+    // baseline: the dispatcher passed the payload as an object — no reader, loaded_source "args"
+    const viaArgs = await runWorkflow(s.file, { agent: withReader288(s.stub, { loaded_json: text }), args: { ...s.args, loaded: payload } });
+    expect(viaArgs.calls.filter(isReader288), s.stage).toHaveLength(0);
+    expect(viaArgs.result.error, s.stage).toBeUndefined();
+    expect(viaArgs.result.loaded_source, s.stage).toBe("args");
+    expect(s.roles(viaArgs.calls), `${s.stage}: role agents ran on the args path`).toBeGreaterThan(0);
+
+    // #170 string form — still the args path
+    const viaString = await runWorkflow(s.file, { agent: withReader288(s.stub, { loaded_json: text }), args: { ...s.args, loaded: JSON.stringify(payload) } });
+    expect(viaString.calls.filter(isReader288), s.stage).toHaveLength(0);
+    expect(viaString.result.loaded_source, s.stage).toBe("args");
+    expect(roleCalls288(viaString.calls).map((c) => c.opts.label || c.opts.agentType), s.stage).toEqual(roleCalls288(viaArgs.calls).map((c) => c.opts.label || c.opts.agentType));
+
+    // no args.loaded: the reader is called once, the same role agents run, the artifact says where the payload came from
+    const self = await runWorkflow(s.file, { agent: withReader288(s.stub, { loaded_json: text }), args: { ...s.args } });
+    const readers = self.calls.filter(isReader288);
+    expect(readers, s.stage).toHaveLength(1);
+    expect(readers[0].prompt, s.stage).toContain(".factory/out/loaded.json");
+    const schema = readers[0].opts.schema;
+    expect(Object.keys(schema.properties), `${s.stage}: one opaque field`).toHaveLength(1);
+    expect(Object.values(schema.properties)[0].type, s.stage).toBe("string");
+    for (const name of Object.keys(payload)) expect(JSON.stringify(schema), `${s.stage}: reader schema names no payload key (${name})`).not.toContain(`"${name}"`);
+    expect(self.result.error, s.stage).toBeUndefined();
+    expect(self.result.issue, s.stage).toBe(42);
+    expect(self.result.loaded_source, s.stage).toBe("file");
+    expect(self.result.loaded_json_length, s.stage).toBe(JSON.stringify(JSON.parse(text)).length);
+    expect(roleCalls288(self.calls).map((c) => c.opts.label || c.opts.agentType), `${s.stage}: same role spawns as the args path`)
+      .toEqual(roleCalls288(viaArgs.calls).map((c) => c.opts.label || c.opts.agentType));
+
+    // a reader that answers null once is re-spawned by once(): two reader calls, then the stage proceeds
+    const retried = await runWorkflow(s.file, { agent: withReader288(s.stub, null, { loaded_json: text }), args: { ...s.args } });
+    expect(retried.calls.filter(isReader288), s.stage).toHaveLength(2);
+    expect(retried.result.loaded_source, s.stage).toBe("file");
+    expect(s.roles(retried.calls), s.stage).toBeGreaterThan(0);
+  }
+});
+
+test("test_workflow_self_loaded_payload_must_match_the_issue", async () => {
+  const MISSING = (issue) => ({ issue, error: "context payload missing", orchestration: "workflow", guarantee: "structural" });
+  for (const s of STAGES288) {
+    const run = (stub, args = s.args) => runWorkflow(s.file, { agent: stub, args: { ...args } });
+    const asOut = (result) => ({ out: { is_error: false, result: JSON.stringify(result) } });
+
+    // (a) the reader fails: null twice, unparseable text, throws twice — today's exact object, no role agent
+    for (const [why, stub] of [
+      ["null", withReader288(s.stub, null)],
+      ["unparseable", withReader288(s.stub, { loaded_json: "{\"issue\": 42, \"stage\":" })],
+      ["throws", withReader288(s.stub, () => { throw new Error("reader died"); })],
+    ]) {
+      const { result, calls } = await run(stub);
+      expect(result, `${s.stage} ${why}`).toEqual(MISSING(42));
+      expect(roleCalls288(calls), `${s.stage} ${why}`).toEqual([]);
+      expect(dispatcherPayloadErrorOf288(asOut(result)), `${s.stage} ${why}`).toBe("context payload missing");
+    }
+
+    // (b) the file belongs to another issue
+    const other = await run(withReader288(s.stub, { loaded_json: pretty288(s.payload({ issue: 99 })) }));
+    expect(other.result.error, s.stage).toMatch(/^context issue mismatch/);
+    expect(other.result.issue, s.stage).toBe(42);
+    expect(roleCalls288(other.calls), s.stage).toEqual([]);
+    expect(dispatcherPayloadErrorOf288(asOut(other.result)), s.stage).toBe(other.result.error);
+
+    // (c) the file is this issue's but another stage's (a stale loaded.json from the previous stage)
+    const wrongStage = s.stage === "review" ? "implement" : "review";
+    const stale = await run(withReader288(s.stub, { loaded_json: pretty288(s.payload({ stage: wrongStage })) }));
+    expect(stale.result.error, s.stage).toMatch(/^context issue mismatch/);
+    expect(roleCalls288(stale.calls), s.stage).toEqual([]);
+    expect(dispatcherPayloadErrorOf288(asOut(stale.result)), s.stage).toBe(stale.result.error);
+
+    // (d) neither raw nor issue: the expected issue is never taken from the file it is checking — fail closed, nothing spawned
+    const blind = await run(withReader288(s.stub, { loaded_json: pretty288(s.payload()) }), { context: ".factory/out/context.json" });
+    expect(blind.result.error, s.stage).toBe("context payload missing");
+    expect(blind.result.issue, s.stage).not.toBe(42);
+    expect(blind.calls, s.stage).toEqual([]);
+    expect(dispatcherPayloadErrorOf288(asOut(blind.result)), s.stage).toBe("context payload missing");
+  }
+});
+
+/** A real repo root whose CHARTER/roles give every stage a roster; implement's history is a rework round with must_fix + a dispute. */
+async function realLoaded288(stage) {
+  const r = mkdtempSync(join(tmpdir(), `wf288${stage}-`));
+  mkdirSync238(join(r, ".factory"), { recursive: true }); mkdirSync238(join(r, "docs/factory"), { recursive: true });
+  writeFileSync(join(r, ".factory/harness.toml"), `schema = 1\n[harness]\nmaturity = "M0"\n[factory]\norchestration = "workflow"\n[commands]\nunit = "npm test"\n[gates]\nrequired = ["unit"]\nfast = ["unit"]\nfull = ["unit"]\ndeep = ["unit"]\n`);
+  writeFileSync(join(r, "docs/factory/CHARTER.md"), `---\nschema: factory.charter.v1\nstatus: ready\ntier_default: standard\nroster:\n  standard: [correctness, qa]\nplan_roles:\n  default: [architect, skeptic]\nplan_rounds: { docs: 2, default: 3 }\nplan:\n  mode: debate\n---\n`);
+  writeFileSync(join(r, ".factory/roles.toml"), `[triage]\nagent = ".claude/agents/factory-triage.md"\nmodel = "sonnet"\n[review.correctness]\nagent = ".claude/agents/reviewer-correctness.md"\nmodel = "opus"\n[review.qa]\nagent = ".claude/agents/reviewer-qa.md"\nmodel = "sonnet"\n[plan.architect]\nagent = ".claude/agents/plan-architect.md"\nmodel = "opus"\n[plan.skeptic]\nagent = ".claude/agents/plan-skeptic.md"\nmodel = "opus"\n[plan.synthesizer]\nagent = ".claude/agents/plan-synthesizer.md"\nmodel = "opus"\n[implement.builder]\nagent = ".claude/agents/factory-builder.md"\nmodel = "opus"\n[implement.verifier]\nagent = ".claude/agents/factory-verifier.md"\nmodel = "opus"\ncold_read = true\n`);
+  const issue = 42, pr = 41, H = "d".repeat(40);
+  const mustFix = [{ id: "cf1", where: "src/a.js:1", claim: "CLAIM-ONE-288", evidence: "EV-ONE" }, { id: "cf2", where: "src/b.js:2", claim: "CLAIM-TWO-288", evidence: "EV-TWO" }];
+  const doneWhen = [{ id: "dw1", text: "t", level: "unit", check: { kind: "test", ref: "test_42_a" }, covers: ["cf1", "cf2"] }];
+  const comments = [
+    { body: renderHandoff288({ stage: "plan", issue, summary: "s", data: { schema: "factory.plan.v1", issue, done_when: doneWhen } }), author: "factory-bot", createdAt: "2026-10-01T00:00:00Z" },
+    { body: renderHandoff288({ stage: "implement", issue, summary: "s", data: { schema: "factory.implement.v1", issue, pr, head_sha: H } }), author: "factory-bot", createdAt: "2026-10-01T00:00:01Z" },
+    { body: renderHandoff288({ stage: "review", issue, summary: "s", data: { schema: "factory.review.v1", issue, pr, head_sha: H, round: 1, orchestration: "workflow", decision: "rework", verdicts: [{ role: "correctness", verdict: "reject", confidence: "high", must_fix: mustFix, should_fix: [], verified: [] }] } }), author: "factory-bot", createdAt: "2026-10-01T00:00:02Z" },
+  ];
+  const response = { schema: "factory.rework-response.v1", issue, responses: [{ id: "cf1", status: "fixed", commit: "abc" }, { id: "cf2", status: "disputed", reason: "DISPUTE-REASON-288" }] };
+  const gh = {
+    issue: async () => ({ number: issue, title: "T", body: "", labels: ["factory:in-progress"] }),
+    comments: async (n) => (n === pr ? [{ id: 9, body: "```json\n" + JSON.stringify(response) + "\n```", createdAt: "2026-10-02T00:00:00Z" }] : comments.slice()),
+  };
+  await buildContext288({ root: r, gh, issue, stage, setupDirty: stage === "implement" ? { entries: [{ path: "src/generated-288.txt", code: " M" }] } : null });
+  return readFileSync(join(r, ".factory/out/loaded.json"), "utf8");
+}
+
+test("test_288_self_loaded_payload_is_equivalent_to_dispatcher_payload", async () => {
+  for (const s of STAGES288) {
+    const text = await realLoaded288(s.stage);
+    const loaded = JSON.parse(text);
+    expect(loaded.stage, s.stage).toBe(s.stage);
+    // the fixture is a rework round: the producer really put must_fix and disputed (and, for implement, setup_dirty) into the file
+    expect(loaded.must_fix.length, s.stage).toBeGreaterThan(0);
+    expect(loaded.disputed.length, s.stage).toBeGreaterThan(0);
+    if (s.stage === "implement") expect(loaded.setup_dirty, s.stage).toEqual(["src/generated-288.txt"]);
+
+    const viaArgs = await runWorkflow(s.file, { agent: withReader288(s.stub, { loaded_json: text }), args: { ...s.args, loaded } });
+    const viaFile = await runWorkflow(s.file, { agent: withReader288(s.stub, { loaded_json: text }), args: { ...s.args } });
+    expect(viaFile.calls.filter(isReader288), s.stage).toHaveLength(1);
+    expect(viaFile.result.loaded_source, s.stage).toBe("file");
+    const downstream = (calls) => roleCalls288(calls).map((c) => ({ prompt: c.prompt, opts: c.opts }));
+    expect(downstream(viaArgs.calls).length, s.stage).toBeGreaterThan(0);
+    expect(downstream(viaFile.calls), `${s.stage}: every non-reader agent call is identical across the two paths`).toEqual(downstream(viaArgs.calls));
+
+    if (s.stage === "implement") {
+      const builder = viaFile.calls.find((c) => c.opts.agentType === "factory-builder");
+      for (const m of loaded.must_fix) expect(builder.prompt, m.id).toContain(m.id);
+      for (const m of loaded.must_fix) expect(builder.prompt, m.claim).toContain(m.claim);
+      for (const d of loaded.disputed) expect(builder.prompt, d.reason).toContain(d.reason);
+      for (const p of loaded.setup_dirty) expect(builder.prompt, p).toContain(p);
+    }
+    if (s.stage === "plan") {
+      expect(labelled(viaFile.calls, "R1:").map((c) => roleOf(c.opts)).sort()).toEqual(loaded.roster.map((x) => x.name).sort());
+    }
+  }
 });
