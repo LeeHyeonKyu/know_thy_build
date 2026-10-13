@@ -2082,3 +2082,81 @@ test("test_227_a_transient_gh_failure_or_merged_pr_never_triggers_a_rebuild — 
   expect(t.lines.some((l) => /not visible/.test(l))).toBe(false);
   expect(t.deps.transition.mock.calls.map((c) => c[0].to)).not.toContain("factory:planned");
 });
+
+// ── #293 — after a re-land fast-path plan, implement gets the #174 diff-only brief pinned to the approved head ──────────────
+import { relandFastPathOf as relandFastPathOf293 } from "../lib/context.js";
+import { reviewEvidenceLine as reviewEvidenceLine293, appendRunRecord as appendRunRecord293, runRecordPath as runRecordPath293 } from "../lib/run-record.js";
+import { K_RESTART_SCOPE as K_RESTART_SCOPE293 } from "../lib/retro/issue-comments.js";
+
+const S293c = "4f0c2a9e1b7d3c5a8e6f0b2d4c6a8e0f1a3b5c7d";
+const BODY293c = "## What\n재착륙: 브랜치 `claude/fq-271`의 head `" + S293c + "`를 다시 얹는다.\n\n## done_when\n- [ ] `test_reland_alpha_returns_two` — the alpha path returns 2\n";
+
+/** The fast-path plan handoff as the runner's own producer builds it, from facts written by the real record/heartbeat writers. */
+function fastPlan293() {
+  const r = mkdtempSync(join(tmpdir(), "ctx293-"));
+  appendRunRecord293({ root: r, issue: 271, stage: "review", runnerId: "gha-777", now: "2026-10-11T02:03:00Z",
+    lines: [reviewEvidenceLine293({ runId: "777", runnerId: "gha-777", headSha: S293c, round: 1, decision: "approved", verdicts: [{ role: "correctness", verdict: "approve" }] })] });
+  const facts = {
+    records: { ok: true, text: readFileSync(runRecordPath293({ root: r, issue: 271 }), "utf8") },
+    heartbeat: { ok: true, runId: "777", runnerId: "gha-777" },
+    logins: { ok: true, logins: ["factory-bot"] },
+    statuses: { ok: true, list: [{ context: "factory/review", state: "success", creatorLogin: "factory-bot" }, { context: "factory/gates", state: "success", creatorLogin: "factory-bot" }] },
+    branchHead: { ok: true, sha: S293c },
+  };
+  const d = relandFastPathOf293({ issue: 293, body: BODY293c, facts, maxDoneWhen: 6, tier: "load-bearing", orchestration: "workflow" });
+  expect(d.ok).toBe(true);
+  expect(d.handoff.tier).toBe("load-bearing");                            // the effective tier it was given, never lowered
+  return d;
+}
+function gh293(planData) {
+  const triage = renderHandoff({ stage: "triage", issue: 293, summary: "s", data: { schema: "factory.triage.v1", issue: 293, disposition: "ready", tier: "load-bearing" } });
+  const plan = renderHandoff({ stage: "plan", issue: 293, summary: "s", data: planData });
+  return {
+    issue: vi.fn(async () => ({ number: 293, title: "T", body: BODY293c, labels: ["factory:in-progress"] })),
+    comments: vi.fn(async () => [{ id: 1, body: triage, createdAt: "2026-10-12T00:00:00Z" }, { id: 2, body: plan, createdAt: "2026-10-12T01:00:00Z" }]),
+  };
+}
+
+test("test_293_reland_fast_path_builder_brief_is_diff_only (test_reland_fast_path_builder_brief_is_diff_only)", async () => {
+  const d = fastPlan293();
+  const withR = root233(), withoutR = root233();
+  const ctx = await buildContext({ root: withR, gh: gh293(d.handoff), issue: 293, stage: "implement" });
+  const { reland: _m, ...plain } = d.handoff;
+  await buildContext({ root: withoutR, gh: gh293(plain), issue: 293, stage: "implement" });
+  const loaded = JSON.parse(readFileSync(join(withR, ".factory/out/loaded.json"), "utf8"));
+  const baseline = JSON.parse(readFileSync(join(withoutR, ".factory/out/loaded.json"), "utf8"));
+  // the existing approved_head key pinned to S, its branch, and the re-land flag — no K-restart brief reused
+  expect(loaded.reland).toBe(true);
+  expect(loaded.approved_head).toBe(S293c);
+  expect(loaded.approved_branch).toBe("claude/fq-271");
+  expect(loaded).not.toHaveProperty("k_restart_brief");
+  expect(loaded).not.toHaveProperty("conflict_only");
+  // the #174 diff-only form: the diff of that branch at S, the listed findings only (none — the head was approved), nothing else
+  expect(loaded.reland_brief).toEqual({ source_issue: 271, branch: "claude/fq-271", head: S293c, findings: [], scope: expect.any(String) });
+  expect(loaded.reland_brief.scope).toContain(S293c);
+  expect(loaded.reland_brief.scope).toContain("claude/fq-271");
+  expect(loaded.reland_brief.scope).toContain(K_RESTART_SCOPE293);
+  expect(loaded.reland_brief.scope).toMatch(/diff-only/);
+  // nothing else moved: the tier stays the effective tier, limits (K) and must_fix are today's
+  const { reland: _r, approved_head: _a, approved_branch: _b, reland_brief: _c, ...rest } = loaded;
+  expect(rest).toEqual(baseline);
+  expect(loaded.tier).toBe(ctx.tier_effective);
+  expect(loaded.tier).toBe("load-bearing");
+  // a plan handoff that SAYS a lower tier does not lower loaded.tier (the tier comes from triage + diff, not from the plan)
+  const lowered = root233();
+  await buildContext({ root: lowered, gh: gh293({ ...d.handoff, tier: "docs" }), issue: 293, stage: "implement" });
+  expect(JSON.parse(readFileSync(join(lowered, ".factory/out/loaded.json"), "utf8")).tier).toBe("load-bearing");
+  // the file the builder is told to read first carries the brief and the plan's diff-only non_goal, both naming S
+  const cj = JSON.parse(readFileSync(join(withR, ".factory/out/context.json"), "utf8"));
+  expect(cj.loaded.reland_brief.head).toBe(S293c);
+  expect(cj.handoffs.plan.non_goals.join("\n")).toContain(`claude/fq-271 at the approved head ${S293c}`);
+  expect(cj.handoffs.plan.non_goals.join("\n")).toMatch(/make no other change/);
+  // a hand-written plan handoff whose marker is malformed carries no re-land keys
+  const forged = root233();
+  await buildContext({ root: forged, gh: gh293({ ...d.handoff, reland: { ...d.handoff.reland, head_sha: "4f0c2a9" } }), issue: 293, stage: "implement" });
+  expect(JSON.parse(readFileSync(join(forged, ".factory/out/loaded.json"), "utf8"))).not.toHaveProperty("reland");
+  // review on B is B's own: B's full load-bearing roster (a fixture CHARTER whose load-bearing roster differs from standard's) (the record side is pinned in run-stage.test.js, same id)
+  const review = await buildContext({ root: root233(), gh: gh293(d.handoff), issue: 293, stage: "review" });
+  expect(review.tier_effective).toBe("load-bearing");
+  expect(review.roster).toEqual(LB_ROSTER);
+});

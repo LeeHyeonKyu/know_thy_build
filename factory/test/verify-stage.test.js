@@ -1344,3 +1344,59 @@ test("test_287_impact_path_spelling_does_not_hide_a_judge_path", () => {
   // 게시되는 impact_paths는 에이전트가 쓴 그대로다 — 정규화는 판정용일 뿐 기록을 고쳐 쓰지 않는다
   expect(triageOn287(["./factory/lib/context.js"]).data.impact_paths).toEqual(["./factory/lib/context.js"]);
 });
+
+// ── #293 — the re-land shape does not loosen the normal plan contract ───────────────────────────────────────────────────────
+import { verifyRelandPlan as verifyRelandPlan293 } from "../lib/verify-stage.js";
+import { validate as validate293 } from "../lib/schemas.js";
+import { requirementFor as requirementFor293 } from "../lib/requirements.js";
+import { renderHandoff as renderHandoff293 } from "../lib/handoff.js";
+
+const S293v = "4f0c2a9e1b7d3c5a8e6f0b2d4c6a8e0f1a3b5c7d";
+const RELAND293 = { source_issue: 271, branch: "claude/fq-271", head_sha: S293v, run_id: "777", approved_at: "2026-10-11" };
+const BODY293v = "## What\n브랜치 `claude/fq-271`의 head `" + S293v + "`\n\n## done_when\n- [ ] `test_reland_alpha_returns_two` — alpha returns 2\n";
+const DW293v = [{ id: "test_reland_alpha_returns_two", text: "alpha returns 2", level: "unit", check: { kind: "test", ref: "test_reland_alpha_returns_two" }, rubric: "alpha returns 2" }];
+const plan293 = (over = {}) => ({ schema: "factory.plan.v1", issue: 293, tier: "standard", roles: ["architect", "skeptic"], rounds: 2, orchestration: "workflow", done_when: DW293v, files_expected: [], dissent_log: [], non_goals: [], open_risks: [], ...over });
+const planned293 = (data, ctx = {}) => requirementFor293("factory:planned")({ issue: 293, comments: [{ body: renderHandoff293({ stage: "plan", issue: 293, data }), createdAt: "2026-10-12T00:00:00Z" }], ...ctx });
+
+test("test_293_reland_shape_does_not_loosen_the_normal_plan_contract", () => {
+  // schema: roles < 2 is still refused for every handoff that carries no well-formed re-land marker
+  expect(validate293("plan.v1", plan293({ roles: ["architect"] })).errors).toContain("roles must have ≥2 entries");
+  expect(validate293("plan.v1", plan293({ roles: [], reland: { ...RELAND293, head_sha: "4f0c2a9" } })).errors).toEqual(["reland.head_sha must be a 40-hex sha", "roles must have ≥2 entries"]);
+  expect(validate293("plan.v1", plan293({ roles: [], reland: "yes" })).errors).toEqual(["reland must be object", "roles must have ≥2 entries"]);
+  expect(validate293("plan.v1", plan293({ roles: [], rounds: 0, reland: RELAND293 })).ok).toBe(true);
+
+  // factory:planned, the plan stage's own transition (roster present): today's rejections all still fire
+  const roster = { roster: ["architect", "skeptic"], expectedRounds: 2 };
+  expect(planned293(plan293(), roster).ok).toBe(true);
+  expect(planned293(plan293({ roles: ["architect"] }), roster).ok).toBe(false);
+  expect(planned293(plan293({ roles: ["architect", "operator"] }), roster).reason).toMatch(/plan roles \[architect,operator\] != roster \[architect,skeptic\]/);
+  expect(planned293(plan293({ rounds: 3 }), roster).reason).toMatch(/plan rounds 3 != expected 2/);
+  // a re-land marker the runner did not bind in THIS transition is refused, however well-formed
+  const fast = plan293({ roles: [], rounds: 0, reland: RELAND293 });
+  expect(planned293(fast, roster).ok).toBe(false);
+  expect(planned293(fast, roster).reason).toMatch(/re-land/);
+  expect(planned293(fast, { ...roster, reland: { ...RELAND293, head_sha: "1".repeat(40) } }).ok).toBe(false);
+  expect(planned293(fast, { ...roster, reland: { ...RELAND293, source_issue: 254 } }).ok).toBe(false);
+  // only the runner's own binding (same source, branch, head, run) lets roles=[] / rounds=0 through
+  expect(planned293(fast, { ...roster, reland: RELAND293 }).ok).toBe(true);
+
+  // verify-stage (the debate path): a handoff claiming the fast path is rejected; a plain one is checked as before
+  const out = (o) => ({ is_error: false, result: "```json\n" + JSON.stringify(o) + "\n```" });
+  const base = { stage: "plan", agentsLog: { completed: ["plan-architect", "plan-skeptic"] }, roster: ["architect", "skeptic"], rolePrefix: "plan-", expectedRounds: 2, orchestration: "workflow", gates: null, planLimits: { max_done_when: 6 }, issueBody: BODY293v };
+  expect(verifyStage({ ...base, out: out(plan293()) }).ok).toBe(true);
+  const claimed = verifyStage({ ...base, out: out(plan293({ reland: RELAND293 })) });
+  expect(claimed.ok).toBe(false);
+  expect(claimed.reasons).toContain("roster role not completed: re-land fast path claimed without the runner's fast-path record line for this run");
+  expect(verifyStage({ ...base, out: out(plan293({ roles: ["architect"] })) }).ok).toBe(false);
+
+  // the fast path's own check: a contract that fails validatePlanHandoff is rejected, not exempted
+  const good = verifyRelandPlan293({ data: fast, binding: RELAND293, issueBody: BODY293v, maxDoneWhen: 6 });
+  expect(good).toEqual({ ok: true, reasons: [] });
+  const noRubric = verifyRelandPlan293({ data: { ...fast, done_when: [{ ...DW293v[0], rubric: "" }] }, binding: RELAND293, issueBody: BODY293v, maxDoneWhen: 6 });
+  expect(noRubric.ok).toBe(false);
+  expect(noRubric.reasons.join("; ")).toMatch(/acceptance contract incomplete: test_reland_alpha_returns_two/);
+  const uncovered = verifyRelandPlan293({ data: { ...fast, done_when: [{ ...DW293v[0], id: "test_other", check: { kind: "test", ref: "test_other" } }] }, binding: RELAND293, issueBody: BODY293v, maxDoneWhen: 6 });
+  expect(uncovered.ok).toBe(false);
+  expect(uncovered.reasons.join("; ")).toMatch(/issue done_when not covered by the plan: test_reland_alpha_returns_two/);
+  expect(verifyRelandPlan293({ data: fast, binding: null, issueBody: BODY293v, maxDoneWhen: 6 }).ok).toBe(false);
+});

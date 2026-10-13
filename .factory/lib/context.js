@@ -5,8 +5,11 @@ import { latestHandoff } from "./handoff.js";
 import { tierFloor, maxTier, normalizeTier } from "./gates.js";
 import { changedFiles } from "./changed-files.js";
 import { buildHouseRules } from "./house-rules.js";
-import { commentsSinceRequeue, latestSelfGateFindings, kRestartState, TRANSITION_TO, countedTransitionIndices, mergeConflictRework, conflictExemptionNote, conflictRoundsUsed } from "./retro/issue-comments.js";
+import { commentsSinceRequeue, latestSelfGateFindings, kRestartState, TRANSITION_TO, countedTransitionIndices, mergeConflictRework, conflictExemptionNote, conflictRoundsUsed, K_RESTART_SCOPE } from "./retro/issue-comments.js";
 import { CONFLICT_ROUND_EXCLUDED_RUNS } from "./budget.js";
+import { issueDoneWhenItems as doneWhenItemsOf, verifyRelandPlan } from "./verify-stage.js";
+import { parseReviewEvidenceAll } from "./run-record.js";
+import { verifyFactoryStatuses } from "./merge-stage.js";
 
 /**
  * #232 (E-7) — the issue body's done_when checklist as `[{id, text}]`. Re-exported here because this module is where the
@@ -559,6 +562,142 @@ export function conflictOnlyOf({ comments, mergeConflicts, review }) {
 }
 
 /**
+ * ── #293 — re-land fast path: an issue that names an approved branch head skips the plan debate ──────────────────────────────
+ *
+ * A re-land is transport, not design (#249·#254·#260·#271·#289·#212: every debate concluded "already approved — only a base
+ * merge"). When issue B's `## What` names branch `claude/fq-<A>` at a full 40-hex head S, the plan stage asks the RUNNER's facts
+ * only — never an agent comment or a handoff body:
+ *   1. source issue A's run record on `factory/records` holds a `review-evidence:` line written by the run A's review heartbeat
+ *      names (the merge stage's own binding: run-stage `reviewRunIdOf` + the run-id filter of `parseReviewEvidence`), with head_sha == S
+ *      and decision=approved;
+ *   2. the per-sha `factory/gates` (and `factory/review`) commit status for S is success AND was posted by a factory login
+ *      (`verifyFactoryStatuses`, the merge stage's judge — a gates.json or a stranger's status is not GREEN);
+ *   3. the PR head — the head of branch `claude/fq-<A>` — is still S;
+ *   4. B's own done_when items, turned into the contract verbatim (id → check.ref, text → rubric, level unit), pass the unchanged
+ *      `validatePlanHandoff` (E-7 coverage included) under `max_done_when`.
+ * Any condition false, or any input unreadable, is `{ ok: false, reason }` → today's debate, with the reason on a record line.
+ * Only decision=approved opens the path: a single reject whose must_fix is quoted in B's body is NOT judged (the runner's
+ * evidence line carries `role=verdict` only — must_fix lives in agent text), so it goes to the debate (#293 dw2).
+ */
+const RELAND_SHA = /^[0-9a-f]{40}$/;
+const RELAND_BRANCH = /^claude\/fq-(\d+)$/;
+export const RELAND_FAST_LINE_PREFIX = "plan: re-land fast path — ";
+export const relandRefusedLine = (reason) => `plan: re-land fast path not taken — ${reason} (full plan debate)`;
+
+/** The `## What` section of an issue body (up to the next `#`/`##` heading), or "" when there is none. */
+function whatSection(body) {
+  const lines = String(body ?? "").split(/\r?\n/);
+  const start = lines.findIndex((l) => /^#{1,3}\s*What\b/i.test(l));
+  if (start < 0) return "";
+  const rest = lines.slice(start + 1);
+  const end = rest.findIndex((l) => /^#{1,3}\s/.test(l));
+  return (end < 0 ? rest : rest.slice(0, end)).join("\n");
+}
+
+/**
+ * Does B's body name a re-land? `null` when `## What` names no `claude/fq-<n>` branch (not a re-land — no record line at all).
+ * `{ ok: false, reason }` when it names one but not exactly one branch and one full 40-hex head (a short sha cannot be matched to
+ * a review-evidence line without guessing). Otherwise `{ ok: true, source, branch, sha }`.
+ */
+export function relandClaimOf(body, { issue = null } = {}) {
+  const what = whatSection(body);
+  const ticks = [...what.matchAll(/`([^`\n]+)`/g)].map((m) => m[1].trim());
+  const branches = [...new Set(ticks.filter((t) => RELAND_BRANCH.test(t)))];
+  if (!branches.length) return null;
+  if (branches.length > 1) return { ok: false, reason: `## What names ${branches.length} branches (${branches.join(", ")}) — a re-land names exactly one` };
+  const shas = [...new Set(ticks.filter((t) => RELAND_SHA.test(t)))];
+  if (shas.length !== 1) return { ok: false, reason: `## What names branch ${branches[0]} but names ${shas.length ? `${shas.length} full head shas` : "no full 40-hex head sha"} — a re-land names exactly one full head sha in backticks` };
+  const source = Number(RELAND_BRANCH.exec(branches[0])[1]);
+  if (issue != null && source === Number(issue)) return { ok: false, reason: `## What names this issue's own branch ${branches[0]} — a re-land carries another issue's approved head` };
+  return { ok: true, source, branch: branches[0], sha: shas[0] };
+}
+
+const s7 = (sha) => String(sha ?? "").slice(0, 7);
+/**
+ * The diff-only rule, one string for both places the builder reads it in `context.json`: the fast-path plan's `non_goals`
+ * (`handoffs.plan`) and `loaded.reland_brief.scope`. The runner holds it, too: on an implement round with `loaded.reland`, the
+ * self-gate's #200 scope check is fed the paths of the approved diff (run-stage `relandScopeInput`), so a path outside it is a finding.
+ */
+export const relandScopeRule = (branch, sha) =>
+  `Any change other than bringing the diff of ${branch} at the approved head ${sha} onto this branch: fix only the listed findings, make no other change (#293)`;
+
+/**
+ * Judges the facts `run-stage`'s `relandFacts` dep read — `records {text}`, `heartbeat {runId}`, `logins {logins}`, `statuses {list}`,
+ * `branchHead {sha}`, each `{ ok: true, … }` or `{ ok: false, reason }`; a missing one is unreadable.
+ * → `{ ok: false, reason }` | `{ ok: true, handoff, binding, line }` — `handoff` is the plan.v1 the runner posts, `binding` the
+ * marker it carries (and the transition binds), `line` the one fast-path record line.
+ */
+export function relandFastPathOf({ issue, body, claim = relandClaimOf(body, { issue }), facts, maxDoneWhen = 6, tier = "standard", orchestration = "workflow" }) {
+  if (!claim) return { ok: false, reason: "## What names no re-land branch" };
+  if (!claim.ok) return claim;
+  const { source: A, branch, sha: S } = claim;
+  const no = (reason) => ({ ok: false, reason });
+  const f = facts && typeof facts === "object" ? facts : {};
+  const unread = (x, what) => (x?.ok === true ? null : `${what} — ${x?.reason || "not read"}`);
+  let r;
+  if ((r = unread(f.records, "the factory/records branch could not be read"))) return no(r);
+  if (typeof f.records.text !== "string" || !f.records.text) return no(`source #${A} has no run record on factory/records`);
+  // which run reviewed A — its review heartbeat, read by run-stage's `reviewRunIdOf` (the merge stage's own binding)
+  const hb = f.heartbeat?.ok === true && typeof f.heartbeat.runId === "string" && f.heartbeat.runId ? f.heartbeat : null;
+  if (!hb) return no(f.heartbeat?.reason || `source #${A}'s review heartbeat could not be read`);
+  const all = parseReviewEvidenceAll(f.records.text);
+  const bound = all.filter((e) => e.runId === hb.runId);
+  if (!bound.length) {
+    if (all.some((e) => e.headSha === S)) return no(`the review-evidence line for head ${s7(S)} is not bound to source #${A}'s review heartbeat run ${hb.runId}`);
+    // a line for S that exists only in ANOTHER issue's record (the dep lists where) is named as such — it never counts for A
+    const elsewhere = (Array.isArray(f.records.elsewhere) ? f.records.elsewhere : []).filter((n) => String(n) !== String(A));
+    if (elsewhere.length) return no(`a review-evidence line for head ${s7(S)} sits in ${elsewhere.map((n) => `#${n}`).join(", ")}'s run record, not source #${A}'s — another issue's line does not count`);
+    return no(`head ${s7(S)} is absent from source #${A}'s run record (no review-evidence line of run ${hb.runId})`);
+  }
+  const shape = (e) => JSON.stringify([e.stage, e.runnerId, e.headSha, e.round, e.decision, e.verdicts, e.qaManifest, e.qaClaims]);
+  if (new Set(bound.map(shape)).size > 1) return no(`two review-evidence lines claim run ${hb.runId} with different content in source #${A}'s record — undecidable`);
+  const ev = bound[bound.length - 1];
+  if (ev.headSha !== S) return no(`source #${A}'s heartbeat-bound review (run ${hb.runId}) reviewed head ${s7(ev.headSha)}, not ${s7(S)}`);
+  if (ev.decision !== "approved") return no(`source #${A}'s review of ${s7(S)} (run ${hb.runId}) is decision=${ev.decision}, not approved — only an approval opens the fast path`);
+  if ((r = unread(f.logins, "the factory's own account could not be resolved"))) return no(r);
+  if ((r = unread(f.statuses, `commit statuses for ${s7(S)} could not be read`))) return no(r);
+  const posted = verifyFactoryStatuses({ sha: S, statuses: f.statuses.list, logins: f.logins.logins });
+  if (!posted.ok) return no(posted.reason);
+  if (f.branchHead?.ok !== true) return no(`the PR head (branch ${branch}) could not be read — ${f.branchHead?.reason || "not read"}`);
+  if (f.branchHead.sha !== S) return no(`the PR head (branch ${branch}) is ${s7(f.branchHead.sha)}, not ${s7(S)}`);
+  const items = doneWhenItemsOf(body);
+  if (!items.length) return no(`issue #${issue} has no done_when items — there is no contract to carry`);
+  const approvedAt = /^\d{4}-\d{2}-\d{2}/.exec(String(ev.at ?? ""))?.[0] ?? "unknown-date";
+  const binding = { source_issue: A, branch, head_sha: S, run_id: hb.runId };
+  const handoff = {
+    schema: "factory.plan.v1", issue: Number(issue), tier, roles: [], rounds: 0, orchestration,
+    summary: `Re-land of #${A} at ${s7(S)} (approved by review run ${hb.runId} on ${approvedAt}): the issue's own done_when are the contract; the plan debate was skipped by the runner (#293).`,
+    done_when: items.map((it) => ({ id: it.id, text: it.text, level: "unit", check: { kind: "test", ref: it.id }, rubric: it.text })),
+    files_expected: [], dissent_log: [], non_goals: [relandScopeRule(branch, S)], open_risks: [],
+    reland: { ...binding, approved_at: approvedAt },
+  };
+  const v = verifyRelandPlan({ data: handoff, binding, issueBody: body, maxDoneWhen });
+  if (!v.ok) return no(`issue #${issue}'s done_when do not make a valid plan contract: ${v.reasons.join("; ")}`);
+  return { ok: true, handoff, binding, line: `${RELAND_FAST_LINE_PREFIX}source #${A} run ${hb.runId} head ${s7(S)} approved ${approvedAt}, debate skipped` };
+}
+
+/**
+ * #293 dw5 — the implement side: a plan handoff carrying a well-formed `reland` marker gives the builder the #174 diff-only brief
+ * pinned to the approved head, through the existing `approved_head` key. It never lowers the tier, never touches K (no rework
+ * transition, no `k_restart_brief`), and is not review evidence for B — B's review needs B's roster and B's own record line.
+ * A forged marker can only narrow the builder's brief; the review that follows is unchanged.
+ * Who reads it: the builder, in `context.json` (`loaded.reland_brief`, next to the plan's `non_goals` rule — the workflow prompt in
+ * `.claude/workflows/**` is not changed by #293), and the runner, whose self-gate bounds the round's paths by the approved diff
+ * (run-stage `relandScopeInput`). The `loaded.json` keys alone change nothing the workflow script does.
+ */
+export function relandLoadedOf(plan) {
+  const m = plan?.reland;
+  if (!isPlainObject(m) || typeof m.head_sha !== "string" || !RELAND_SHA.test(m.head_sha) || typeof m.branch !== "string" || !RELAND_BRANCH.test(m.branch) || !Number.isInteger(m.source_issue)) return null;
+  const scope = `diff-only re-land — out of scope: ${relandScopeRule(m.branch, m.head_sha)} — ${K_RESTART_SCOPE}`;
+  return {
+    reland: true,
+    approved_head: m.head_sha,
+    approved_branch: m.branch,
+    reland_brief: { source_issue: m.source_issue, branch: m.branch, head: m.head_sha, findings: [], scope },
+  };
+}
+
+/**
  * 로더가 돌려주던 것과 **같은 모양**의 객체를, LLM 없이. triage의 로스터는 context.json에서 비어 있으므로
  * (단일 명명 역할이지 토론 로스터가 아니다) 로더의 특례와 똑같이 `[{name:'triage', …}]`로 채운다.
  */
@@ -656,5 +795,8 @@ async function loadedFor({ ctx, roleBlock, gh, comments = [] }) {
     ...(Array.isArray(ctx.merge_conflicts) && ctx.merge_conflicts.length ? { merge_conflicts: ctx.merge_conflicts } : {}),
     // #212: an approved PR's base conflict, resolution-only round (`conflictOnlyOf`). Absent unless all three runner facts hold.
     ...(conflictOnly ? { conflict_only: true, approved_head: conflictOnly.approved_head } : {}),
+    // #293: a re-land fast-path plan — the diff-only brief pinned to the approved head (`relandLoadedOf`). A conflict-only round
+    // owns `approved_head` (its approved head is the review's), so the two never mix. Absent without the plan's `reland` marker.
+    ...(!conflictOnly && ctx.stage === "implement" ? (relandLoadedOf(ctx.handoffs?.plan) ?? {}) : {}),
   };
 }
